@@ -122,6 +122,10 @@ engine sees and watches for changes for 30 seconds. It changes nothing.
 - **Notifications** appear inside the app window, not as Windows toast
   notifications.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## Troubleshooting
 
 | Symptom | What to do |
