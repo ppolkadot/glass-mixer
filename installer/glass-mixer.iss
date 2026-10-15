@@ -1,0 +1,67 @@
+; Inno Setup script for Glass Mixer.
+; Per-user install: no administrator rights are required.
+; Built by scripts\package.ps1 (which passes /DAppVersion=...).
+
+#ifndef AppVersion
+  #define AppVersion "0.1.0"
+#endif
+
+[Setup]
+AppId={{B6C1A2E4-6F5D-4C1B-9B7E-3A1D2F7C9E10}
+AppName=Glass Mixer
+AppVersion={#AppVersion}
+AppPublisher=Glass Mixer
+DefaultDirName={localappdata}\Programs\Glass Mixer
+DefaultGroupName=Glass Mixer
+DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0.17763
+OutputDir=..\dist
+OutputBaseFilename=glass-mixer-{#AppVersion}-setup
+SetupIconFile=..\target\release\app.ico
+UninstallDisplayIcon={app}\glass-mixer.exe
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+CloseApplications=yes
+RestartApplications=no
+
+[Files]
+Source: "..\target\release\glass-mixer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+
+[Icons]
+Name: "{userprograms}\Glass Mixer"; Filename: "{app}\glass-mixer.exe"
+Name: "{userdesktop}\Glass Mixer"; Filename: "{app}\glass-mixer.exe"; Tasks: desktopicon
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
+Name: "autostart"; Description: "&Launch Glass Mixer when I sign in"; Flags: unchecked
+
+[Registry]
+; Same value the app writes from Settings > Launch at login, so the two stay in sync.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GlassMixer"; ValueData: """{app}\glass-mixer.exe"" --minimized"; Tasks: autostart; Flags: uninsdeletevalue
+
+[Run]
+Filename: "{app}\glass-mixer.exe"; Description: "Start Glass Mixer"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{cmd}"; Parameters: "/C taskkill /IM glass-mixer.exe /F"; Flags: runhidden; RunOnceId: "StopGlassMixer"
+
+[Code]
+// Remove the launch-at-login entry even if it was enabled from inside the app,
+// and optionally the user's settings.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GlassMixer');
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'GlassMixer');
+    // Silent uninstalls keep settings (a suppressed message box would default to Yes).
+    if (not UninstallSilent) and
+       (MsgBox('Also remove your Glass Mixer settings?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+      DelTree(ExpandConstant('{userappdata}\GlassMixer'), True, True, True);
+  end;
+end;
