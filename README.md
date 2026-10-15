@@ -122,6 +122,14 @@ engine sees and watches for changes for 30 seconds. It changes nothing.
 - **Notifications** appear inside the app window, not as Windows toast
   notifications.
 
+## Project documentation
+
+- [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md): the full project record. It covers
+  the original specification, development history, features, decisions,
+  test results, gaps and known risks.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design and the Windows API strategy.
+- [docs/TESTING.md](docs/TESTING.md): tests, results and the manual checklist.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
