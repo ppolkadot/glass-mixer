@@ -1,7 +1,7 @@
 //! User preferences, persisted as JSON in `%APPDATA%\GlassMixer\settings.json`.
 //!
-//! Audio levels are deliberately *not* persisted: Windows stays authoritative for
-//! device and session volumes. "Launch at login" is not stored here either; the
+//! Audio levels are persisted only in user-saved presets. Windows stays authoritative
+//! for live device and session volumes. "Launch at login" is not stored here either; the
 //! registry Run key is its single source of truth (see `platform::startup`).
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SETTINGS_VERSION: u32 = 3;
+pub const SETTINGS_VERSION: u32 = 4;
 pub const DEFAULT_WIDTH: f32 = 480.0;
 pub const DEFAULT_HEIGHT: f32 = 720.0;
 pub const MIN_WIDTH: f32 = 360.0;
@@ -119,6 +119,14 @@ pub struct Settings {
     pub show_meters: bool,
     #[serde(deserialize_with = "lenient_true")]
     pub hidden_notifications: bool,
+    #[serde(deserialize_with = "read_pins")]
+    pub pinned_apps: Vec<crate::audio::preferences::PinnedApp>,
+    #[serde(deserialize_with = "read_presets")]
+    pub presets: Vec<crate::audio::preferences::VolumePreset>,
+    #[serde(deserialize_with = "read_hotkeys")]
+    pub hotkeys: Vec<crate::platform::hotkeys::HotkeyBinding>,
+    #[serde(deserialize_with = "lenient_step")]
+    pub hotkey_step: u8,
     #[serde(deserialize_with = "lenient")]
     pub window: Option<WindowGeometry>,
     /// Version 1 stored egui logical points; version 2 stores screen pixels.
@@ -143,6 +151,10 @@ impl Default for Settings {
             show_inactive_apps: true,
             show_meters: true,
             hidden_notifications: true,
+            pinned_apps: Vec::new(),
+            presets: Vec::new(),
+            hotkeys: Vec::new(),
+            hotkey_step: 5,
             window: None,
             window_position_physical: false,
             extra: serde_json::Map::new(),
@@ -165,6 +177,34 @@ where
 fn lenient_true<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or(true))
+}
+
+fn list_items<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<Vec<T>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect())
+}
+
+fn read_pins<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::audio::preferences::PinnedApp>, D::Error> {
+    Ok(crate::audio::preferences::normalize_pins(list_items(d)?))
+}
+
+fn read_presets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::audio::preferences::VolumePreset>, D::Error> {
+    Ok(list_items::<_, crate::audio::preferences::VolumePreset>(d)?.into_iter().filter_map(|p| p.sanitize()).collect())
+}
+
+fn read_hotkeys<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::platform::hotkeys::HotkeyBinding>, D::Error> {
+    list_items(d)
+}
+
+fn lenient_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<u8>(value).ok().filter(|v| (1..=20).contains(v)).unwrap_or(5))
 }
 
 #[derive(Debug)]
@@ -205,6 +245,12 @@ impl SettingsStore {
 
     /// `%APPDATA%\GlassMixer` (roaming, per user).
     pub fn default_dir() -> Option<PathBuf> {
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os("GLASS_MIXER_DEV_PROFILE").map(PathBuf::from)
+            && dir.is_absolute()
+        {
+            return Some(dir);
+        }
         std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("GlassMixer"))
     }
 
@@ -261,6 +307,37 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_pins_presets_and_shortcuts_parse_independently() {
+        let text = serde_json::json!({
+            "version": 4,
+            "pinned_apps": [
+                {"key":{"exe":"C:\\Apps\\A.EXE"},"name":"A","exe_path":null,"aumid":null},
+                {"key":{"pid":10},"name":"transient","exe_path":null,"aumid":null},
+                {"key":{"exe":"c:\\apps\\a.exe"},"name":"duplicate","exe_path":null,"aumid":null},
+                "invalid"
+            ],
+            "presets": [
+                {"name":"One","entries":[{"key":"system","name":"System sounds","volume":0.4,"muted":false}]},
+                {"name":"bad","entries":[],"apply_on_start":"oops"}
+            ],
+            "hotkeys": [
+                {"action":"VolumeUp","chord":"Ctrl+Alt+F23"},
+                {"action":"VolumeDown","chord":7}
+            ],
+            "hotkey_step": 99,
+            "future": {"known":true}
+        })
+        .to_string();
+        let settings: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(settings.pinned_apps.len(), 1);
+        assert_eq!(settings.presets.len(), 1);
+        assert_eq!(settings.hotkeys.len(), 1);
+        assert_eq!(settings.hotkey_step, 5);
+        assert!(settings.extra.contains_key("future"));
+        assert_eq!(settings.presets[0].entries[0].volume, 0.4);
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(

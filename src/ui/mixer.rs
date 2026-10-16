@@ -100,13 +100,19 @@ pub struct MixerCtx<'a> {
     pub snap: &'a AudioSnapshot,
     pub meters: &'a Meters,
     pub look: &'a Look,
-    pub settings: &'a Settings,
+    pub settings: &'a mut Settings,
     pub icons: &'a mut IconService,
 }
 
 pub fn show(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> Outcome {
     st.expire(ui.ctx());
-    let live: HashSet<AppKey> = cx.snap.apps.iter().map(|a| a.key.clone()).collect();
+    let live: HashSet<AppKey> = cx
+        .snap
+        .apps
+        .iter()
+        .map(|a| a.key.clone())
+        .chain(cx.settings.pinned_apps.iter().map(|p| p.key.clone()))
+        .collect();
     let icon_px = (cx.look.m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
     st.prune_cache(&live, icon_px);
     cx.icons.prepare_pixel_size(icon_px);
@@ -416,11 +422,12 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
 
 fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
     let look = cx.look;
-    let visible: Vec<&AppEntry> = cx
-        .snap
-        .apps
-        .iter()
-        .filter(|a| show_with_idle_filter(&a.key, a.activity, cx.settings.show_inactive_apps))
+    let visible: Vec<AppEntry> = crate::audio::preferences::rows_with_pins(&cx.snap.apps, &cx.settings.pinned_apps)
+        .into_iter()
+        .filter(|a| {
+            cx.settings.pinned_apps.iter().any(|p| p.key == a.key)
+                || show_with_idle_filter(&a.key, a.activity, cx.settings.show_inactive_apps)
+        })
         .filter(|a| matches_filter(st.display_name(a), &st.filter))
         .collect();
 
@@ -465,13 +472,63 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
     }
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for app in visible {
+        for app in &visible {
             app_row(ui, st, cx, app);
         }
     });
 }
 
+fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEntry) {
+    let look = cx.look;
+    ui.push_id((&app.key, "offline"), |ui| {
+        card(look).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let px = (look.m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
+                cx.icons.request(app, px);
+                ui.scope(|ui| {
+                    ui.multiply_opacity(0.45);
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(look.m.icon), Sense::hover());
+                    if let Some(Some(tex)) = st.textures.get(&(app.key.clone(), px)) {
+                        ui.painter().image(
+                            tex.id(),
+                            rect,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::from_gray(128),
+                        );
+                    } else {
+                        fallback_tile(ui, rect, &app.name, look, None);
+                    }
+                });
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&app.name).strong().color(look.p.text_muted));
+                    ui.label("Not running");
+                });
+            });
+            ui.add_enabled_ui(false, |ui| {
+                ui.horizontal(|ui| {
+                    icon_button(ui, look, glyph::MUTE, "M", &format!("{} mute unavailable", app.name), None);
+                    widgets::unavailable_slider(ui, look, &format!("{} volume unavailable — not running", app.name));
+                });
+            });
+            ui.horizontal(|ui| {
+                if ui.button(format!("Unpin {}", app.name)).clicked() {
+                    cx.settings.pinned_apps.retain(|p| p.key != app.key);
+                }
+                ui.label(RichText::new("No active audio session").small().color(look.p.text_muted));
+            });
+            ui.label(
+                RichText::new("Moved or uninstalled? Unpin this row, then pin the app again when it plays.").small(),
+            );
+        });
+        ui.add_space(4.0);
+    });
+}
+
 fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) {
+    if app.session_count == 0 {
+        placeholder_row(ui, st, cx, app);
+        return;
+    }
     let look = cx.look;
     let p = &look.p;
     let m = &look.m;
@@ -595,6 +652,16 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
     let look = cx.look;
     let p = &look.p;
     let indent = look.m.icon + 12.0;
+    if let Some(pin) = crate::audio::preferences::PinnedApp::from_app(app) {
+        let mut pinned = cx.settings.pinned_apps.iter().any(|p| p.key == pin.key);
+        if ui.checkbox(&mut pinned, format!("Pin {name}")).changed() {
+            if pinned {
+                cx.settings.pinned_apps.push(pin);
+            } else {
+                cx.settings.pinned_apps.retain(|p| p.key != pin.key);
+            }
+        }
+    }
     ui.horizontal(|ui| {
         ui.add_space(indent);
         ui.label(RichText::new("Balance").color(p.text_muted));

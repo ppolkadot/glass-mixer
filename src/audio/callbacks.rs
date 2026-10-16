@@ -8,6 +8,10 @@
 
 use super::Msg;
 use crossbeam_channel::Sender;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl};
 use windows::Win32::Media::Audio::{
@@ -112,11 +116,12 @@ impl IAudioSessionNotification_Impl for SessionCreatedNotifier_Impl {
 #[implement(IAudioSessionEvents)]
 pub(crate) struct SessionEvents {
     tx: Sender<Msg>,
+    changed: Arc<AtomicBool>,
 }
 
 impl SessionEvents {
-    pub(crate) fn create(tx: Sender<Msg>) -> IAudioSessionEvents {
-        Self { tx }.into()
+    pub(crate) fn create(tx: Sender<Msg>, changed: Arc<AtomicBool>) -> IAudioSessionEvents {
+        Self { tx, changed }.into()
     }
 }
 
@@ -137,6 +142,7 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
 
     fn OnSimpleVolumeChanged(&self, _volume: f32, _mute: BOOL, ctx: *const GUID) -> windows::core::Result<()> {
         if !is_own(ctx) {
+            self.changed.store(true, Ordering::Relaxed);
             let _ = self.tx.send(Msg::SessionValuesChanged);
         }
         Ok(())
@@ -150,6 +156,7 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
         ctx: *const GUID,
     ) -> windows::core::Result<()> {
         if !is_own(ctx) {
+            self.changed.store(true, Ordering::Relaxed);
             let _ = self.tx.send(Msg::SessionValuesChanged);
         }
         Ok(())

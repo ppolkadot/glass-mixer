@@ -12,6 +12,7 @@ mod engine;
 pub mod model;
 mod policy_config;
 mod power;
+pub mod preferences;
 mod process;
 pub mod properties;
 
@@ -32,6 +33,12 @@ use std::{
 /// Requests from the UI (or tray) to the audio engine.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    ToggleInputMute,
+    AdjustOutputVolume {
+        delta: f32,
+    },
+    ApplyPreset(preferences::VolumePreset),
+    SetPresetRules(Vec<preferences::VolumePreset>),
     OpenSoundSettings,
     OpenMonoSettings,
     /// Lazily open all active endpoints for independent controls.

@@ -1,6 +1,7 @@
 //! User interface: design system, widgets and views.
 
 pub mod mixer;
+pub mod presets;
 pub mod settings_view;
 pub mod theme;
 pub mod widgets;
@@ -22,6 +23,7 @@ pub enum GlassStatus {
     TransparencyOff,
     HighContrast,
     Unsupported,
+    RendererFallback,
 }
 
 impl GlassStatus {
@@ -32,6 +34,9 @@ impl GlassStatus {
             GlassStatus::TransparencyOff => "Windows transparency effects are off, so a solid background is used",
             GlassStatus::HighContrast => "High contrast is on, so a solid background is used",
             GlassStatus::Unsupported => "Not supported on this version of Windows; using a solid background",
+            GlassStatus::RendererFallback => {
+                "OpenGL could not start; using the fallback renderer with a solid background"
+            }
         }
     }
 }

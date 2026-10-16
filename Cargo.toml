@@ -17,7 +17,7 @@ name = "glass_mixer"
 path = "src/lib.rs"
 
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu"] }
 egui = "0.36"
 raw-window-handle = "0.6"
 tray-icon = "0.26"
@@ -51,6 +51,7 @@ features = [
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",

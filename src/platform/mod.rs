@@ -3,6 +3,7 @@
 
 pub mod backdrop;
 pub mod fonts;
+pub mod hotkeys;
 pub mod icons;
 pub mod single_instance;
 pub mod startup;

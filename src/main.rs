@@ -16,7 +16,9 @@ fn main() -> ExitCode {
 
     let Some(_instance) = single_instance::acquire() else {
         log::info!("another instance is running; activating it");
-        window::activate_existing_instance();
+        if !dev_profile_active() {
+            window::activate_existing_instance();
+        }
         return ExitCode::SUCCESS;
     };
 
@@ -31,7 +33,9 @@ fn main() -> ExitCode {
         log::info!("first run: using default settings");
     }
     let settings = outcome.into_settings();
-    startup::repair_path_if_enabled();
+    if !dev_profile_active() {
+        startup::repair_path_if_enabled();
+    }
 
     let hidden = args.iter().any(|a| a == startup::MINIMIZED_ARG) || settings.start_minimized;
     let geometry = settings.window.and_then(WindowGeometry::sanitized);
@@ -51,21 +55,17 @@ fn main() -> ExitCode {
         Some(g) => viewport.with_inner_size([g.width, g.height]),
         None => viewport.with_inner_size([DEFAULT_WIDTH, DEFAULT_HEIGHT]),
     };
-    let options = eframe::NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        centered: restored_position.is_none(),
-        persist_window: false,
-        ..Default::default()
+    let start = StartOptions { store, settings, load_error, hidden, restored_position, force_opaque: false };
+    let result = if dev_profile_active()
+        && std::env::var("GLASS_MIXER_DEV_RENDERER").is_ok_and(|value| value.eq_ignore_ascii_case("wgpu"))
+    {
+        run_with_renderer(eframe::Renderer::Wgpu, viewport, start)
+    } else {
+        run_with_renderer(eframe::Renderer::Glow, viewport.clone(), start.clone()).or_else(|gl_error| {
+            log::warn!("OpenGL renderer failed ({gl_error}); trying the wgpu renderer with an opaque surface");
+            run_with_renderer(eframe::Renderer::Wgpu, viewport, start)
+        })
     };
-
-    let result = eframe::run_native(
-        window::WINDOW_TITLE,
-        options,
-        Box::new(move |cc| {
-            Ok(Box::new(MixerApp::new(cc, StartOptions { store, settings, load_error, hidden, restored_position })))
-        }),
-    );
     match result {
         Ok(()) => {
             log::info!("exited normally");
@@ -73,13 +73,32 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             log::error!("failed to start the user interface: {e}");
-            show_error(&format!(
-                "Glass Mixer couldn't start its window.\n\n{e}\n\nThis usually means OpenGL isn't available \
-                 (for example in some remote desktop or virtual machine sessions)."
-            ));
+            show_error(&format!("Glass Mixer couldn't start its window with either renderer.\n\n{e}"));
             ExitCode::FAILURE
         }
     }
+}
+
+fn dev_profile_active() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("GLASS_MIXER_DEV_PROFILE").is_some_and(|dir| std::path::Path::new(&dir).is_absolute())
+}
+
+fn run_with_renderer(
+    renderer: eframe::Renderer,
+    viewport: egui::ViewportBuilder,
+    mut start: StartOptions,
+) -> eframe::Result {
+    let fallback = renderer == eframe::Renderer::Wgpu;
+    start.force_opaque = fallback;
+    let options = eframe::NativeOptions {
+        viewport: viewport.with_transparent(!fallback),
+        renderer,
+        centered: start.restored_position.is_none(),
+        persist_window: false,
+        ..Default::default()
+    };
+    eframe::run_native(window::WINDOW_TITLE, options, Box::new(move |cc| Ok(Box::new(MixerApp::new(cc, start)))))
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +158,11 @@ fn on_screen(g: WindowGeometry, physical: bool) -> Option<(i32, i32)> {
 }
 
 fn log_dir() -> PathBuf {
+    if dev_profile_active()
+        && let Some(dir) = std::env::var_os("GLASS_MIXER_DEV_PROFILE")
+    {
+        return PathBuf::from(dir).join("logs");
+    }
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("GlassMixer")
 }
 

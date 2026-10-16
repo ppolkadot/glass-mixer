@@ -4,6 +4,7 @@ use super::widgets::{self, card, glyph, icon_button, segmented, semibold, toggle
 use super::{GlassStatus, Look, theme};
 use crate::audio::{AudioHandle, Command};
 use crate::platform::backdrop::Support;
+use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode};
@@ -25,6 +26,8 @@ pub struct SettingsCtx<'a> {
     pub audio: &'a AudioHandle,
     pub icons: &'a mut IconService,
     pub settings_path: &'a Path,
+    pub hotkeys: Option<&'a HotkeyService>,
+    pub hotkey_editor: &'a mut HotkeyEditor,
     /// Error messages to show as notices.
     pub errors: &'a mut Vec<String>,
 }
@@ -47,6 +50,13 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
         section(ui, &look, "Appearance", |ui| appearance(ui, cx));
         section(ui, &look, "Behavior", |ui| behavior(ui, cx));
         section(ui, &look, "Audio", |ui| audio(ui, cx));
+        section(ui, &look, "Global shortcuts", |ui| {
+            if let Some(service) = cx.hotkeys {
+                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service);
+            } else {
+                ui.label("Global shortcuts are unavailable in this session.");
+            }
+        });
         section(ui, &look, "About", |ui| about(ui, cx));
     });
     outcome

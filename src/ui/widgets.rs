@@ -239,6 +239,18 @@ fn snap(v: f32, step: f32) -> f32 {
     (v / step).round() * step
 }
 
+/// An unavailable slider has no numeric value, thumb or live meter.
+pub fn unavailable_slider(ui: &mut Ui, look: &Look, label: &str) {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().max(60.0), 26.0), Sense::hover());
+    let track = Rect::from_center_size(rect.center(), vec2((rect.width() - 16.0).max(10.0), 4.0));
+    ui.painter().rect_filled(track, CornerRadius::same(2), look.p.text_muted.gamma_multiply(0.35));
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, false, label));
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_disabled();
+    });
+    response.on_disabled_hover_text("Not running — volume and level meter unavailable");
+}
+
 /// A square icon-only button with a tooltip and an accessible name.
 pub fn icon_button(
     ui: &mut Ui,

@@ -11,11 +11,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Threading::{
-    INFINITE, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    GetProcessTimes, INFINITE, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     QueryFullProcessImageNameW, RegisterWaitForSingleObject, UnregisterWaitEx, WT_EXECUTEONLYONCE,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
@@ -56,6 +57,13 @@ pub fn query(handle: &ProcessHandle) -> ProcessInfo {
     let aumid = app_user_model_id(handle.0);
     let description = exe_path.as_ref().and_then(|p| file_description(p));
     ProcessInfo { exe_path, aumid, description }
+}
+
+pub fn created_at(handle: &ProcessHandle) -> Option<u64> {
+    let (mut created, mut exited, mut kernel, mut user) =
+        (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    unsafe { GetProcessTimes(handle.0, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+    Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
 }
 
 fn image_path(process: HANDLE) -> Option<PathBuf> {

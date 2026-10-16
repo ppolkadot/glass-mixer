@@ -11,7 +11,8 @@ pub enum Flow {
 
 /// Stable identity of an application in the mixer. Sessions sharing a key are
 /// shown as one row.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AppKey {
     /// The Windows "System sounds" session.
     System,
