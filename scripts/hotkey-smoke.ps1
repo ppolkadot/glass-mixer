@@ -1,7 +1,15 @@
+param([switch]$Minimized)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root 'target\debug\glass-mixer.exe'
+$cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+if (-not $cargo) { $cargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe' }
+if (-not (Test-Path -LiteralPath $cargo)) { throw 'Cargo is required. Install the Rust toolchain first.' }
+& $cargo build --quiet --manifest-path (Join-Path $root 'Cargo.toml')
+if ($LASTEXITCODE -ne 0) { throw 'Debug build failed.' }
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Build the debug executable first: cargo build' }
+$probe = Start-Process -FilePath $exe -ArgumentList '--dev-profile-check' -Wait -PassThru
+if ($probe.ExitCode -ne 0) { throw 'The hotkey smoke test requires a debug build.' }
 $profile = Join-Path $root ('target\phase4-hotkey-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
 [IO.File]::WriteAllText(
@@ -48,7 +56,11 @@ function Find-MixerWindow([int]$ProcessId) {
 }
 $app = $null
 try {
-    $app = Start-Process -FilePath $exe -PassThru
+    $app = if ($Minimized) {
+        Start-Process -FilePath $exe -ArgumentList '--minimized' -PassThru
+    } else {
+        Start-Process -FilePath $exe -PassThru
+    }
     $deadline = (Get-Date).AddSeconds(6)
     do {
         Start-Sleep -Milliseconds 100
@@ -57,7 +69,17 @@ try {
     } while ($hwnd -eq [IntPtr]::Zero -and -not $app.HasExited -and (Get-Date) -lt $deadline)
     if ($hwnd -eq [IntPtr]::Zero) { throw 'The mixer window did not appear.' }
     Write-Host "Observed window $hwnd"
-    Start-Sleep -Milliseconds 500
+    if ($Minimized) {
+        Start-Sleep -Seconds 1
+        if ([GlassHotkeyTest]::IsWindowVisible($hwnd)) { throw 'The minimized app did not start hidden.' }
+        [GlassHotkeyTest]::Send()
+        Start-Sleep -Milliseconds 600
+        if (-not [GlassHotkeyTest]::IsWindowVisible($hwnd)) {
+            throw 'Global shortcut did not open the minimized app.'
+        }
+    } else {
+        Start-Sleep -Milliseconds 500
+    }
     [GlassHotkeyTest]::Send()
     Start-Sleep -Milliseconds 600
     if ([GlassHotkeyTest]::IsWindowVisible($hwnd)) { throw 'Global shortcut did not hide the window.' }

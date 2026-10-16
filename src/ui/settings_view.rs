@@ -212,12 +212,20 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
             cx.audio.send(Command::Refresh);
         }
     });
-    let note = if cx.can_switch_default {
-        "Volumes always come from Windows. Glass Mixer doesn't store or restore levels."
-    } else {
-        "Default device switching isn't available on this system. Use Windows Settings > System > Sound."
-    };
-    ui.label(RichText::new(note).small().color(look.p.text_muted));
+    ui.label(
+        RichText::new("Live volumes come from Windows. Presets store app levels only when you save one.")
+            .small()
+            .color(look.p.text_muted),
+    );
+    if !cx.can_switch_default {
+        ui.label(
+            RichText::new(
+                "Default device switching isn't available on this system. Use Windows Settings > System > Sound.",
+            )
+            .small()
+            .color(look.p.text_muted),
+        );
+    }
 }
 
 fn about(ui: &mut Ui, cx: &mut SettingsCtx) {

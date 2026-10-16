@@ -1,6 +1,6 @@
 //! Explicit user-owned app metadata and presets. No live Windows state cache.
 use super::{Activity, AppEntry, AppKey};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 
 pub fn normalized_key(key: &AppKey) -> Option<AppKey> {
@@ -111,9 +111,26 @@ pub struct PresetEntry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VolumePreset {
     pub name: String,
+    #[serde(default, deserialize_with = "read_entries")]
     pub entries: Vec<PresetEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "read_auto_rule")]
     pub apply_on_start: bool,
+}
+
+fn read_entries<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<PresetEntry>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|item| serde_json::from_value(item.clone()).ok())
+        .collect())
+}
+
+fn read_auto_rule<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value.as_bool().unwrap_or(false))
 }
 
 impl VolumePreset {

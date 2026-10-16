@@ -1,5 +1,23 @@
 # Testing
 
+## Final review verification (2026-10-16)
+
+- **Ran and passed:** `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
+  and `cargo test` (43 library tests passed, one ignored; binary and encoding
+  tests passed). The isolated Ctrl+Alt+F23 smoke test passed, as did the glow
+  UI Automation check and a forced-wgpu lifecycle run including minimized
+  startup and clean shutdown. The smoke test with `-Minimized` also opened,
+  hid, and reopened a hidden-start app. The final release package run produced
+  the portable zip and Inno installer. The reviewer found no remaining Critical
+  or Important issues in the final diff.
+- **Ran and failed, corrected:** the first forced-wgpu lifecycle check sent
+  WM_CLOSE before eframe had completed tray initialization. The script now
+  waits for initialization and polls for the close-to-tray result; the rerun
+  passed.
+- **Not run:** live hardware preset application, screen-reader speech, a
+  GL-less machine, code signing without a certificate, and hosted CI. See
+  the manual checklist and Phase 4 limits below.
+
 ## Phase 4 verification (2026-10-15)
 
 - **Ran and passed:** `cargo fmt`, `cargo clippy --all-targets -- -D
@@ -18,7 +36,7 @@
   watched the tray helper window rather than the titled mixer window. The
   scripts now resolve the window by title and PID; the same smoke test passed.
 - **Renderer cost:** the prior installed glow-only exe is 8,442,880 bytes;
-  the branch release exe is 15,735,296 bytes (+86.4%). Three debug launches
+  the branch release exe is 15,754,240 bytes (+86.6%). Three debug launches
   to first window took 1092/1251/1131 ms on glow and 1536/1134/1139 ms on
   wgpu, with a 100 ms polling resolution. These local measurements include
   OS cache and concurrent activity, and are not a release benchmark.

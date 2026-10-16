@@ -1,10 +1,18 @@
 param(
-    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\debug\glass-mixer.exe'),
     [int]$ExitAfterMs = 12000,
     [ValidateSet('glow', 'wgpu')][string]$Renderer = 'glow'
 )
 $ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSScriptRoot
+$Exe = Join-Path $root 'target\debug\glass-mixer.exe'
+$cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+if (-not $cargo) { $cargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe' }
+if (-not (Test-Path -LiteralPath $cargo)) { throw 'Cargo is required. Install the Rust toolchain first.' }
+& $cargo build --quiet --manifest-path (Join-Path $root 'Cargo.toml')
+if ($LASTEXITCODE -ne 0) { throw 'Debug build failed.' }
 if (-not (Test-Path -LiteralPath $Exe)) { throw "Build the debug executable first: cargo build" }
+$probe = Start-Process -FilePath $Exe -ArgumentList '--dev-profile-check' -Wait -PassThru
+if ($probe.ExitCode -ne 0) { throw 'The lifecycle script requires a debug build.' }
 $profile = Join-Path $env:TEMP ("glass-mixer-lifecycle-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
 $previousProfile = $env:GLASS_MIXER_DEV_PROFILE
@@ -56,8 +64,14 @@ try {
     $second = Start-Process -FilePath $Exe -PassThru
     if (-not $second.WaitForExit(5000)) { $second.Kill(); throw 'Second instance did not exit.' }
     if ($second.ExitCode -ne 0) { throw "Second instance exited with $($second.ExitCode)" }
+    # The HWND can exist before eframe has initialized the app and tray.
+    Start-Sleep -Milliseconds 1500
     [void][GlassWindow]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 800
+    $hideDeadline = (Get-Date).AddSeconds(3)
+    do {
+        Start-Sleep -Milliseconds 100
+        $app.Refresh()
+    } while (-not $app.HasExited -and [GlassWindow]::IsWindowVisible($hwnd) -and (Get-Date) -lt $hideDeadline)
     $app.Refresh()
     if ($app.HasExited -or [GlassWindow]::IsWindowVisible($hwnd)) { throw 'Close-to-tray did not leave a hidden running process.' }
     Write-Host 'Close-to-tray and second-instance checks passed.'

@@ -272,7 +272,7 @@ impl Runner {
         self.retry_at = None;
         let dirty = std::mem::take(&mut self.dirty);
         let engine = self.engine.as_mut().expect("engine present");
-        let result = engine.refresh(dirty, &self.shared).and_then(|()| engine.snapshot());
+        let result = engine.refresh(dirty, &self.shared).and_then(|()| engine.snapshot(&self.shared));
         match result {
             Ok(snapshot) => {
                 self.backoff = Duration::from_millis(250);
@@ -549,8 +549,8 @@ impl Engine {
         Ok(())
     }
 
-    fn snapshot(&mut self) -> WinResult<AudioSnapshot> {
-        self.apply_start_rules()?;
+    fn snapshot(&mut self, shared: &Shared) -> WinResult<AudioSnapshot> {
+        self.apply_start_rules(shared)?;
         let mut facts = Vec::new();
         let mut needs_sync = false;
         if let Some(set) = &self.sessions {
@@ -763,7 +763,7 @@ impl Engine {
         }
     }
 
-    fn apply_start_rules(&mut self) -> WinResult<()> {
+    fn apply_start_rules(&mut self, shared: &Shared) -> WinResult<()> {
         if self.preset_rules.is_empty() {
             return Ok(());
         }
@@ -797,13 +797,34 @@ impl Engine {
             let Some(entry) = self.preset_rules.iter().flat_map(|p| &p.entries).find(|e| e.key == key) else {
                 continue;
             };
+            let mut first_error = None;
             for s in sessions {
-                unsafe {
-                    s.simple.SetMasterVolume(entry.volume, &OWN_EVENT_CONTEXT)?;
-                    s.simple.SetMute(entry.muted, &OWN_EVENT_CONTEXT)?;
+                let result = unsafe {
+                    s.simple
+                        .SetMasterVolume(entry.volume, &OWN_EVENT_CONTEXT)
+                        .and_then(|()| s.simple.SetMute(entry.muted, &OWN_EVENT_CONTEXT))
+                };
+                if let Err(err) = result {
+                    log::warn!("automatic preset failed for {:?}, session {}: {err}", key, s.instance_id);
+                    if first_error.is_none() || is_fatal(err.code()) {
+                        first_error = Some(err);
+                    }
                 }
             }
-            log::info!("automatic preset applied once to a new process for {:?}", key);
+            if let Some(err) = first_error {
+                shared.push_notice(
+                    NoticeLevel::Error,
+                    format!(
+                        "Automatic preset for {} could not be fully applied. Check the app levels, then use Apply now to retry.",
+                        entry.name
+                    ),
+                );
+                if is_fatal(err.code()) {
+                    return Err(err);
+                }
+            } else {
+                log::info!("automatic preset applied once to a new process for {:?}", key);
+            }
         }
         Ok(())
     }
