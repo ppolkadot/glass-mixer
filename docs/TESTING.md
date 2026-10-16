@@ -10,12 +10,13 @@ cargo test
 
 | Area | Covered |
 | --- | --- |
-| Settings | Defaults (glass on), first run, round trip, per-field fallback for unknown values, corrupt file backed up to `.json.bad`, window geometry sanitizing, atomic write |
-| Audio model | Session grouping (multi-session apps, loudest wins, muted only if all are), stable ordering, balance math round trip, percent rounding, filter matching, exe-name fallback, tray tooltip incl. 127-unit truncation |
+| Settings | Defaults (glass on), first run, repeated round trip, per-field fallback for invalid values, preservation of newer fields, corrupt file backed up to `.json.bad`, geometry sanitizing |
+| Audio model | Session grouping (multi-session apps, loudest wins, muted only if all are), stable ordering, System sounds idle-filter exception, balance math round trip, percent rounding, filter matching, exe-name fallback, tray tooltip incl. 127-unit truncation |
 | Engine | Coalescing of rapid slider commands per control, meter change threshold |
-| Icons | BGRA→RGBA conversion, opaque bitmaps, straight-alpha detection |
+| Icons | BGRA→RGBA conversion, opaque bitmaps, straight-alpha detection, retry after a failed lookup, cache invalidation when apps return or DPI changes |
 | Artwork | Icon rendering, ICO encoding |
 | Backdrop | Support level per Windows build |
+| UI and window | Sticky backdrop rejection, texture pruning, monitor-specific DPI position validation, source encoding regression scan |
 
 ### Integration tests (real audio devices)
 
@@ -69,6 +70,20 @@ process that renders silence.
 
   These are covered by the manual checklist below.
 
+### Phase 1 maintenance branch (2026-10-15)
+
+- **Ran and passed:** `cargo fmt --check`, `cargo clippy --all-targets --
+  -D warnings`, `cargo build`, `cargo test` (28 library tests, 1 binary
+  geometry test and 1 source-encoding test), and the seven ignored audio
+  integration tests with `--test-threads=1`. Those integration tests
+  restored the volumes and mutes they changed.
+- **Ran and failed, then corrected:** the new regression tests against the
+  previous behavior, plus an initial formatting and clippy pass.
+- **Not run:** launch/tray/shutdown of the branch build while the installed
+  app owns the single-instance mutex; visual scale checks at 100%, 150% and
+  200% in both densities; mixed-monitor DPI, Windows 10, microphone and
+  multi-output checks.
+
 ## Manual Windows checklist
 
 Run on a real desktop session, ideally on both Windows 11 and Windows 10,
@@ -106,6 +121,10 @@ with at least two output devices and one microphone.
 - [ ] Exit from the tray: the process ends, and the tray icon disappears without needing a hover.
 
 ### Appearance and accessibility
+- [ ] First launch with no saved geometry opens around 480×720; a deliberately saved size stays in place. Settings > Appearance > Use recommended window size resizes it.
+- [ ] At 100 %, 150 % and 200 % scaling in both density modes, rows, sliders, footer and Settings controls remain visible and usable without clipping.
+- [ ] Move between monitors with different DPI, exit and restart: the saved position stays on the correct monitor. With an ambiguous version-1 position, the app centers rather than guessing.
+- [ ] Refuse a supported DWM backdrop (or simulate failure): glass status stays Unsupported without repeated DWM calls or flicker until the appearance setting, theme or Windows build changes.
 - [ ] First launch on Windows 11: glass (Acrylic) is on, and text is readable over a busy wallpaper or window.
 - [ ] Switch to Mica, then glass off: a solid background with the same layout.
 - [ ] Light, Dark and System themes, and changing the Windows theme while open: the app follows within about 2 s.
