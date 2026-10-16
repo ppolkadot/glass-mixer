@@ -235,9 +235,10 @@ fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
         RichText::new("Works offline. No telemetry, analytics or network access.").small().color(look.p.text_muted),
     );
     let dir = cx.settings_path.parent().map(Path::to_path_buf);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(cx.settings_path.display().to_string()).small().color(look.p.text_muted));
-    });
+    // A long profile path must wrap inside the card, not run past the window edge.
+    ui.add(
+        egui::Label::new(RichText::new(cx.settings_path.display().to_string()).small().color(look.p.text_muted)).wrap(),
+    );
     if let Some(dir) = dir
         && ui.button("Open settings folder").clicked()
     {
@@ -245,5 +246,87 @@ fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
         if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
             cx.errors.push(format!("Couldn't open the folder: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::hotkeys::{HotkeyAction, HotkeyBinding};
+    use crate::settings::MIN_WIDTH;
+    use crate::ui::test_support::{Harness, past_right_edge, unnamed};
+    use std::time::{Duration, Instant};
+
+    /// Renders Settings at `window_width`, with one failed shortcut binding so the
+    /// "Not active: <reason>" line (the longest text in the editor) is present.
+    fn render(window_width: f32) -> (f32, crate::ui::test_support::Frame) {
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = window_width - 2.0 * look.m.pad;
+        let service = HotkeyService::start_with(|_| {}, harness.ctx.clone()).unwrap();
+        let mut settings = Settings {
+            hotkeys: vec![HotkeyBinding { action: HotkeyAction::ToggleOutputMute, chord: "Ctrl+Alt+nonsense".into() }],
+            ..Default::default()
+        };
+        service.configure(&settings.hotkeys, settings.hotkey_step).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.status().pending || service.status().failed.is_empty() {
+            assert!(Instant::now() < deadline, "the shortcut service never reported: {:?}", service.status());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors) = (LoginState::Disabled, Vec::new());
+        let path = std::path::PathBuf::from(r"C:\Users\Someone\AppData\Roaming\GlassMixer\settings.json");
+        let frame = harness.run(width, 3000.0, |ui| {
+            let mut cx = SettingsCtx {
+                look: &look,
+                settings: &mut settings,
+                login: &mut login,
+                glass: GlassStatus::TransparencyOff,
+                support: Support::Full,
+                can_switch_default: true,
+                audio: &audio,
+                icons: &mut icons,
+                settings_path: &path,
+                hotkeys: Some(&service),
+                hotkey_editor: &mut editor,
+                errors: &mut errors,
+            };
+            show(ui, &mut cx);
+        });
+        (width, frame)
+    }
+
+    #[test]
+    fn settings_controls_are_named_and_the_shortcut_editor_fits_at_minimum_width() {
+        let (width, frame) = render(MIN_WIDTH);
+        let nameless: Vec<_> = unnamed(&frame.widgets).iter().map(|w| format!("{:?} {:?}", w.role, w.bounds)).collect();
+        assert!(nameless.is_empty(), "controls without an accessible name: {nameless:#?}");
+        let clipped: Vec<_> = past_right_edge(&frame.widgets, width)
+            .iter()
+            .map(|w| format!("{:?} '{}' {:?}", w.role, w.name, w.bounds))
+            .collect();
+        assert!(clipped.is_empty(), "controls past the right edge ({width}): {clipped:#?}");
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        for expected in ["Volume step", "Bind Toggle output mute", "Clear Toggle output mute", "Retry failed shortcuts"]
+        {
+            assert!(names.iter().any(|n| n.starts_with(expected)), "missing '{expected}' in {names:?}");
+        }
+        assert!(
+            frame.content_right <= width + 0.5,
+            "settings content reaches {} in a {width}-wide window",
+            frame.content_right
+        );
+    }
+
+    #[test]
+    fn toggle_descriptions_and_the_glass_status_are_exposed_to_assistive_technology() {
+        let (_, frame) = render(480.0);
+        // The status text explaining why glass is off is only painted; it must also be a description.
+        let glass = frame.widgets.iter().find(|w| w.name == "Glass effect").expect("Glass effect toggle");
+        assert!(glass.has_description, "the Glass effect toggle has no description for screen readers");
+        let meters = frame.widgets.iter().find(|w| w.name == "Level meters").expect("Level meters toggle");
+        assert!(meters.has_description);
     }
 }

@@ -23,6 +23,17 @@ foreach ($tab in @('Mixer', 'Devices', 'Settings', 'Presets')) {
     if ($names -notcontains $tab) { throw "UI Automation did not expose the $tab view." }
 }
 Write-Host "UI Automation: four view selectors found in PID $ProcessId."
+$tabNames = @($elements | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and @('Mixer', 'Devices', 'Presets', 'Settings') -contains $_.Current.Name } | ForEach-Object { $_.Current.Name })
+if (($tabNames -join ',') -ne 'Mixer,Devices,Presets,Settings') { throw "Unexpected view selector order: $($tabNames -join ', ')" }
+$settingsRoutes = @($elements | Where-Object { $_.Current.Name -eq 'Settings' }).Count
+if ($settingsRoutes -ne 1) { throw "Expected one 'Settings' control, found $settingsRoutes (duplicate navigation)." }
+$interactive = 'ControlType.Button', 'ControlType.CheckBox', 'ControlType.RadioButton', 'ControlType.ComboBox', 'ControlType.Edit', 'ControlType.Spinner', 'ControlType.Slider', 'ControlType.Hyperlink'
+$unnamed = @($elements | Where-Object { $interactive -contains $_.Current.ControlType.ProgrammaticName -and [string]::IsNullOrWhiteSpace($_.Current.Name) })
+if ($unnamed.Count -gt 0) {
+    $kinds = ($unnamed | ForEach-Object { $_.Current.ControlType.ProgrammaticName.Replace('ControlType.', '') }) -join ', '
+    throw "$($unnamed.Count) interactive control(s) have no accessible name: $kinds"
+}
+Write-Host 'UI Automation: view selectors are in order, Settings has one route, and every interactive control has a name.'
 if (-not $ExerciseAudio) { return }
 
 # Audio mutations are opt-in. Every successful change is reversed in finally.

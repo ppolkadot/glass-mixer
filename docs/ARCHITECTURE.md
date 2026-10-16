@@ -3,10 +3,16 @@
 ## Opt-in shortcuts, pins and presets
 
 `platform/hotkeys.rs` owns a blocking Win32 message thread. It registers only
-user-assigned chords, sends mute/relative-volume commands directly to the
-audio handle, and shows or hides the HWND immediately. Reconfiguration keeps
-the previous working set if Windows rejects a new chord. Drop unregisters all
-shortcuts and joins before the audio engine stops. The thread has no timer.
+user-assigned chords and sends mute/relative-volume commands directly to the
+audio handle. It never touches the window: the show/hide shortcut is queued as
+a `HotkeyEvent` that the UI thread carries out in `App::logic`, so exit cannot
+deadlock on a cross-thread window call. Each binding is validated and
+registered on its own. An invalid, duplicate or Windows-rejected chord is
+reported as a failed binding (saved but not active, with the reason) while
+every other binding stays active; "Retry failed shortcuts" reconfigures and
+retries only the ones that are not active. Drop unregisters all shortcuts and
+waits up to 2 seconds for the thread before detaching it, before the audio
+engine stops. The thread has no timer.
 
 `audio/preferences.rs` normalizes stable app identities. Pins persist only
 identity/name/icon hints; a missing app becomes a disabled UI placeholder with
@@ -80,7 +86,7 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Process exit | `RegisterWaitForSingleObject` on the process handle (no polling) |
 | Icons | `IAudioSessionControl::GetIconPath` → AppsFolder shell item (packaged apps) → `IShellItemImageFactory` on the exe → generic tile |
 | Sleep/resume | `PowerRegisterSuspendResumeNotification` |
-| Glass and fallback | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`), with a transparent GL surface; if GL startup fails, retry eframe/wgpu with an opaque surface |
+| Glass and fallback | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`), with a transparent GL surface; if GL startup fails, retry eframe/wgpu with an opaque surface on Direct3D 12 or Vulkan only (wgpu's OpenGL backend is excluded; see "Renderer fallback" below) |
 | Tray | `tray-icon` (Shell_NotifyIcon) with a `muda` menu |
 | Launch at login | `HKCU\...\CurrentVersion\Run` (plus `StartupApproved` for the Task Manager state) |
 
@@ -153,3 +159,15 @@ that confirmed DWM backdrops render behind a transparent eframe/glow window.
 Run it with `GM_BACKDROP=acrylic|mica|none` and `GM_RENDERER=glow|wgpu`.
 The fallback uses a solid surface to avoid presenting a broken backdrop on
 machines where OpenGL cannot initialize.
+
+**Renderer fallback.** `main.rs` runs eframe with glow first. If that fails,
+it runs eframe again with wgpu, restricted to Direct3D 12 and Vulkan
+(`WGPU_BACKEND` can still override this for diagnostics). wgpu's OpenGL
+backend is deliberately excluded. It cannot help once OpenGL has failed, and
+it caused an intermittent exit deadlock: its instance owns a "wgpu-hal WGL
+Instance Thread" that loads the vendor OpenGL driver. When that thread exited
+during teardown, the NVIDIA 341.92 driver's `DllMain` (under the loader lock)
+waited for a driver thread that was blocked on a `dwmapi` lock, while the main
+thread held that lock inside `DestroyWindow` and waited for the loader lock.
+Thread stacks of a hung process showed all three. `MixerApp::new` logs a
+`renderer:` line naming the renderer and, for wgpu, the backend and adapter.

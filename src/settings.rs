@@ -81,6 +81,18 @@ pub struct WindowGeometry {
     pub height: f32,
 }
 
+/// Whether `new` differs enough from the saved geometry to be worth saving.
+/// A geometry saved in the old logical-point format is always replaced once.
+pub fn geometry_changed(saved: Option<WindowGeometry>, saved_is_physical: bool, new: WindowGeometry) -> bool {
+    !saved_is_physical
+        || saved.is_none_or(|old| {
+            (old.x - new.x).abs() > 0.5
+                || (old.y - new.y).abs() > 0.5
+                || (old.width - new.width).abs() > 0.5
+                || (old.height - new.height).abs() > 0.5
+        })
+}
+
 impl WindowGeometry {
     /// Returns a geometry with a sane size, or `None` if the values are unusable.
     pub fn sanitized(self) -> Option<Self> {
@@ -258,6 +270,28 @@ impl SettingsStore {
         &self.path
     }
 
+    /// Where the untouched copy of an older-format file is kept, e.g.
+    /// `settings.v1.backup.json` for a file written by Glass Mixer 0.1.
+    pub fn migration_backup_path(&self, version: u32) -> PathBuf {
+        self.path.with_file_name(format!("settings.v{version}.backup.json"))
+    }
+
+    /// Keeps the original text of an older-format file before this version
+    /// rewrites it in the current format. Older releases cannot read the new
+    /// fields and drop them when they save, so this copy is what a user restores
+    /// after going back to an older release. An existing backup is never
+    /// overwritten: the first copy is the one that matches the old release.
+    fn back_up_before_migration(&self, version: u32, text: &str) {
+        let backup = self.migration_backup_path(version);
+        if backup.exists() {
+            return;
+        }
+        match fs::write(&backup, text) {
+            Ok(()) => log::info!("settings version {version} backed up to {} before migration", backup.display()),
+            Err(e) => log::warn!("couldn't back up version {version} settings before migration: {e}"),
+        }
+    }
+
     pub fn load(&self) -> LoadOutcome {
         let text = match fs::read_to_string(&self.path) {
             Ok(t) => t,
@@ -273,6 +307,9 @@ impl SettingsStore {
         };
         match serde_json::from_str::<Settings>(&text) {
             Ok(mut s) => {
+                if s.version < SETTINGS_VERSION {
+                    self.back_up_before_migration(s.version, &text);
+                }
                 s.window = s.window.and_then(WindowGeometry::sanitized);
                 s.version = s.version.max(SETTINGS_VERSION);
                 LoadOutcome::Loaded(s)
@@ -307,6 +344,24 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_is_saved_only_for_real_changes_or_legacy_files() {
+        let saved = WindowGeometry { x: 100.0, y: 80.0, width: 480.0, height: 720.0 };
+        assert!(geometry_changed(None, true, saved), "nothing saved yet");
+        assert!(!geometry_changed(Some(saved), true, saved), "identical geometry");
+        let nudged = WindowGeometry { x: 100.4, width: 480.3, ..saved };
+        assert!(!geometry_changed(Some(saved), true, nudged), "sub-pixel jitter is not saved");
+        for moved in [
+            WindowGeometry { x: 101.0, ..saved },
+            WindowGeometry { y: 79.0, ..saved },
+            WindowGeometry { width: 500.0, ..saved },
+            WindowGeometry { height: 700.0, ..saved },
+        ] {
+            assert!(geometry_changed(Some(saved), true, moved), "{moved:?} should be saved");
+        }
+        assert!(geometry_changed(Some(saved), false, saved), "a version-1 (logical point) file is rewritten once");
+    }
 
     #[test]
     fn saved_pins_presets_and_shortcuts_parse_independently() {
@@ -368,6 +423,64 @@ mod tests {
     fn first_run_when_missing() {
         let store = SettingsStore::new(temp_dir("missing"));
         assert!(matches!(store.load(), LoadOutcome::FirstRun(_)));
+    }
+
+    /// A settings file as written by Glass Mixer 0.1.0.
+    const V1_FILE: &str = r#"{
+  "version": 1,
+  "theme": "dark",
+  "glass": true,
+  "backdrop": "acrylic",
+  "accent": "coral",
+  "density": "compact",
+  "start_minimized": false,
+  "close_to_tray": true,
+  "minimize_to_tray": false,
+  "show_inactive_apps": true,
+  "show_meters": true,
+  "window": { "x": 465.0, "y": 145.0, "width": 511.0, "height": 640.0 }
+}"#;
+
+    #[test]
+    fn an_older_format_file_is_backed_up_untouched_before_migration() {
+        let dir = temp_dir("migrate");
+        let store = SettingsStore::new(&dir);
+        fs::write(store.path(), V1_FILE).unwrap();
+        let loaded = store.load().into_settings();
+        assert_eq!(loaded.version, SETTINGS_VERSION);
+        assert_eq!((loaded.theme, loaded.accent, loaded.density), (ThemeMode::Dark, Accent::Coral, Density::Compact));
+        assert!(!loaded.window_position_physical, "version 1 stored logical points");
+        let backup = store.migration_backup_path(1);
+        assert_eq!(backup.file_name().unwrap(), "settings.v1.backup.json");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), V1_FILE, "the backup is the original text");
+
+        // Saving in the new format leaves the backup alone, and a later load of an
+        // old file never replaces the first backup.
+        store.save(&loaded).unwrap();
+        assert!(fs::read_to_string(store.path()).unwrap().contains("\"version\": 4"));
+        fs::write(store.path(), V1_FILE.replace("coral", "blue")).unwrap();
+        store.load();
+        assert_eq!(fs::read_to_string(&backup).unwrap(), V1_FILE, "the first backup is kept");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn current_and_newer_files_are_not_backed_up() {
+        for (name, text) in
+            [("current", r#"{"version":4,"theme":"dark"}"#), ("newer", r#"{"version":9,"theme":"dark"}"#)]
+        {
+            let dir = temp_dir(name);
+            let store = SettingsStore::new(&dir);
+            fs::write(store.path(), text).unwrap();
+            store.load();
+            let backups: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().contains("backup"))
+                .collect();
+            assert!(backups.is_empty(), "{name}: unexpected backup {backups:?}");
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

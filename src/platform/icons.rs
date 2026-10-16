@@ -68,6 +68,20 @@ pub struct IconService {
 }
 
 impl IconService {
+    /// A service with no worker behind it, for UI tests: requests are remembered, never resolved.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            tx: None,
+            ready: Arc::new(Mutex::new(Vec::new())),
+            requested: HashSet::new(),
+            failed: HashSet::new(),
+            active: HashSet::new(),
+            pixel_size: None,
+            thread: None,
+        }
+    }
+
     /// `on_ready` is called from the worker thread whenever a result is available.
     pub fn start(on_ready: impl Fn() + Send + 'static) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded::<WorkerRequest>();

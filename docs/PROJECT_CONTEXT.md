@@ -4,14 +4,18 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-16, after final review on branch
-`codex/glass-mixer-features`. The v0.1.0 release record remains below.
+Last updated: 2026-10-16, on branch `experiments` (version `0.2.0-beta.1`,
+not yet merged or released). The v0.1.0 release record remains below; the
+v0.2.0 beta changes and their verification are in
+[CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
 - Release: https://github.com/ppolkadot/glass-mixer/releases/tag/v0.1.0
 
 Related documents:
 
+- [CHANGELOG.md](../CHANGELOG.md): release notes for 0.2.0-beta.1, including
+  known limitations, upgrade/downgrade notes and what remains unverified.
 - [README.md](../README.md): user-facing features, install, build,
   limitations and troubleshooting.
 - [ARCHITECTURE.md](ARCHITECTURE.md): design and the Windows API strategy,
@@ -31,19 +35,27 @@ Through the Windows Core Audio APIs it controls:
 - Every app with an audio session: volume, mute and balance, shown with
   the app's own icon and status.
 
-Its UI is built on eframe/egui (OpenGL first, opaque wgpu fallback) and uses
-a Windows 11 Acrylic/Mica glass backdrop when OpenGL is available. Glass is on
-by default.
+Its UI is built on eframe/egui (OpenGL first; if OpenGL cannot start, an
+opaque wgpu fallback on Direct3D 12 or Vulkan) and uses a Windows 11
+Acrylic/Mica glass backdrop when OpenGL is available. Glass is on by default.
 
-Status: **v0.1.0 is functional and released.** The core requirements are
-implemented and checked on one Windows 11 machine. Windows 10, microphones,
-switching between several outputs, and sleep/resume have **not** been tested
-(no suitable hardware or OS was available). Section 10 lists the remaining
-gaps and section 11 the risks.
+Status:
 
-The table below records the published v0.1.0 build. The feature branch is
-unreleased; its latest release exe is 15,754,240 bytes after adding wgpu,
-versus 8,442,880 bytes for the installed glow-only exe.
+- **v0.1.0 is functional and released.** The core requirements are
+  implemented and checked on one Windows 11 machine.
+- **0.2.0-beta.1 is in development on `experiments`** (independent device
+  controls, sound-property readouts, opt-in global shortcuts, pins, presets,
+  tray notifications and the renderer fallback). It has passed local checks
+  on one Windows 11 machine but has not had a hosted CI run, is not merged,
+  and is not released.
+- On both versions, Windows 10, microphones, switching between several
+  outputs, hot-plug and sleep/resume have **not** been tested (no suitable
+  hardware or OS was available). Section 10 lists the remaining gaps and
+  section 11 the risks.
+
+The table below records the published v0.1.0 build. The 0.2.0-beta.1
+release exe is about 15.8 MB after adding wgpu (8,442,880 bytes for the
+glow-only v0.1.0 exe); exact numbers are in [CHANGELOG.md](../CHANGELOG.md).
 
 | Item | Value |
 | --- | --- |
@@ -178,6 +190,22 @@ isn't part of the app.
     preset failures, and deferred hotkeys until minimized startup is hidden.
     The self-restoring scripts now rebuild and verify the debug executable
     before launch.
+16. **Pre-merge audit of `experiments` (0.2.0 beta).** An audit against `main`
+    reproduced two shortcut defects and one renderer defect, which were then
+    fixed (details and evidence in `TESTING.md` and `CHANGELOG.md`):
+    - One invalid or conflicting global shortcut disabled every shortcut. Each
+      binding is now registered on its own; failures are shown per binding and
+      can be retried.
+    - Pressing the show/hide shortcut while the app exited could hang the
+      process. Window actions now run on the UI thread.
+    - With the wgpu fallback, exit intermittently deadlocked inside the OpenGL
+      driver. The fallback no longer enables wgpu's OpenGL backend.
+
+    The audit also moved balance and sound properties into the Devices view,
+    removed the duplicate Settings button, named every control for screen
+    readers, fixed clipping at the minimum width, added headless UI tests,
+    made CI run on `experiments` and pull requests, backed up older settings
+    files before migration, and marked the version as `0.2.0-beta.1`.
 
 ---
 
@@ -228,8 +256,10 @@ Dependencies, as locked in `Cargo.lock`:
   changes (by us or anyone else), an "Output switched to …" notice appears.
 - **Missing output:** "No output device is available. Connect speakers or
   headphones."
-- Both default-device cards expose stereo balance; the Devices view controls
-  all active endpoints independently and disambiguates duplicate names.
+- Stereo balance and sound properties live in the Devices view (the Mixer
+  header has a "Balance and sound properties" link to it), which also controls
+  all active endpoints independently and disambiguates duplicate names. The
+  Mixer header and footer have no nested scroll area.
 - Expandable sound properties show selected/default versus internal mix formats.
   Unverified format, spatial, enhancements and mono setters open Windows Settings.
   No new undocumented setter or elevation path is used.
@@ -374,8 +404,9 @@ Dependencies, as locked in `Cargo.lock`:
 
 ### 5.7 Settings page
 
-Settings is a separate page with a back button (Esc also goes back). It has
-five sections:
+The views are tabs in the order Mixer, Devices, Presets, Settings; the tab is
+the only route into Settings. The Settings page also has a back button (Esc
+also goes back to the Mixer). It has five sections:
 
 | Section | Contents |
 | --- | --- |
@@ -392,6 +423,7 @@ five sections:
 | Path or key | Purpose |
 | --- | --- |
 | `%APPDATA%\GlassMixer\settings.json` | Preferences. Written atomically through `settings.json.tmp`. A corrupt file is renamed to `settings.json.bad`. |
+| `%APPDATA%\GlassMixer\settings.v1.backup.json` | Untouched copy of an older-format file (for example from 0.1.0), written once before 0.2.0 first loads it. Restore it by renaming it to `settings.json` before going back to an older release. |
 | `%LOCALAPPDATA%\GlassMixer\glass-mixer.log` | Log: debug level in debug builds, info in release. Rotated to `glass-mixer.old.log` above 1 MB. |
 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GlassMixer` | Launch at login: `"<exe>" --minimized`. This registry value is the only record of the setting. |
 | `HKCU\...\Explorer\StartupApproved\Run\GlassMixer` | Task Manager's enabled/disabled flag. Read to show the "disabled" note; written as enabled when the user turns the setting on. |
@@ -432,6 +464,16 @@ when the file is saved:
 `window` is normally omitted until the first window geometry is saved. A
 version-1 file lacks `window_position_physical`; its coordinates are treated
 as egui logical points. An ambiguous legacy position is not restored.
+
+**Migration and downgrade.** When a file with a version below 4 is loaded,
+its original text is first copied to `settings.v<N>.backup.json` (never
+overwritten afterwards). The migrated file is written in version 4 on the
+next save. Older releases cannot read version 4 safely: 0.1.0 reads the file,
+but on its next save it writes version 1 again, dropping pins, presets,
+shortcuts and the shortcut volume step, and it treats the saved window
+position as logical points. This was reproduced with the `main` build. To
+go back to 0.1.0, exit Glass Mixer and rename the backup to `settings.json`
+first; settings changed in 0.2.0 are then lost.
 
 Volume levels are normally read from Windows. User-saved presets are the
 explicit exception: they store selected app volumes and mutes, and apply only
@@ -504,7 +546,9 @@ Additional modules: `audio/properties.rs` (~278 lines), `audio/preferences.rs`
 (~208), `platform/hotkeys.rs` (~549), `ui/presets.rs` (~92), the read-only
 `examples/sound_properties_probe.rs` (~87), and the self-restoring
 `tests/devices_integration.rs` (~130). Phase 4 adds test scripts under
-`scripts/`, its README, and `.github/workflows/ci.yml`.
+`scripts/`, its README, and `.github/workflows/ci.yml`. The audit added
+`ui/test_support.rs`, a test-only headless egui harness that reports every
+widget's accessible name and bounds.
 
 | Constant | Value |
 | --- | --- |
@@ -664,8 +708,9 @@ All on the machine in section 4, on 2026-10-15.
 
 ### Phase 1 maintenance verification (2026-10-15)
 
-This is a separate record for the unmerged `codex/glass-mixer-features`
-branch. It does not change the v0.1.0 release results above.
+This is a separate record for the unmerged feature branch (then named
+`codex/glass-mixer-features`, now `experiments`). It does not change the
+v0.1.0 release results above.
 
 - **Ran and passed:** `cargo fmt --check`; `cargo clippy --all-targets --
   -D warnings`; `cargo test` (28 library, 1 binary and 1 source-encoding
@@ -704,6 +749,16 @@ The GL-less fallback, Windows-hosted CI, code signing without an owner's
 certificate, Windows 10, and the full DPI/audio/hot-plug matrix were not run.
 See `TESTING.md` for the detailed phase report and manual checklist.
 
+### 0.2.0 beta audit verification (2026-10-16)
+
+The audit fixes were checked locally on the section 4 machine: formatting,
+clippy with warnings denied, the full test suite (including headless layout
+and accessibility tests), the release build, repeated isolated start/exit
+runs with both renderers, shortcut smoke and exit-stress tests, and UI
+Automation and screenshot checks of every view. Exact commands, run counts and
+results are in `TESTING.md`. No hosted CI run, hardware audio test, installer
+upgrade or Windows 10 test has been done for the beta.
+
 ---
 
 ## 10. Gaps against the specification
@@ -726,7 +781,7 @@ service restart were not run. Full categories are in `TESTING.md`.
 | Windows 10 testing (§13, §14 Phase 5) | Not done (no machine available). The fallback paths are written but unverified. |
 | Integration tests for tray, startup, appearance, sleep, device switching (§13 items 6–9, 12–13) | Some lifecycle and UI Automation checks are in `scripts/`; the remaining hardware and OS matrix stays manual. |
 | Mic tests (§13 item 7) | Three input endpoints accepted volume changes; real recording, mute and hot-plug remain unverified. |
-| Accessible names (§11) | Done for all custom widgets. The device ComboBox uses egui's default accessibility. |
+| Accessible names (§11) | Every interactive control has a name (checked by headless tests and `scripts/ui-automation.ps1`); toggle descriptions are exposed to AccessKit. Narrator speech and real Tab traversal are unverified. |
 | Code signing | Optional packaging hook added. No certificate is configured, so current builds remain unsigned. |
 
 ---
@@ -744,12 +799,26 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
    to a multi-session app sets every session to the same value.
    Intentional, but surprising if an app deliberately runs different
    streams at different volumes.
+2a. **Keyboard focus is not scrolled into view.** egui does not scroll a
+   newly focused control into view, so a control reached with Tab inside a
+   scroll area can stay off-screen. Programmatic (UI Automation) focus was
+   observed not to scroll; real Tab traversal was not tested.
+2b. **Downgrading to 0.1.0 drops 0.2.0 settings** (pins, presets,
+   shortcuts). See "Migration and downgrade" in section 6.
 
 ### Plausible risks
 
 3. **Renderer fallback is unverified on GL-less hardware.** OpenGL failure
-   now retries wgpu with an opaque surface, but a machine without OpenGL has
-   not yet been available to exercise the full path.
+   retries wgpu with an opaque surface on Direct3D 12 or Vulkan (never wgpu's
+   OpenGL backend, which deadlocked at exit with the NVIDIA 341.92 driver).
+   The fallback has only been exercised by forcing it in a debug build; on
+   the test machine it runs on the WARP software adapter because the GPU has
+   no Direct3D 12 or Vulkan driver. A machine without OpenGL has not been
+   available.
+3a. **Automatic preset rules may rarely fire.** A rule applies only when a
+   newly launched process's sessions start at 100% and unmuted with no
+   observed change. Windows keeps per-app levels between launches, so an app
+   whose level was ever changed may never qualify. Not verified on hardware.
 4. **Acrylic goes solid when the window loses focus.** This is Windows'
    own behaviour for `DWMSBT_TRANSIENTWINDOW`, but users may read it as
    glass "turning off".
@@ -819,9 +888,16 @@ cargo clippy --all-targets; cargo fmt       # rustfmt.toml: max_width 120
 
 ### Releasing
 
-1. Bump `version` in `Cargo.toml`.
-2. Run `scripts\package.ps1`.
-3. Commit, then run `gh release create vX.Y.Z dist\* --title …`.
+1. Set `version` in `Cargo.toml` (a pre-release such as `0.2.0-beta.1` is
+   fine; `cargo build` updates `Cargo.lock`). Also update the two values that
+   are kept by hand: the numeric `assemblyIdentity` version in
+   `assets/app.manifest` (four numbers, no pre-release suffix) and the
+   fallback `AppVersion` in `installer/glass-mixer.iss`. The exe's version
+   resource is derived from `Cargo.toml` by `build.rs`.
+2. Add the release notes to `CHANGELOG.md`.
+3. Run `scripts\package.ps1`.
+4. Commit, then run `gh release create vX.Y.Z dist\* --title …` (add
+   `--prerelease` for a beta).
 
 ### Development test scripts
 
@@ -830,7 +906,7 @@ The branch now includes these scripts under `scripts/`:
 | Script | What it does | Built on |
 | --- | --- | --- |
 | `lifecycle.ps1` | Isolated debug launch, second instance, close-to-tray, `--minimized`, CPU/memory sample, saved settings and timed clean exit | `EnumWindows` + `PostMessage(WM_CLOSE)` |
-| `ui-automation.ps1` | Read-only view-selector check; optional self-restoring System sounds actions | `System.Windows.Automation` |
+| `ui-automation.ps1` | Read-only check of view-selector order, a single Settings route and accessible names; optional self-restoring System sounds actions | `System.Windows.Automation` |
 | `capture-window.ps1` | Captures only the selected app window | `PrintWindow(PW_RENDERFULLCONTENT)` |
 | `hotkey-smoke.ps1` | Isolated show/hide global shortcut delivery, including while hidden | `RegisterHotKey` exercised through synthetic Ctrl+Alt+F23 |
 
@@ -846,16 +922,20 @@ Usage and optional signing are in `scripts/README.md`.
 
 ### Suggested next steps, in priority order
 
+0. Get a green hosted CI run for `experiments` (push or pull request) before
+   merging; until then the workflow has only been validated locally.
 1. Validate the expanded UI and device lifecycle on additional hardware.
 2. Run the manual checklist on Windows 10 and on a machine with a
    microphone and two outputs.
 3. Verify notification suppression under Focus Assist.
 4. Verify hot-plug and external changes for independent device controls.
 5. Revisit sound-property setters only with reproducible cross-build evidence.
-6. Verify opt-in hotkeys, pins and presets in a desktop session.
-7. Test the opaque wgpu fallback on a machine without OpenGL.
-8. Sign the binaries when the owner provides a certificate.
-9. Confirm the new Windows CI workflow on GitHub after a push or PR.
+6. Verify opt-in hotkeys, pins and presets in a desktop session, including
+   whether automatic rules fire for apps whose level Windows restores.
+7. Test the opaque wgpu fallback on a machine without OpenGL (and over
+   Remote Desktop).
+8. Test installing the beta over an installed 0.1.0 and uninstalling it.
+9. Sign the binaries when the owner provides a certificate.
 
 ---
 

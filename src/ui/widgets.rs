@@ -239,6 +239,13 @@ fn snap(v: f32, step: f32) -> f32 {
     (v / step).round() * step
 }
 
+/// Sets the accessible name of a widget that AccessKit would otherwise leave unnamed
+/// (combo boxes, text fields), or renames one whose visible text is too short to be
+/// meaningful to a screen reader.
+pub fn set_name(ui: &Ui, response: &Response, name: &str) {
+    ui.ctx().accesskit_node_builder(response.id, |node| node.set_label(name));
+}
+
 /// An unavailable slider has no numeric value, thumb or live meter.
 pub fn unavailable_slider(ui: &mut Ui, look: &Look, label: &str) {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().max(60.0), 26.0), Sense::hover());
@@ -333,6 +340,10 @@ pub fn toggle_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str, descript
     focus_ring(ui, rect, &response, p, 6);
     let (label_owned, selected) = (label.to_string(), *on);
     response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, selected, &label_owned));
+    // The description is painted, so give assistive technology the same text.
+    if let Some(description) = description {
+        ui.ctx().accesskit_node_builder(response.id, |node| node.set_description(description));
+    }
     response
 }
 

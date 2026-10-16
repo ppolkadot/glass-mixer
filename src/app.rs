@@ -4,7 +4,7 @@
 use crate::audio::{AudioHandle, NoticeLevel};
 use crate::platform::backdrop::{self, Applied, Support};
 use crate::platform::fonts;
-use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
+use crate::platform::hotkeys::{HotkeyEditor, HotkeyEvent, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::platform::sysprefs::SystemPrefs;
@@ -44,6 +44,28 @@ struct Toast {
     level: NoticeLevel,
     text: String,
     until: Instant,
+}
+
+/// Records which renderer and graphics adapter eframe chose, so the log shows
+/// whether the OpenGL path or the wgpu fallback (and which backend) is in use.
+fn log_renderer(cc: &eframe::CreationContext<'_>) {
+    if let Some(state) = &cc.wgpu_render_state {
+        let info = state.adapter.get_info();
+        log::info!(
+            "renderer: wgpu fallback, {:?} on \"{}\" ({:?}, driver {} {})",
+            info.backend,
+            info.name,
+            info.device_type,
+            info.driver,
+            info.driver_info
+        );
+        for adapter in &state.available_adapters {
+            let a = adapter.get_info();
+            log::debug!("available wgpu adapter: {:?} \"{}\" ({:?})", a.backend, a.name, a.device_type);
+        }
+    } else if cc.gl.is_some() {
+        log::info!("renderer: OpenGL (glow)");
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +138,7 @@ pub struct MixerApp {
 
 impl MixerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions) -> Self {
+        log_renderer(cc);
         let ctx = cc.egui_ctx.clone();
         let has_icon_font = fonts::install(&ctx);
         let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
@@ -157,7 +180,7 @@ impl MixerApp {
         };
         // The show/hide shortcut must never hide the only way back to the UI.
         let hotkeys = if tray.is_some() {
-            hwnd.and_then(|h| match HotkeyService::start(audio.clone(), h, ctx.clone()) {
+            hwnd.and_then(|_| match HotkeyService::start(audio.clone(), ctx.clone()) {
                 Ok(service) => {
                     // A start-hidden window is cloaked until its first frame.
                     // Registering the show/hide chord before that handoff can
@@ -363,6 +386,21 @@ impl MixerApp {
         self.audio.set_meters_wanted(false);
     }
 
+    /// Show/hide shortcut. Ignored once exit has begun.
+    fn toggle_window(&mut self) {
+        if self.exiting || self.shut_down {
+            return;
+        }
+        let Some(h) = self.hwnd else {
+            return;
+        };
+        if window::is_shown(h) {
+            self.hide_to_tray();
+        } else {
+            window::show(h);
+        }
+    }
+
     fn request_exit(&mut self, ctx: &egui::Context) {
         log::info!("exit requested");
         self.exiting = true;
@@ -397,13 +435,8 @@ impl MixerApp {
             && let Some((x, y)) = window::outer_position(h)
         {
             let g = WindowGeometry { x, y, width: inner.width(), height: inner.height() };
-            let changed = !self.settings.window_position_physical
-                || self.settings.window.is_none_or(|old| {
-                    (old.x - g.x).abs() > 0.5
-                        || (old.y - g.y).abs() > 0.5
-                        || (old.width - g.width).abs() > 0.5
-                        || (old.height - g.height).abs() > 0.5
-                });
+            let changed =
+                crate::settings::geometry_changed(self.settings.window, self.settings.window_position_physical, g);
             if changed && g.width > 0.0 && g.height > 0.0 {
                 self.settings.window = Some(g);
                 self.settings.window_position_physical = true;
@@ -523,6 +556,15 @@ impl eframe::App for MixerApp {
             self.hide_to_tray();
         }
 
+        // Window actions requested by global shortcuts. The shortcut thread only
+        // queues them; the UI thread owns the window, so exit can never wait on it.
+        let hotkey_events = self.hotkeys.as_ref().map(HotkeyService::take_events).unwrap_or_default();
+        for event in hotkey_events {
+            match event {
+                HotkeyEvent::ToggleWindow => self.toggle_window(),
+            }
+        }
+
         let shown = self.hwnd.is_none_or(window::is_shown);
         self.audio.set_meters_wanted(shown && self.settings.show_meters);
 
@@ -541,7 +583,7 @@ impl eframe::App for MixerApp {
             self.toast(n.level, n.text);
         }
         if let Some(service) = &self.hotkeys {
-            let errors = service.status().errors;
+            let errors = service.status().messages();
             if errors != self.last_hotkey_errors {
                 self.last_hotkey_errors = errors.clone();
                 for error in errors {
@@ -588,8 +630,11 @@ impl eframe::App for MixerApp {
                 if ui.selectable_value(&mut self.view, View::Devices, "Devices").clicked() {
                     self.audio.send(crate::audio::Command::LoadDevices);
                 }
-                ui.selectable_value(&mut self.view, View::Settings, "Settings");
                 ui.selectable_value(&mut self.view, View::Presets, "Presets");
+                if ui.selectable_value(&mut self.view, View::Settings, "Settings").clicked() {
+                    // Task Manager can change the launch-at-login state behind our back.
+                    self.login = startup::state();
+                }
             });
             ui.add_space(look.m.gap);
             match self.view {
@@ -613,9 +658,9 @@ impl eframe::App for MixerApp {
                         settings: &mut self.settings,
                         icons: &mut self.icons,
                     };
-                    if let mixer::Outcome::OpenSettings = mixer::show(ui, &mut self.mixer, &mut cx) {
-                        self.login = startup::state();
-                        self.view = View::Settings;
+                    if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
+                        self.audio.send(crate::audio::Command::LoadDevices);
+                        self.view = View::Devices;
                     }
                 }
                 View::Settings => {

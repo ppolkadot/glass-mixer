@@ -3,7 +3,7 @@
 ; Built by scripts\package.ps1 (which passes /DAppVersion=...).
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.2.0-beta.1"
 #endif
 
 [Setup]

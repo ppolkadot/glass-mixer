@@ -1,5 +1,123 @@
 # Testing
 
+## Fallback renderer exit deadlock (F-22) and 0.2.0-beta.1 checks (2026-10-16)
+
+All runs below used the isolated debug profile on the section 4 machine
+(Windows 11 build 26200, NVIDIA GeForce GT 340, driver 341.92 / 9.18.13.4192,
+no Vulkan driver). Each start/exit run passed only if the process had really
+terminated (checked by PID, not just the log), the exit code was 0 and the log
+contained both "shutdown complete" and "exited normally".
+
+**Symptom.** With `GLASS_MIXER_DEV_RENDERER=wgpu`, the process sometimes logged
+"shutdown complete" but never "exited normally" and stayed running. Before the
+fix: 5 of 12, 5 of 12, 4 of 8, 2 of 10 and 1 of 14 runs in separate sessions.
+
+**Cause.** A read-only stack dump of every thread in the hung process (a
+scratch `dbghelp` tool, not part of the repository) showed the same three
+threads in 13 of 13 captured hangs:
+
+1. The main thread inside `DestroyWindow` → `dwmapi` → `d3d11` →
+   `FreeLibrary`/`LdrUnloadDll`, waiting for the loader lock while holding a
+   `dwmapi` lock.
+2. The "wgpu-hal WGL Instance Thread" (created by wgpu's OpenGL backend)
+   exiting: `LdrShutdownThread` → the NVIDIA OpenGL driver's `DllMain`, which
+   holds the loader lock and waits for a driver thread to finish.
+3. That NVIDIA driver thread, inside its own `DestroyWindow`, blocked on the
+   `dwmapi` lock.
+
+egui-wgpu's default backends are `PRIMARY | GL`. On this machine wgpu then
+chose its OpenGL adapter ("GeForce GT 340/PCIe/SSE2"), so the fallback was
+really OpenGL again. With OpenGL excluded, the process has no WGL instance
+thread and does not load the NVIDIA OpenGL driver (`nvoglv64.dll`); it renders
+with Direct3D 12 on the WARP software adapter ("Microsoft Basic Render
+Driver"), because this GPU has no Direct3D 12 or Vulkan driver.
+
+**Fix.** The wgpu fallback is restricted to Direct3D 12 and Vulkan (`main.rs`,
+`fallback_wgpu_options`); `WGPU_BACKEND` still overrides it for diagnostics.
+The fallback only runs after OpenGL has failed, so wgpu's GL backend could not
+help there anyway. `MixerApp::new` now logs a `renderer:` line with the
+renderer, backend and adapter.
+
+**Correction to an earlier note:** the "Vulkan only: 0 hangs" runs never
+started ("Failed to create surface for any enabled backend"; no Vulkan driver).
+Only the OpenGL-only (0 of 8) and Direct3D 12-only (0 of 8) runs were real.
+
+**Results after the fix**, alternating fixed and old-backend runs in the same
+session (old backends forced with `WGPU_BACKEND=vulkan,dx12,gl`):
+
+| Session | Fixed fallback (DX12/Vulkan) | Old backends (incl. GL) | OpenGL (default renderer) |
+| --- | --- | --- | --- |
+| 1 (pre-version-bump build) | 40 of 40 clean, exit code 0 ×40 | 36 of 40 clean, 4 hung | 40 of 40 clean, exit code 0 ×40 |
+| 2 (final build) | 30 of 30 clean, exit code 0 ×30 | 22 of 30 clean, 8 hung | 30 of 30 clean, exit code 0 ×30 |
+| Total | **70 of 70** | 58 of 70 (12 hung) | **70 of 70** |
+
+Every hung run had "shutdown complete" without "exited normally", and all 12
+showed the stack signature above. The longest clean run took 5.7 s, for a
+4-second auto-exit. With the fix, `scripts/verify-ui.ps1 -Renderer wgpu` passed
+3 of 3 (it had failed intermittently before) and `scripts/lifecycle.ps1
+-Renderer wgpu` passed 2 of 2.
+
+**Release checks on the final tree:** `cargo fmt --check`; `cargo clippy --locked
+--all-targets -- -D warnings`; `cargo test --locked` (71 library tests passed with
+3 ignored, 2 binary, 1 source-encoding; the 3 ignored shortcut tests passed when
+run explicitly; the 8 hardware audio tests were not run); `cargo build --release
+--locked` (exe 15,789,056 bytes, version resource `0.2.0-beta.1`, numeric
+0.2.0.0). The About section shows "Glass Mixer 0.2.0-beta.1". A copy of the
+real 0.1.0 settings file in an isolated profile was migrated to version 4 with
+theme, accent, density and window kept, and `settings.v1.backup.json` matched
+the original byte for byte. `verify-ui.ps1` (OpenGL), `lifecycle.ps1` (OpenGL)
+and both `hotkey-smoke.ps1` modes passed.
+
+**Not verified:** a machine where OpenGL really fails. Replacing
+`opengl32.dll` to simulate this makes the exe fail at load, because it imports
+OpenGL statically. Also not verified: other GPUs and drivers, Remote Desktop,
+a Vulkan-capable machine, release builds of the fallback (the renderer can only
+be forced in debug builds), and installing over 0.1.0.
+
+## Layout, accessibility, rules and CI fixes (audit tasks T-03 to T-07)
+
+- **Headless UI tests** (`src/ui/test_support.rs`): egui runs against an in-memory
+  screen with AccessKit enabled, and tests assert that no control is drawn past the
+  window edge at the minimum width (Mixer, offline pins, Devices, sound properties,
+  Presets, Settings with the shortcut editor), that every interactive control has an
+  accessible name, that toggle descriptions are exposed, and that the Mixer view has
+  one Settings route and no nested properties panel. The harness has its own tests
+  proving it detects painter-only overflow, unnamed controls and overflowing widgets.
+- **Rule and preset logic:** `StartTracker` (once per new process, arming, interventions,
+  launch order), `plan_preset`, preset-name uniqueness, automatic-rule conflicts and
+  `geometry_changed` are covered by unit tests. Engine COM calls that apply levels are
+  not unit-testable and remain on the manual checklist.
+- **Scripts:** `scripts/ui-automation.ps1` now also fails on an unnamed interactive control,
+  a duplicate Settings route or a wrong view-selector order.
+- **CI:** `.github/workflows/ci.yml` runs on pushes to `main`, `experiments` and
+  `codex/**`, on every pull request, and by hand. It runs fmt, clippy (deny warnings),
+  tests and a release build, all with `--locked`. The YAML was parsed with a real YAML
+  parser and each step was run locally; a hosted run has **not** happened yet.
+- **Known limitation:** egui does not scroll a newly focused control into view, so a
+  control reached by keyboard inside a scroll area can stay off-screen (programmatic
+  focus was observed not to scroll). Real Tab traversal and Narrator were not tested.
+- **Exit hang with the forced wgpu renderer:** found during this work and fixed
+  afterwards (F-22, see the section at the top of this file).
+
+## Shortcut registration and shutdown fixes (audit tasks T-01 and T-02)
+
+- **Unit tests:** per-binding validation (an invalid or duplicate binding no
+  longer rejects the others), shortcut resolution (window shortcuts become a
+  queued `HotkeyEvent`; volume step; stale messages ignored), and prompt service
+  shutdown. The module also has a source guard that it does not call `window::`.
+- **Ignored tests (register real global chords; run with
+  `cargo test --lib platform::hotkeys -- --ignored --test-threads=1`):** a chord
+  held by another "application" leaves the other bindings active and a retry
+  recovers once it is released; shutdown completes while `Ctrl+Alt+F21` is being
+  injected into the input queue.
+- **End to end (isolated debug profile):** the old build hung on exit in 14 of 14
+  runs when `Ctrl+Alt+F23` was pressed repeatedly across the exit deadline; the
+  fixed build exited cleanly in 14 of 14. A Windows conflict plus an invalid chord
+  leaves the remaining shortcut working, shows each reason, and "Retry failed
+  shortcuts" activates the conflicting one after it is released.
+- **Not verified:** other keyboard layouts, chords reserved by other software,
+  and behavior during real logoff/shutdown.
+
 ## Final review verification (2026-10-16)
 
 - **Ran and passed:** `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
@@ -233,3 +351,13 @@ with at least two output devices and one microphone.
 - [ ] Restart the Windows Audio service (`net stop audiosrv`, then `net start audiosrv`, as admin): the mixer shows "unavailable", then recovers by itself.
 - [ ] Leave it running for 24 h: memory and handle count in Task Manager stay flat.
 - [ ] Delete or corrupt `%APPDATA%\GlassMixer\settings.json`: the app starts with defaults and a notice, and keeps the bad file as `.json.bad`.
+
+### 0.2.0 beta additions (not yet run on real hardware unless noted)
+- [ ] Install the beta over an installed 0.1.0: the app upgrades in place, settings keep their theme, accent and window, and `settings.v1.backup.json` appears next to `settings.json`. Uninstall leaves settings in place.
+- [ ] Go back to 0.1.0 after renaming `settings.v1.backup.json` to `settings.json`: 0.1.0 starts with its old settings.
+- [ ] Devices view with two outputs and a microphone: each device's volume, mute and balance change only that device; unplug and replug one while the view is open.
+- [ ] Global shortcuts: bind all five, hide the window and use each; bind a chord another app owns and check "Not active" plus Retry after that app releases it; restart and confirm the same state.
+- [ ] Presets: save, apply, delete; enable an automatic rule, launch the app fresh (including one whose level Windows remembered) and note whether the rule applied.
+- [ ] Keyboard only: Tab through Mixer, Devices (expanded), Presets and Settings; note any focused control that stays off-screen.
+- [ ] On a machine or VM where OpenGL fails (or over Remote Desktop): the app opens an opaque window, the log has a `renderer: wgpu fallback, Dx12 …` or `Vulkan …` line, Settings explains the solid background, and exit completes.
+- [ ] 125%, 150% and 200% scaling, light theme and high contrast: no clipped controls in any view.

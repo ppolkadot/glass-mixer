@@ -180,6 +180,56 @@ pub fn may_apply_at_start(created: Option<u64>, armed: u64, last_seen: Option<u6
     untouched && created.is_some_and(|t| t > armed && last_seen.is_none_or(|last| t > last))
 }
 
+/// Remembers which process instance of each app has already been considered, so an
+/// automatic rule applies at most once per new process.
+#[derive(Debug, Default)]
+pub struct StartTracker {
+    armed_at: u64,
+    last_started: std::collections::HashMap<AppKey, u64>,
+}
+
+impl StartTracker {
+    pub fn new(armed_at: u64) -> Self {
+        Self { armed_at, last_started: Default::default() }
+    }
+
+    /// Starts over: only processes created after `armed_at` qualify from now on.
+    pub fn rearm(&mut self, armed_at: u64) {
+        self.armed_at = armed_at;
+        self.last_started.clear();
+    }
+
+    /// The user (or a preset) set this process's levels, so it never qualifies afterwards.
+    pub fn note_intervention(&mut self, key: &AppKey, created: u64) {
+        let last = self.last_started.entry(key.clone()).or_insert(created);
+        *last = (*last).max(created);
+    }
+
+    /// Whether the rule may apply to the process of `key` created at `created`.
+    /// Records the process as seen either way. Call in ascending `created` order
+    /// when several processes of one app appear at once.
+    pub fn observe(&mut self, key: &AppKey, created: u64, untouched: bool) -> bool {
+        let previous = self.last_started.get(key).copied();
+        if previous.is_none_or(|last| created > last) {
+            self.last_started.insert(key.clone(), created);
+        }
+        may_apply_at_start(Some(created), self.armed_at, previous, untouched)
+    }
+}
+
+/// Which saved entries a preset can apply to right now.
+#[derive(Debug, PartialEq)]
+pub struct PresetPlan<'a> {
+    pub present: Vec<&'a PresetEntry>,
+    /// Entries for apps that have no live session.
+    pub missing: usize,
+}
+
+pub fn plan_preset<'a>(preset: &'a VolumePreset, is_live: impl Fn(&AppKey) -> bool) -> PresetPlan<'a> {
+    let (present, absent): (Vec<_>, Vec<_>) = preset.entries.iter().partition(|entry| is_live(&entry.key));
+    PresetPlan { present, missing: absent.len() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +271,88 @@ mod tests {
         assert!(!may_apply_at_start(Some(101), 100, Some(101), true));
         assert!(!may_apply_at_start(Some(101), 100, None, false));
         assert!(!may_apply_at_start(None, 100, None, true));
+    }
+
+    fn exe(path: &str) -> AppKey {
+        AppKey::Exe(path.into())
+    }
+
+    #[test]
+    fn a_new_process_is_considered_exactly_once() {
+        let mut tracker = StartTracker::new(100);
+        let app = exe(r"c:\apps\player.exe");
+        assert!(tracker.observe(&app, 150, true), "first sighting of a process started after arming");
+        assert!(!tracker.observe(&app, 150, true), "the same process is never applied twice");
+        assert!(tracker.observe(&app, 200, true), "a later launch of the same app is a new process");
+        assert!(!tracker.observe(&app, 120, true), "an older process than one already seen is skipped");
+    }
+
+    #[test]
+    fn processes_that_predate_arming_or_were_touched_never_qualify() {
+        let mut tracker = StartTracker::new(100);
+        let app = exe(r"c:\apps\player.exe");
+        assert!(!tracker.observe(&app, 90, true), "already running when the rule was armed");
+        assert!(!tracker.observe(&app, 160, false), "its levels were changed before the first look");
+        assert!(!tracker.observe(&app, 160, true), "and a touched process stays skipped");
+    }
+
+    #[test]
+    fn apps_are_tracked_independently() {
+        let mut tracker = StartTracker::new(100);
+        let (a, b) = (exe("a.exe"), AppKey::Package("pkg!app".into()));
+        assert!(tracker.observe(&a, 150, true));
+        assert!(tracker.observe(&b, 150, true), "another app with the same start time is not affected");
+    }
+
+    #[test]
+    fn an_intervention_blocks_the_rule_for_that_process_only() {
+        let mut tracker = StartTracker::new(100);
+        let app = exe("a.exe");
+        tracker.note_intervention(&app, 150);
+        assert!(!tracker.observe(&app, 150, true), "a preset or user change was already made to this process");
+        assert!(tracker.observe(&app, 160, true), "the next launch is a new process");
+    }
+
+    #[test]
+    fn rearming_forgets_history_and_ignores_older_processes() {
+        let mut tracker = StartTracker::new(100);
+        let app = exe("a.exe");
+        assert!(tracker.observe(&app, 150, true));
+        tracker.rearm(300);
+        assert!(!tracker.observe(&app, 250, true), "started before the new arming time");
+        assert!(tracker.observe(&app, 350, true), "started after it, history cleared");
+    }
+
+    #[test]
+    fn launch_order_decides_which_new_process_is_seen_first() {
+        // The engine sorts same-pass processes oldest first. Judged in that order both qualify...
+        let mut ordered = StartTracker::new(100);
+        let app = exe("a.exe");
+        assert!(ordered.observe(&app, 150, true));
+        assert!(ordered.observe(&app, 160, true));
+        // ...but judging the newer one first would hide the older one, which is why order matters.
+        let mut reversed = StartTracker::new(100);
+        assert!(reversed.observe(&app, 160, true));
+        assert!(!reversed.observe(&app, 150, true));
+    }
+
+    #[test]
+    fn a_preset_plan_separates_running_from_missing_apps() {
+        let entry = |key: AppKey, name: &str| PresetEntry { key, name: name.into(), volume: 0.5, muted: false };
+        let preset = VolumePreset {
+            name: "Mix".into(),
+            apply_on_start: false,
+            entries: vec![
+                entry(AppKey::System, "System sounds"),
+                entry(exe("running.exe"), "Running"),
+                entry(exe("gone.exe"), "Gone"),
+            ],
+        };
+        let live = [AppKey::System, exe("running.exe")];
+        let plan = plan_preset(&preset, |key| live.contains(key));
+        assert_eq!(plan.present.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["System sounds", "Running"]);
+        assert_eq!(plan.missing, 1);
+        assert_eq!(plan_preset(&preset, |_| false).missing, 3);
+        assert!(plan_preset(&preset, |_| false).present.is_empty());
     }
 }
