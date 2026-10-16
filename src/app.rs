@@ -4,6 +4,7 @@
 use crate::audio::{AudioHandle, NoticeLevel};
 use crate::platform::backdrop::{self, Applied, Support};
 use crate::platform::fonts;
+use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::platform::sysprefs::SystemPrefs;
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 const PREFS_INTERVAL: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 pub struct StartOptions {
     pub store: SettingsStore,
     pub settings: Settings,
@@ -26,12 +28,15 @@ pub struct StartOptions {
     /// Start with only the tray icon.
     pub hidden: bool,
     pub restored_position: Option<(i32, i32)>,
+    /// The fallback renderer uses a solid surface when OpenGL initialization fails.
+    pub force_opaque: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Mixer,
     Devices,
+    Presets,
     Settings,
 }
 
@@ -77,6 +82,10 @@ impl BackdropRejection {
 pub struct MixerApp {
     audio: AudioHandle,
     icons: IconService,
+    hotkeys: Option<HotkeyService>,
+    hotkey_editor: HotkeyEditor,
+    preset_editor: crate::ui::presets::PresetEditor,
+    last_hotkey_errors: Vec<String>,
     store: SettingsStore,
     settings: Settings,
     dirty_since: Option<Instant>,
@@ -100,6 +109,9 @@ pub struct MixerApp {
     shut_down: bool,
     /// Started with `--minimized`: hide once eframe has shown the (cloaked) window.
     pending_start_hide: bool,
+    force_opaque: bool,
+    #[cfg(debug_assertions)]
+    dev_exit_at: Option<Instant>,
 }
 
 impl MixerApp {
@@ -117,6 +129,7 @@ impl MixerApp {
         }
 
         let audio = AudioHandle::start();
+        audio.send(crate::audio::Command::SetPresetRules(opts.settings.presets.clone()));
         {
             let ctx = ctx.clone();
             audio.add_listener(move || ctx.request_repaint());
@@ -125,7 +138,6 @@ impl MixerApp {
             let ctx = ctx.clone();
             IconService::start(move || ctx.request_repaint())
         };
-
         let (tray_tx, tray_rx) = crossbeam_channel::unbounded();
         let mut toasts = Vec::new();
         let tray = match hwnd {
@@ -142,6 +154,23 @@ impl MixerApp {
                 }
             },
             None => None,
+        };
+        // The show/hide shortcut must never hide the only way back to the UI.
+        let hotkeys = if tray.is_some() {
+            hwnd.and_then(|h| match HotkeyService::start(audio.clone(), h, ctx.clone()) {
+                Ok(service) => {
+                    if let Err(e) = service.configure(&opts.settings.hotkeys, opts.settings.hotkey_step) {
+                        log::warn!("global shortcut setup: {e}");
+                    }
+                    Some(service)
+                }
+                Err(e) => {
+                    log::warn!("global shortcuts unavailable: {e}");
+                    None
+                }
+            })
+        } else {
+            None
         };
         if let Some(err) = opts.load_error {
             toasts.push(Toast {
@@ -181,6 +210,10 @@ impl MixerApp {
         let mut app = Self {
             audio,
             icons,
+            hotkeys,
+            hotkey_editor: HotkeyEditor::default(),
+            preset_editor: crate::ui::presets::PresetEditor::default(),
+            last_hotkey_errors: Vec::new(),
             store: opts.store,
             settings: opts.settings,
             dirty_since: None,
@@ -203,6 +236,12 @@ impl MixerApp {
             style_key: None,
             shut_down: false,
             pending_start_hide: start_hidden,
+            force_opaque: opts.force_opaque,
+            #[cfg(debug_assertions)]
+            dev_exit_at: std::env::var_os("GLASS_MIXER_DEV_PROFILE")
+                .and_then(|_| std::env::var("GLASS_MIXER_DEV_EXIT_AFTER_MS").ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|ms| Instant::now() + Duration::from_millis(ms)),
         };
         app.refresh_look(&ctx);
         app
@@ -230,6 +269,8 @@ impl MixerApp {
     fn glass_status(&self) -> GlassStatus {
         if !self.settings.glass {
             GlassStatus::TurnedOff
+        } else if self.force_opaque {
+            GlassStatus::RendererFallback
         } else if self.prefs.high_contrast {
             GlassStatus::HighContrast
         } else if !self.prefs.transparency {
@@ -336,6 +377,7 @@ impl MixerApp {
             log::error!("saving settings on exit failed: {e}");
         }
         self.tray = None;
+        self.hotkeys = None;
         self.audio.shutdown();
         self.icons.shutdown();
         log::info!("shutdown complete");
@@ -426,6 +468,15 @@ impl eframe::App for MixerApp {
     /// Runs before every frame and also while the window is hidden (on repaint
     /// requests from the audio engine, tray or icon threads).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(debug_assertions)]
+        if let Some(deadline) = self.dev_exit_at {
+            if Instant::now() >= deadline {
+                self.dev_exit_at = None;
+                self.request_exit(ctx);
+            } else {
+                ctx.request_repaint_after(deadline - Instant::now());
+            }
+        }
         if self.pending_start_hide
             && let Some(h) = self.hwnd
         {
@@ -466,12 +517,27 @@ impl eframe::App for MixerApp {
         self.audio.set_meters_wanted(shown && self.settings.show_meters);
 
         let snapshot = self.audio.snapshot();
-        self.icons.sync_live_apps(snapshot.apps.iter().map(|app| app.key.clone()));
+        self.icons.sync_live_apps(
+            snapshot
+                .apps
+                .iter()
+                .map(|app| app.key.clone())
+                .chain(self.settings.pinned_apps.iter().map(|p| p.key.clone())),
+        );
         if let Some(tray) = self.tray.as_mut() {
             tray.update(&snapshot);
         }
         for n in self.audio.take_notices() {
             self.toast(n.level, n.text);
+        }
+        if let Some(service) = &self.hotkeys {
+            let errors = service.status().errors;
+            if errors != self.last_hotkey_errors {
+                self.last_hotkey_errors = errors.clone();
+                for error in errors {
+                    self.toast(NoticeLevel::Warning, error);
+                }
+            }
         }
 
         if shown {
@@ -513,6 +579,7 @@ impl eframe::App for MixerApp {
                     self.audio.send(crate::audio::Command::LoadDevices);
                 }
                 ui.selectable_value(&mut self.view, View::Settings, "Settings");
+                ui.selectable_value(&mut self.view, View::Presets, "Presets");
             });
             ui.add_space(look.m.gap);
             match self.view {
@@ -522,7 +589,7 @@ impl eframe::App for MixerApp {
                         snap: &snapshot,
                         meters: &meters,
                         look: &look,
-                        settings: &self.settings,
+                        settings: &mut self.settings,
                         icons: &mut self.icons,
                     };
                     mixer::show_devices(ui, &mut self.mixer, &mut cx);
@@ -533,7 +600,7 @@ impl eframe::App for MixerApp {
                         snap: &snapshot,
                         meters: &meters,
                         look: &look,
-                        settings: &self.settings,
+                        settings: &mut self.settings,
                         icons: &mut self.icons,
                     };
                     if let mixer::Outcome::OpenSettings = mixer::show(ui, &mut self.mixer, &mut cx) {
@@ -553,23 +620,42 @@ impl eframe::App for MixerApp {
                         audio: &self.audio,
                         icons: &mut self.icons,
                         settings_path: self.store.path(),
+                        hotkeys: self.hotkeys.as_ref(),
+                        hotkey_editor: &mut self.hotkey_editor,
                         errors: &mut errors,
                     };
                     if let settings_view::Outcome::Back = settings_view::show(ui, &mut cx) {
                         self.view = View::Mixer;
                     }
                 }
+                View::Presets => crate::ui::presets::show(
+                    ui,
+                    &mut self.preset_editor,
+                    &mut self.settings,
+                    &snapshot,
+                    &self.audio,
+                    &mut errors,
+                ),
             }
         });
 
-        for e in errors {
-            self.toast(NoticeLevel::Error, e);
-        }
         if self.settings != before {
+            if self.settings.presets != before.presets {
+                self.audio.send(crate::audio::Command::SetPresetRules(self.settings.presets.clone()));
+            }
+            if (self.settings.hotkeys != before.hotkeys || self.settings.hotkey_step != before.hotkey_step)
+                && let Some(service) = &self.hotkeys
+                && let Err(e) = service.configure(&self.settings.hotkeys, self.settings.hotkey_step)
+            {
+                errors.push(e);
+            }
             self.mark_dirty();
             let ctx = ui.ctx().clone();
             self.refresh_look(&ctx);
             ctx.request_repaint();
+        }
+        for e in errors {
+            self.toast(NoticeLevel::Error, e);
         }
         self.draw_toasts(ui);
     }

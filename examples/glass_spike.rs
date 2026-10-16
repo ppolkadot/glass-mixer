@@ -1,7 +1,8 @@
 //! Spike: verify that a transparent eframe/glow window can show a native
 //! Windows 11 system backdrop (Acrylic / Mica) behind egui content.
 //!
-//! Env vars: GM_BACKDROP = acrylic | mica | none, GM_EXTEND = 1 | 0, GM_DARK = 1 | 0
+//! Env vars: GM_BACKDROP = acrylic | mica | none, GM_EXTEND = 1 | 0,
+//! GM_DARK = 1 | 0, GM_RENDERER = glow | wgpu
 #![windows_subsystem = "windows"]
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -44,7 +45,11 @@ fn main() -> eframe::Result {
             .with_inner_size([420.0, 320.0])
             .with_position([60.0, 60.0])
             .with_transparent(true),
-        renderer: eframe::Renderer::Glow,
+        renderer: if std::env::var("GM_RENDERER").is_ok_and(|value| value.eq_ignore_ascii_case("wgpu")) {
+            eframe::Renderer::Wgpu
+        } else {
+            eframe::Renderer::Glow
+        },
         ..Default::default()
     };
     eframe::run_native(

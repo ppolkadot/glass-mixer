@@ -15,6 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
@@ -35,6 +36,14 @@ const RESUME_SETTLE: Duration = Duration::from_millis(1500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 type WinResult<T> = windows::core::Result<T>;
+
+fn current_filetime() -> u64 {
+    const UNIX_TO_FILETIME_SECONDS: u64 = 11_644_473_600;
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| (t.as_secs() + UNIX_TO_FILETIME_SECONDS) * 10_000_000 + (t.subsec_nanos() as u64 / 100))
+        .unwrap_or(u64::MAX)
+}
 
 fn open_settings(uri: &str) -> Result<(), String> {
     use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
@@ -76,6 +85,7 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
         last_meters: Meters::default(),
         was_unavailable: false,
         devices_loaded: false,
+        preset_rules: Vec::new(),
     };
 
     loop {
@@ -115,6 +125,7 @@ struct Runner {
     last_meters: Meters,
     was_unavailable: bool,
     devices_loaded: bool,
+    preset_rules: Vec<super::preferences::VolumePreset>,
 }
 
 impl Runner {
@@ -143,6 +154,42 @@ impl Runner {
     }
 
     fn apply(&mut self, cmd: Command) {
+        if let Command::SetPresetRules(presets) = &cmd {
+            self.preset_rules = presets.clone();
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_preset_rules(presets.clone());
+            }
+            return;
+        }
+        if let Command::ApplyPreset(preset) = &cmd {
+            let Some(engine) = self.engine.as_mut() else {
+                self.shared.push_notice(NoticeLevel::Error, "Audio service unavailable; preset was not applied.");
+                return;
+            };
+            match engine.apply_preset(preset.clone()) {
+                Ok((applied, missing)) => {
+                    self.dirty.values = true;
+                    if applied == 0 {
+                        self.shared.push_notice(
+                            NoticeLevel::Warning,
+                            "No saved apps are currently running; nothing was changed.",
+                        );
+                    } else if missing > 0 {
+                        self.shared.push_notice(
+                            NoticeLevel::Warning,
+                            format!("Preset applied to {applied} app(s); {missing} saved app(s) are not running."),
+                        );
+                    } else {
+                        self.shared.push_notice(NoticeLevel::Info, format!("Preset applied to {applied} app(s)."));
+                    }
+                }
+                Err(err) => {
+                    self.dirty.values = true;
+                    self.shared.push_notice(NoticeLevel::Error, err.to_string());
+                }
+            }
+            return;
+        }
         if matches!(cmd, Command::OpenSoundSettings | Command::OpenMonoSettings) {
             let uri = if cmd == Command::OpenSoundSettings {
                 super::properties::SOUND_SETTINGS_URI
@@ -207,6 +254,7 @@ impl Runner {
             match Engine::new(self.tx.clone()) {
                 Ok(mut engine) => {
                     engine.devices_loaded = self.devices_loaded;
+                    engine.set_preset_rules(self.preset_rules.clone());
                     self.engine = Some(engine);
                     self.retry_at = None;
                     self.dirty = Dirty { devices: true, sessions: true, values: true, rebuild: false };
@@ -376,6 +424,9 @@ struct Engine {
     endpoint_errors: HashMap<String, String>,
     devices_loaded: bool,
     properties: HashMap<String, super::properties::DeviceProperties>,
+    preset_rules: Vec<super::preferences::VolumePreset>,
+    rules_armed_at: u64,
+    last_started: HashMap<AppKey, u64>,
 }
 
 impl Engine {
@@ -405,6 +456,9 @@ impl Engine {
             endpoint_errors: HashMap::new(),
             devices_loaded: false,
             properties: HashMap::new(),
+            preset_rules: Vec::new(),
+            rules_armed_at: current_filetime(),
+            last_started: HashMap::new(),
         })
     }
 
@@ -496,6 +550,7 @@ impl Engine {
     }
 
     fn snapshot(&mut self) -> WinResult<AudioSnapshot> {
+        self.apply_start_rules()?;
         let mut facts = Vec::new();
         let mut needs_sync = false;
         if let Some(set) = &self.sessions {
@@ -570,6 +625,20 @@ impl Engine {
     fn apply(&mut self, cmd: &Command) -> Result<bool, ApplyError> {
         let ctx = &OWN_EVENT_CONTEXT;
         match cmd {
+            Command::ToggleInputMute => {
+                let ep = self.endpoint(Flow::Input)?;
+                let what = || format!("Couldn't change mute for {}", ep.name);
+                let muted = unsafe { ep.volume.GetMute() }.context(what)?.as_bool();
+                unsafe { ep.volume.SetMute(!muted, ctx) }.context(what)?;
+            }
+            Command::AdjustOutputVolume { delta } => {
+                let ep = self.endpoint(Flow::Output)?;
+                let what = || format!("Couldn't change volume for {}", ep.name);
+                let current = unsafe { ep.volume.GetMasterVolumeLevelScalar() }.context(what)?;
+                unsafe { ep.volume.SetMasterVolumeLevelScalar((current + delta).clamp(0.0, 1.0), ctx) }
+                    .context(what)?;
+            }
+            Command::ApplyPreset(_) | Command::SetPresetRules(_) => {}
             Command::LoadDevices => {
                 self.devices_loaded = true;
                 return Ok(true);
@@ -624,9 +693,11 @@ impl Engine {
             }
             Command::SetAppVolume { key, volume } => {
                 self.for_app(key, "volume", |s| unsafe { s.simple.SetMasterVolume(volume.clamp(0.0, 1.0), ctx) })?;
+                self.mark_key_intervened(key);
             }
             Command::SetAppMute { key, muted } => {
                 self.for_app(key, "mute", |s| unsafe { s.simple.SetMute(*muted, ctx) })?;
+                self.mark_key_intervened(key);
             }
             Command::SetAppBalance { key, balance } => {
                 let (l, r) = channels_from_balance(*balance);
@@ -637,10 +708,104 @@ impl Engine {
                     },
                     _ => Ok(()),
                 })?;
+                self.mark_key_intervened(key);
             }
             Command::Refresh | Command::OpenSoundSettings | Command::OpenMonoSettings => {}
         }
         Ok(false)
+    }
+
+    fn set_preset_rules(&mut self, presets: Vec<super::preferences::VolumePreset>) {
+        self.preset_rules = presets.into_iter().filter(|p| p.apply_on_start).collect();
+        self.rules_armed_at = current_filetime();
+        self.last_started.clear();
+    }
+
+    fn apply_preset(&mut self, preset: super::preferences::VolumePreset) -> Result<(usize, usize), ApplyError> {
+        let Some(preset) = preset.sanitize() else {
+            return Err(ApplyError::Message("Preset has no valid name.".into()));
+        };
+        let mut applied = 0;
+        let mut missing = 0;
+        for entry in &preset.entries {
+            let sessions: Vec<_> =
+                self.sessions.iter().flat_map(|set| set.sessions.iter()).filter(|s| s.key == entry.key).collect();
+            if sessions.is_empty() {
+                missing += 1;
+                continue;
+            }
+            for session in sessions {
+                unsafe {
+                    session
+                        .simple
+                        .SetMasterVolume(entry.volume, &OWN_EVENT_CONTEXT)
+                        .context(|| format!("Preset partially applied; couldn't set volume for {}", entry.name))?;
+                    session
+                        .simple
+                        .SetMute(entry.muted, &OWN_EVENT_CONTEXT)
+                        .context(|| format!("Preset partially applied; couldn't set mute for {}", entry.name))?;
+                }
+            }
+            self.mark_key_intervened(&entry.key);
+            applied += 1;
+        }
+        Ok((applied, missing))
+    }
+
+    fn mark_key_intervened(&mut self, key: &AppKey) {
+        if let Some(set) = &self.sessions {
+            for session in set.sessions.iter().filter(|s| &s.key == key) {
+                if let Some(created) = set.processes.get(&session.pid).and_then(|p| p.started_at) {
+                    let last = self.last_started.entry(key.clone()).or_insert(created);
+                    *last = (*last).max(created);
+                }
+            }
+        }
+    }
+
+    fn apply_start_rules(&mut self) -> WinResult<()> {
+        if self.preset_rules.is_empty() {
+            return Ok(());
+        }
+        let Some(set) = &self.sessions else {
+            return Ok(());
+        };
+        let mut groups: HashMap<(AppKey, u64), Vec<&Session>> = HashMap::new();
+        for session in &set.sessions {
+            let Some(created) = set.processes.get(&session.pid).and_then(|p| p.started_at) else {
+                continue;
+            };
+            if self.preset_rules.iter().any(|p| p.entries.iter().any(|e| e.key == session.key)) {
+                groups.entry((session.key.clone(), created)).or_default().push(session);
+            }
+        }
+        for ((key, created), sessions) in groups {
+            let previous = self.last_started.get(&key).copied();
+            if previous.is_none_or(|last| created > last) {
+                self.last_started.insert(key.clone(), created);
+            }
+            let untouched = sessions.iter().all(|s| {
+                !s.changed.load(Ordering::Relaxed)
+                    && unsafe {
+                        s.simple.GetMasterVolume().ok().is_some_and(|v| (v - 1.0).abs() < 0.0001)
+                            && s.simple.GetMute().ok().is_some_and(|m| !m.as_bool())
+                    }
+            });
+            if !super::preferences::may_apply_at_start(Some(created), self.rules_armed_at, previous, untouched) {
+                continue;
+            }
+            let Some(entry) = self.preset_rules.iter().flat_map(|p| &p.entries).find(|e| e.key == key) else {
+                continue;
+            };
+            for s in sessions {
+                unsafe {
+                    s.simple.SetMasterVolume(entry.volume, &OWN_EVENT_CONTEXT)?;
+                    s.simple.SetMute(entry.muted, &OWN_EVENT_CONTEXT)?;
+                }
+            }
+            log::info!("automatic preset applied once to a new process for {:?}", key);
+        }
+        Ok(())
     }
 
     fn endpoint(&self, flow: Flow) -> Result<&Endpoint, ApplyError> {
@@ -805,6 +970,7 @@ struct SessionSet {
 struct ProcessEntry {
     info: ProcessInfo,
     watch: Option<ProcessWatch>,
+    started_at: Option<u64>,
 }
 
 impl SessionSet {
@@ -881,6 +1047,7 @@ struct Session {
     channels: Option<IChannelAudioVolume>,
     meter: Option<IAudioMeterInformation>,
     events: IAudioSessionEvents,
+    changed: Arc<AtomicBool>,
     pid: u32,
     key: AppKey,
     name: String,
@@ -910,14 +1077,15 @@ impl Session {
             let entry = processes.entry(pid).or_insert_with(|| match process::open(pid) {
                 Some(handle) => {
                     let info = process::query(&handle);
+                    let started_at = process::created_at(&handle);
                     let watch = ProcessWatch::new(handle, tx.clone());
-                    ProcessEntry { info, watch }
+                    ProcessEntry { info, watch, started_at }
                 }
-                None => ProcessEntry { info: ProcessInfo::default(), watch: None },
+                None => ProcessEntry { info: ProcessInfo::default(), watch: None, started_at: None },
             });
             let info = &entry.info;
             let key = if let Some(aumid) = &info.aumid {
-                AppKey::Package(aumid.clone())
+                AppKey::Package(aumid.to_lowercase())
             } else if let Some(path) = &info.exe_path {
                 AppKey::Exe(path.to_string_lossy().to_lowercase())
             } else {
@@ -935,7 +1103,8 @@ impl Session {
             (key, name, info.exe_path.clone(), info.aumid.clone())
         };
 
-        let events = SessionEvents::create(tx.clone());
+        let changed = Arc::new(AtomicBool::new(false));
+        let events = SessionEvents::create(tx.clone(), changed.clone());
         unsafe { control.RegisterAudioSessionNotification(&events)? };
         Ok(Self {
             instance_id,
@@ -944,6 +1113,7 @@ impl Session {
             channels,
             meter,
             events,
+            changed,
             pid,
             key,
             name,
