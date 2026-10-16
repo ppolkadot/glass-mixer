@@ -1,13 +1,29 @@
 name: Rust CI
 
+# Runs on pushes to the long-lived branches and on every pull request, so a
+# PR into main (or any other branch) is always validated. Run it by hand from
+# the Actions tab with "Run workflow" when needed.
 on:
   push:
-    branches: [main, 'codex/**']
+    branches: [main, experiments, 'codex/**']
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the older run redundant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,6 +33,10 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+      # Hardware, desktop-input and global-shortcut tests are #[ignore]d and do
+      # not run here (see docs/TESTING.md).
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+      - name: Release build
+        run: cargo build --release --locked

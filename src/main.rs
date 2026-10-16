@@ -99,9 +99,32 @@ fn run_with_renderer(
         renderer,
         centered: start.restored_position.is_none(),
         persist_window: false,
+        wgpu_options: fallback_wgpu_options(),
         ..Default::default()
     };
     eframe::run_native(window::WINDOW_TITLE, options, Box::new(move |cc| Ok(Box::new(MixerApp::new(cc, start)))))
+}
+
+/// The wgpu fallback uses Direct3D 12 or Vulkan, never wgpu's OpenGL backend.
+///
+/// The fallback only runs after OpenGL has failed, so wgpu's GL backend cannot
+/// help. It also caused an intermittent exit deadlock: its instance owns a
+/// "wgpu-hal WGL Instance Thread" that loads the vendor OpenGL driver. When that
+/// thread exits during teardown, the driver's `DllMain` (holding the loader lock)
+/// waits for a driver thread that needs a `dwmapi` lock, which the main thread
+/// holds while destroying the window and waiting for the loader lock. Observed in
+/// thread stacks of a hung process with the NVIDIA 341.92 driver. `WGPU_BACKEND`
+/// still overrides this for diagnostics.
+fn fallback_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = fallback_backends(wgpu::Backends::from_env());
+    WgpuConfiguration { wgpu_setup: WgpuSetup::CreateNew(setup), ..Default::default() }
+}
+
+fn fallback_backends(from_env: Option<eframe::egui_wgpu::wgpu::Backends>) -> eframe::egui_wgpu::wgpu::Backends {
+    use eframe::egui_wgpu::wgpu::Backends;
+    from_env.unwrap_or(Backends::DX12 | Backends::VULKAN)
 }
 
 #[derive(Clone, Copy)]
@@ -208,6 +231,25 @@ fn show_error(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wgpu_fallback_never_enables_the_opengl_backend_by_default() {
+        use eframe::egui_wgpu::wgpu::Backends;
+        let backends = fallback_backends(None);
+        assert!(!backends.contains(Backends::GL), "wgpu's GL backend caused the exit deadlock (F-22)");
+        assert!(backends.contains(Backends::DX12) && backends.contains(Backends::VULKAN));
+        assert_eq!(fallback_backends(Some(Backends::GL)), Backends::GL, "WGPU_BACKEND still overrides for diagnostics");
+        let options = fallback_wgpu_options();
+        match options.wgpu_setup {
+            eframe::egui_wgpu::WgpuSetup::CreateNew(setup) => {
+                // The real environment may set WGPU_BACKEND; without it, GL must be absent.
+                if std::env::var_os("WGPU_BACKEND").is_none() {
+                    assert!(!setup.instance_descriptor.backends.contains(Backends::GL));
+                }
+            }
+            other => panic!("unexpected wgpu setup {other:?}"),
+        }
+    }
 
     #[test]
     fn restored_position_uses_the_target_monitors_dpi() {

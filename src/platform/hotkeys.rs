@@ -1,7 +1,16 @@
 //! Optional global shortcuts. A dedicated Win32 message loop sleeps in
 //! `GetMessageW`; configuration and shutdown wake it with thread messages.
+//!
+//! The worker thread never touches the UI window. Window actions are queued as
+//! [`HotkeyEvent`]s and carried out by the UI thread, so shutdown never waits on a
+//! cross-thread window call. Each binding is registered on its own: one invalid or
+//! conflicting chord is reported as a [`FailedBinding`] and the others stay active.
 
-use std::{sync::Arc, thread::JoinHandle};
+use std::{
+    sync::Arc,
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
@@ -15,17 +24,47 @@ use windows::Win32::{
     },
 };
 
-use super::window::{self, Hwnd};
 use crate::audio::{AudioHandle, Command};
 
 const CONFIGURE_MESSAGE: u32 = WM_APP + 71;
+/// How long shutdown waits for the worker before detaching it.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
+/// A window action requested by a shortcut. The UI thread performs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotkeyEvent {
+    ToggleWindow,
+}
+
+/// A binding that is saved but not active, with the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedBinding {
+    pub action: HotkeyAction,
+    pub chord: String,
+    pub reason: String,
+}
+
+impl FailedBinding {
+    pub fn message(&self) -> String {
+        format!("{} ({}): {}", self.action.label(), self.chord, self.reason)
+    }
+}
 
 /// Requested settings and active registrations can differ after a conflict.
 #[derive(Clone, Debug, Default)]
 pub struct HotkeyStatus {
     pub active: Vec<HotkeyBinding>,
+    pub failed: Vec<FailedBinding>,
+    /// Service-level problems, such as a stopped worker thread.
     pub errors: Vec<String>,
     pub pending: bool,
+}
+
+impl HotkeyStatus {
+    /// Every problem as one line, for notices.
+    pub fn messages(&self) -> Vec<String> {
+        self.failed.iter().map(FailedBinding::message).chain(self.errors.iter().cloned()).collect()
+    }
 }
 
 #[derive(Default)]
@@ -41,6 +80,7 @@ enum Request {
 
 pub struct HotkeyService {
     tx: Sender<Request>,
+    events: Receiver<HotkeyEvent>,
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
     status: Arc<Mutex<SharedStatus>>,
@@ -48,8 +88,14 @@ pub struct HotkeyService {
 
 impl HotkeyService {
     /// Starts with no registered shortcuts. Call `configure` to opt in.
-    pub fn start(audio: AudioHandle, hwnd: Hwnd, context: egui::Context) -> Result<Self, String> {
+    pub fn start(audio: AudioHandle, context: egui::Context) -> Result<Self, String> {
+        Self::start_with(move |command| audio.send(command), context)
+    }
+
+    /// Like `start`, with the audio sink supplied by the caller.
+    pub fn start_with(sink: impl Fn(Command) + Send + 'static, context: egui::Context) -> Result<Self, String> {
         let (tx, rx) = crossbeam_channel::unbounded();
+        let (events_tx, events) = crossbeam_channel::unbounded();
         let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
         let status = Arc::new(Mutex::new(SharedStatus::default()));
         let worker_status = status.clone();
@@ -66,11 +112,11 @@ impl HotkeyService {
                 if ready_tx.send(thread_id).is_err() {
                     return;
                 }
-                run(rx, audio, hwnd, &context, &worker_status);
+                run(rx, sink, events_tx, &context, &worker_status);
             })
             .map_err(|error| format!("Could not start global shortcuts: {error}"))?;
         match ready_rx.recv() {
-            Ok(thread_id) => Ok(Self { tx, thread_id, thread: Some(thread), status }),
+            Ok(thread_id) => Ok(Self { tx, events, thread_id, thread: Some(thread), status }),
             Err(error) => {
                 let _ = thread.join();
                 Err(format!("Global shortcuts stopped during startup: {error}"))
@@ -78,9 +124,10 @@ impl HotkeyService {
         }
     }
 
-    /// Enqueues a change; `status()` reports the exact active set and any
-    /// registration failures when the worker finishes. The previous working
-    /// configuration remains active if validation or registration is rejected.
+    /// Enqueues a change; `status()` reports the exact active set and each
+    /// binding that could not be registered once the worker finishes. Working
+    /// bindings stay active when others fail. Calling this again retries every
+    /// binding that is not active.
     pub fn configure(&self, bindings: &[HotkeyBinding], step: u8) -> Result<(), String> {
         let mut status = self.status.lock();
         status.revision = status.revision.wrapping_add(1);
@@ -103,15 +150,29 @@ impl HotkeyService {
         self.status.lock().current.clone()
     }
 
+    /// Window actions queued since the last call. Call from the UI thread.
+    pub fn take_events(&self) -> Vec<HotkeyEvent> {
+        self.events.try_iter().collect()
+    }
+
+    /// Stops the worker. The worker never calls into the UI thread, so it exits
+    /// promptly; if it somehow does not within `SHUTDOWN_WAIT` it is detached
+    /// rather than allowed to block application exit.
     pub fn shutdown(&mut self) {
         let Some(thread) = self.thread.take() else {
             return;
         };
         let _ = self.tx.send(Request::Shutdown);
         // If the Windows queue is full, its next message also drains requests.
-        // If the thread is already gone, joining it is immediate.
+        // If the thread is already gone, the wait below ends immediately.
         let _ = unsafe { PostThreadMessageW(self.thread_id, CONFIGURE_MESSAGE, WPARAM(0), LPARAM(0)) };
-        if thread.join().is_err() {
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !thread.is_finished() {
+            log::error!("global shortcut thread did not stop within {SHUTDOWN_WAIT:?}; detaching it");
+        } else if thread.join().is_err() {
             log::error!("global shortcut thread panicked");
         }
     }
@@ -130,9 +191,10 @@ struct Registration {
 }
 
 impl Registration {
+    /// Returns the reason when Windows rejects the chord.
     fn new(id: i32, binding: HotkeyBinding, chord: Chord) -> Result<Self, String> {
         unsafe { RegisterHotKey(None, id, HOT_KEY_MODIFIERS(chord.modifiers) | MOD_NOREPEAT, chord.key) }
-            .map_err(|error| format!("{} ({}): Windows could not register this shortcut ({error}). It may be reserved or used by another app; choose another chord or release it in that app.", binding.action.label(), binding.chord))?;
+            .map_err(|error| format!("Windows could not register this shortcut ({error}). It may be reserved or used by another app; choose another chord or release it in that app, then use Retry."))?;
         Ok(Self { id, binding, chord })
     }
 }
@@ -143,6 +205,13 @@ impl Drop for Registration {
             log::warn!("could not unregister shortcut {}: {error}", self.binding.chord);
         }
     }
+}
+
+/// What a pressed shortcut asks for.
+#[derive(Debug, PartialEq)]
+enum Resolved {
+    Audio(Command),
+    Window(HotkeyEvent),
 }
 
 #[derive(Default)]
@@ -157,73 +226,64 @@ impl Registrations {
         self.active.iter().map(|registration| registration.binding.clone()).collect()
     }
 
-    fn configure(&mut self, bindings: &[HotkeyBinding], step: u8) -> Result<(), Vec<String>> {
-        let parsed = validate_bindings(bindings)?;
-        let mut added = Vec::new();
-        let mut errors = Vec::new();
-        for (binding, chord) in &parsed {
-            if self.active.iter().any(|registration| registration.chord == *chord) {
+    /// Makes the active set match `bindings` as closely as Windows allows.
+    /// Invalid, duplicate and rejected bindings are returned; every other
+    /// binding is registered (or stays registered) regardless.
+    fn configure(&mut self, bindings: &[HotkeyBinding], step: u8) -> Vec<FailedBinding> {
+        let Validated { valid, rejected } = validate_bindings(bindings);
+        let mut failed = rejected;
+        // Release chords nobody wants any more. Chords that are still wanted keep
+        // their registration, including ones reassigned to another action.
+        self.active.retain(|registration| valid.iter().any(|(_, chord)| registration.chord == *chord));
+        for (binding, chord) in valid {
+            if let Some(existing) = self.active.iter_mut().find(|registration| registration.chord == chord) {
+                existing.binding = binding;
                 continue;
             }
             // Application hotkey IDs must be in 0x0000..=0xBFFF.
             loop {
                 self.next_id = self.next_id % 0xBFFF + 1;
-                if !self.active.iter().chain(&added).any(|r| r.id == self.next_id) {
+                if !self.active.iter().any(|r| r.id == self.next_id) {
                     break;
                 }
             }
-            match Registration::new(self.next_id, binding.clone(), *chord) {
-                Ok(registration) => added.push(registration),
-                Err(error) => errors.push(error),
-            }
-        }
-        if !errors.is_empty() {
-            // Drop only the tentative additions. Old registrations have not
-            // been touched, including chords reassigned to another action.
-            return Err(errors);
-        }
-        self.active.retain(|registration| parsed.iter().any(|(_, chord)| registration.chord == *chord));
-        self.active.extend(added);
-        for registration in &mut self.active {
-            if let Some((binding, _)) = parsed.iter().find(|(_, chord)| *chord == registration.chord) {
-                registration.binding = binding.clone();
+            match Registration::new(self.next_id, binding.clone(), chord) {
+                Ok(registration) => self.active.push(registration),
+                Err(reason) => failed.push(FailedBinding { action: binding.action, chord: binding.chord, reason }),
             }
         }
         self.step = step.clamp(1, 100);
-        Ok(())
+        failed
     }
 
-    fn dispatch(&self, message: &MSG, audio: &AudioHandle, hwnd: Hwnd) {
-        let Some(registration) = self.active.iter().find(|r| r.id as usize == message.wParam.0) else {
-            return;
-        };
+    /// Maps a `WM_HOTKEY` message to its action. Pure: performs no side effects.
+    fn resolve(&self, id: usize, lparam: isize) -> Option<Resolved> {
+        let registration = self.active.iter().find(|r| r.id as usize == id)?;
         // Ignore a queued message belonging to an old registration if an ID
         // eventually wraps and is reused for a different chord.
-        let modifiers = message.lParam.0 as u32 & 7;
-        let key = (message.lParam.0 as u32 >> 16) & 0xFFFF;
+        let modifiers = lparam as u32 & 7;
+        let key = (lparam as u32 >> 16) & 0xFFFF;
         if registration.chord != (Chord { modifiers, key }) {
-            return;
+            return None;
         }
         let delta = self.step as f32 / 100.0;
-        match registration.binding.action {
-            HotkeyAction::ToggleOutputMute => audio.send(Command::ToggleOutputMute),
-            HotkeyAction::ToggleInputMute => audio.send(Command::ToggleInputMute),
-            HotkeyAction::VolumeUp => audio.send(Command::AdjustOutputVolume { delta }),
-            HotkeyAction::VolumeDown => audio.send(Command::AdjustOutputVolume { delta: -delta }),
-            HotkeyAction::ToggleWindow => {
-                log::debug!("global shortcut toggling window {:?}, shown={}", hwnd, window::is_shown(hwnd));
-                if window::is_shown(hwnd) {
-                    window::hide(hwnd);
-                } else {
-                    window::show(hwnd);
-                }
-                log::debug!("global shortcut window now shown={}", window::is_shown(hwnd));
-            }
-        }
+        Some(match registration.binding.action {
+            HotkeyAction::ToggleOutputMute => Resolved::Audio(Command::ToggleOutputMute),
+            HotkeyAction::ToggleInputMute => Resolved::Audio(Command::ToggleInputMute),
+            HotkeyAction::VolumeUp => Resolved::Audio(Command::AdjustOutputVolume { delta }),
+            HotkeyAction::VolumeDown => Resolved::Audio(Command::AdjustOutputVolume { delta: -delta }),
+            HotkeyAction::ToggleWindow => Resolved::Window(HotkeyEvent::ToggleWindow),
+        })
     }
 }
 
-fn run(rx: Receiver<Request>, audio: AudioHandle, hwnd: Hwnd, context: &egui::Context, status: &Mutex<SharedStatus>) {
+fn run(
+    rx: Receiver<Request>,
+    sink: impl Fn(Command),
+    events: Sender<HotkeyEvent>,
+    context: &egui::Context,
+    status: &Mutex<SharedStatus>,
+) {
     let mut registrations = Registrations::default();
     let mut message = MSG::default();
     'messages: loop {
@@ -241,16 +301,20 @@ fn run(rx: Receiver<Request>, audio: AudioHandle, hwnd: Hwnd, context: &egui::Co
             match request {
                 Request::Shutdown => break 'messages,
                 Request::Configure { bindings, step, revision } => {
-                    let errors = registrations.configure(&bindings, step).err().unwrap_or_default();
-                    if errors.is_empty() {
+                    let failed = registrations.configure(&bindings, step);
+                    if failed.is_empty() {
                         log::info!("registered {} global shortcuts", registrations.active.len());
                     } else {
-                        log::warn!("global shortcut registration failed: {}", errors.join("; "));
+                        log::warn!(
+                            "{} global shortcuts active; not active: {}",
+                            registrations.active.len(),
+                            failed.iter().map(FailedBinding::message).collect::<Vec<_>>().join("; ")
+                        );
                     }
                     let mut shared = status.lock();
                     shared.current.active = registrations.bindings();
                     if shared.revision == revision {
-                        shared.current.errors = errors;
+                        shared.current.failed = failed;
                         shared.current.pending = false;
                     }
                     context.request_repaint();
@@ -264,7 +328,13 @@ fn run(rx: Receiver<Request>, audio: AudioHandle, hwnd: Hwnd, context: &egui::Co
                 message.lParam.0 as u32 & 0xffff,
                 (message.lParam.0 as u32 >> 16) & 0xffff
             );
-            registrations.dispatch(&message, &audio, hwnd);
+            match registrations.resolve(message.wParam.0, message.lParam.0) {
+                Some(Resolved::Audio(command)) => sink(command),
+                Some(Resolved::Window(event)) => {
+                    let _ = events.send(event);
+                }
+                None => {}
+            }
             context.request_repaint();
         }
     }
@@ -305,31 +375,39 @@ pub struct HotkeyBinding {
     pub chord: String,
 }
 
-fn validate_bindings(bindings: &[HotkeyBinding]) -> Result<Vec<(HotkeyBinding, Chord)>, Vec<String>> {
-    let mut parsed = Vec::new();
-    let mut errors = Vec::new();
-    let mut actions = std::collections::HashSet::new();
-    let mut chords = std::collections::HashMap::new();
+/// Bindings split into those that can be registered and those that cannot.
+struct Validated {
+    valid: Vec<(HotkeyBinding, Chord)>,
+    rejected: Vec<FailedBinding>,
+}
+
+/// Validates each binding on its own. When two bindings share an action or a
+/// chord, the earlier one wins and the later one is rejected.
+fn validate_bindings(bindings: &[HotkeyBinding]) -> Validated {
+    let mut valid: Vec<(HotkeyBinding, Chord)> = Vec::new();
+    let mut rejected = Vec::new();
     for binding in bindings {
-        if !actions.insert(binding.action) {
-            errors.push(format!("{}: choose only one shortcut for this action.", binding.action.label()));
+        let reject = |reason: String| FailedBinding { action: binding.action, chord: binding.chord.clone(), reason };
+        if valid.iter().any(|(other, _)| other.action == binding.action) {
+            rejected.push(reject("choose only one shortcut for this action.".into()));
+            continue;
         }
         match parse_chord(&binding.chord) {
             Ok(chord) => {
-                if let Some(other) = chords.insert(chord, binding.action) {
-                    errors.push(format!(
-                        "{}: {} is also assigned to {}. Choose a different chord.",
-                        binding.action.label(),
+                if let Some((other, _)) = valid.iter().find(|(_, existing)| *existing == chord) {
+                    rejected.push(reject(format!(
+                        "{} is also assigned to {}. Choose a different chord.",
                         binding.chord,
-                        other.label()
-                    ));
+                        other.action.label()
+                    )));
+                } else {
+                    valid.push((binding.clone(), chord));
                 }
-                parsed.push((binding.clone(), chord));
             }
-            Err(error) => errors.push(format!("{} ({}): {error}", binding.action.label(), binding.chord)),
+            Err(error) => rejected.push(reject(error)),
         }
     }
-    if errors.is_empty() { Ok(parsed) } else { Err(errors) }
+    Validated { valid, rejected }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -420,10 +498,12 @@ impl HotkeyEditor {
             }
             self.initialized = true;
         }
+        let status = service.status();
         ui.label("No shortcuts are assigned by default. Type a chord such as Ctrl+Alt+M, then Bind. Windows may reject keys used by another app.");
         ui.horizontal(|ui| {
-            ui.label("Volume step");
+            let label = ui.label("Volume step");
             ui.add(egui::DragValue::new(step).range(1..=20).suffix("%"))
+                .labelled_by(label.id)
                 .on_hover_text("Output volume change for each volume shortcut, 1 to 20 percent");
         });
         for action in HotkeyAction::ALL {
@@ -434,27 +514,44 @@ impl HotkeyEditor {
                     .map(|b| b.chord.clone())
                     .unwrap_or_else(|| "Off".into());
                 let label = ui.label(format!("{} — {current}", action.label()));
+                if current != "Off" {
+                    let state = if let Some(failure) = status.failed.iter().find(|f| f.action == action) {
+                        format!("Not active: {}", failure.reason)
+                    } else if status.pending {
+                        "Registering…".to_owned()
+                    } else if status.active.iter().any(|b| b.action == action) {
+                        "Active".to_owned()
+                    } else {
+                        "Not active".to_owned()
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(state).small()).wrap());
+                }
                 ui.horizontal(|ui| {
                     let draft = self.drafts.entry(action).or_default();
                     ui.add(egui::TextEdit::singleline(draft).hint_text("Ctrl+Alt+M").desired_width(140.0))
                         .labelled_by(label.id)
                         .on_hover_text(format!("Shortcut for {}", action.label()));
-                    if ui.button(format!("Bind {}", action.label())).clicked() {
+                    // Short visible text keeps the row inside the card; the accessible
+                    // name still says which action the button is for.
+                    let bind = ui.button("Bind");
+                    crate::ui::widgets::set_name(ui, &bind, &format!("Bind {}", action.label()));
+                    if bind.on_hover_text(format!("Bind {}", action.label())).clicked() {
                         let mut proposed = bindings.clone();
                         proposed.retain(|b| b.action != action);
                         proposed.push(HotkeyBinding { action, chord: draft.trim().to_string() });
-                        match validate_bindings(&proposed) {
-                            Ok(_) => {
+                        // Only this binding's own problems block it; another
+                        // action's bad entry must not stop the user from binding.
+                        match validate_bindings(&proposed).rejected.into_iter().find(|f| f.action == action) {
+                            None => {
                                 *bindings = proposed;
                                 self.error = None;
                             }
-                            Err(errors) => self.error = Some(errors.join(" ")),
+                            Some(failure) => self.error = Some(failure.message()),
                         }
                     }
-                    if ui
-                        .add_enabled(current != "Off", egui::Button::new(format!("Clear {}", action.label())))
-                        .clicked()
-                    {
+                    let clear = ui.add_enabled(current != "Off", egui::Button::new("Clear"));
+                    crate::ui::widgets::set_name(ui, &clear, &format!("Clear {}", action.label()));
+                    if clear.on_hover_text(format!("Clear {}", action.label())).clicked() {
                         bindings.retain(|b| b.action != action);
                         self.drafts.remove(&action);
                         self.error = None;
@@ -465,12 +562,28 @@ impl HotkeyEditor {
         if let Some(error) = &self.error {
             ui.label(format!("Shortcut error: {error}"));
         }
-        let status = service.status();
         if status.pending {
             ui.label("Registering shortcuts with Windows…");
         }
         for error in &status.errors {
             ui.label(format!("Shortcut error: {error}"));
+        }
+        if !status.failed.is_empty() {
+            ui.add(
+                egui::Label::new(format!(
+                    "{} shortcut(s) could not be registered. The others are active. Release the chord in the other app or choose another, then retry.",
+                    status.failed.len()
+                ))
+                .wrap(),
+            );
+            if ui
+                .add_enabled(!status.pending, egui::Button::new("Retry failed shortcuts"))
+                .on_hover_text("Try to register every shortcut that is not active")
+                .clicked()
+                && let Err(error) = service.configure(bindings, *step)
+            {
+                self.error = Some(error);
+            }
         }
         ui.label(format!("{} active shortcut(s)", status.active.len()));
     }
@@ -480,28 +593,51 @@ impl HotkeyEditor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn rejects_duplicate_chords_even_with_different_spelling() {
-        let bindings = [
-            HotkeyBinding { action: HotkeyAction::VolumeUp, chord: "Ctrl+Alt+A".into() },
-            HotkeyBinding { action: HotkeyAction::VolumeDown, chord: " alt + control + a ".into() },
-        ];
-        assert!(validate_bindings(&bindings).is_err());
+    fn binding(action: HotkeyAction, chord: &str) -> HotkeyBinding {
+        HotkeyBinding { action, chord: chord.into() }
     }
 
     #[test]
-    fn rejects_duplicate_actions_and_reports_all_invalid_entries() {
-        let bindings = [
-            HotkeyBinding { action: HotkeyAction::VolumeUp, chord: "Ctrl+F1".into() },
-            HotkeyBinding { action: HotkeyAction::VolumeUp, chord: "Ctrl+F2".into() },
-            HotkeyBinding { action: HotkeyAction::VolumeDown, chord: "garbage".into() },
-        ];
-        assert_eq!(validate_bindings(&bindings).unwrap_err().len(), 2);
+    fn duplicate_chords_are_rejected_even_with_different_spelling() {
+        let checked = validate_bindings(&[
+            binding(HotkeyAction::VolumeUp, "Ctrl+Alt+A"),
+            binding(HotkeyAction::VolumeDown, " alt + control + a "),
+        ]);
+        assert_eq!(checked.valid.len(), 1);
+        assert_eq!(checked.valid[0].0.action, HotkeyAction::VolumeUp, "the earlier binding wins");
+        assert_eq!(checked.rejected.len(), 1);
+        assert_eq!(checked.rejected[0].action, HotkeyAction::VolumeDown);
+    }
+
+    #[test]
+    fn one_invalid_binding_does_not_reject_the_valid_ones() {
+        let checked = validate_bindings(&[
+            binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23"),
+            binding(HotkeyAction::VolumeUp, "Ctrl+Alt+garbage"),
+            binding(HotkeyAction::VolumeDown, "Ctrl+Alt+F22"),
+        ]);
+        let valid: Vec<_> = checked.valid.iter().map(|(b, _)| b.action).collect();
+        assert_eq!(valid, [HotkeyAction::ToggleWindow, HotkeyAction::VolumeDown]);
+        assert_eq!(checked.rejected.len(), 1);
+        assert_eq!(checked.rejected[0].action, HotkeyAction::VolumeUp);
+        assert!(checked.rejected[0].message().starts_with("Volume up (Ctrl+Alt+garbage): "));
+    }
+
+    #[test]
+    fn duplicate_actions_keep_the_first_and_report_the_rest() {
+        let checked = validate_bindings(&[
+            binding(HotkeyAction::VolumeUp, "Ctrl+F1"),
+            binding(HotkeyAction::VolumeUp, "Ctrl+F2"),
+            binding(HotkeyAction::VolumeDown, "garbage"),
+        ]);
+        assert_eq!(checked.valid.len(), 1);
+        assert_eq!(checked.rejected.len(), 2);
     }
 
     #[test]
     fn empty_configuration_disables_every_hotkey() {
-        assert_eq!(validate_bindings(&[]).unwrap(), Vec::new());
+        let checked = validate_bindings(&[]);
+        assert!(checked.valid.is_empty() && checked.rejected.is_empty());
     }
 
     #[test]
@@ -536,15 +672,140 @@ mod tests {
         }
     }
 
+    fn lparam(chord: Chord) -> isize {
+        ((chord.key << 16) | chord.modifiers) as isize
+    }
+
+    fn registrations_for(action: HotkeyAction, chord: &str, step: u8) -> Registrations {
+        let parsed = parse_chord(chord).unwrap();
+        Registrations {
+            active: vec![Registration { id: 7, binding: binding(action, chord), chord: parsed }],
+            next_id: 7,
+            step,
+        }
+    }
+
     #[test]
-    #[ignore = "registers a real Windows global shortcut; unregisters before returning"]
+    fn window_shortcut_is_queued_for_the_ui_thread_not_performed() {
+        let chord = parse_chord("Ctrl+Alt+F23").unwrap();
+        let registrations = registrations_for(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23", 5);
+        assert_eq!(registrations.resolve(7, lparam(chord)), Some(Resolved::Window(HotkeyEvent::ToggleWindow)));
+        // Nothing in this module can touch a window: it does not import `platform::window`.
+        assert!(!include_str!("hotkeys.rs").split("#[cfg(test)]").next().unwrap().contains("window::"));
+    }
+
+    #[test]
+    fn volume_shortcuts_use_the_configured_step_and_stale_messages_are_ignored() {
+        let chord = parse_chord("Ctrl+Alt+Up").unwrap();
+        let registrations = registrations_for(HotkeyAction::VolumeUp, "Ctrl+Alt+Up", 7);
+        assert_eq!(
+            registrations.resolve(7, lparam(chord)),
+            Some(Resolved::Audio(Command::AdjustOutputVolume { delta: 0.07 }))
+        );
+        assert_eq!(registrations.resolve(8, lparam(chord)), None, "unknown id");
+        let other = parse_chord("Ctrl+Alt+Down").unwrap();
+        assert_eq!(registrations.resolve(7, lparam(other)), None, "id reused for a different chord");
+    }
+
+    #[test]
+    fn service_starts_and_stops_promptly_with_no_shortcuts() {
+        let mut service = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        service.configure(&[], 5).unwrap();
+        let started = Instant::now();
+        service.shutdown();
+        assert!(started.elapsed() < Duration::from_millis(1500), "shutdown took {:?}", started.elapsed());
+    }
+
+    #[test]
+    #[ignore = "registers real Windows global shortcuts; unregisters before returning"]
     fn registration_reports_conflicts_and_releases_key() {
-        let requested = [HotkeyBinding { action: HotkeyAction::VolumeUp, chord: "Ctrl+Alt+F23".into() }];
+        let requested = [binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F23")];
         let mut ours = Registrations::default();
-        ours.configure(&requested, 5).unwrap();
+        assert!(ours.configure(&requested, 5).is_empty());
         let mut second = Registrations { next_id: 100, ..Default::default() };
-        assert!(second.configure(&requested, 5).is_err());
+        assert_eq!(second.configure(&requested, 5).len(), 1);
         drop(ours);
-        second.configure(&requested, 5).unwrap();
+        assert!(second.configure(&requested, 5).is_empty());
+    }
+
+    #[test]
+    #[ignore = "registers real Windows global shortcuts; unregisters before returning"]
+    fn a_conflicting_binding_leaves_the_others_active_and_retry_recovers() {
+        let wanted = [
+            binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23"),
+            binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F22"),
+            binding(HotkeyAction::VolumeDown, "Ctrl+Alt+nonsense"),
+        ];
+        // Another "application" owns Ctrl+Alt+F22.
+        let mut other_app = Registrations::default();
+        assert!(other_app.configure(&[binding(HotkeyAction::ToggleOutputMute, "Ctrl+Alt+F22")], 5).is_empty());
+
+        let mut ours = Registrations { next_id: 100, ..Default::default() };
+        let failed = ours.configure(&wanted, 5);
+        let failed_actions: Vec<_> = failed.iter().map(|f| f.action).collect();
+        assert_eq!(failed_actions, [HotkeyAction::VolumeDown, HotkeyAction::VolumeUp]);
+        assert_eq!(
+            ours.bindings(),
+            [binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23")],
+            "working binding stays active"
+        );
+
+        // The other app lets go; configuring again retries the conflicting binding.
+        drop(other_app);
+        let failed = ours.configure(&wanted, 5);
+        assert_eq!(failed.len(), 1, "only the invalid binding still fails");
+        assert_eq!(ours.bindings().len(), 2);
+    }
+
+    /// Presses and releases Ctrl+Alt+F21 through the real input queue.
+    fn press_ctrl_alt_f21() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+        };
+        let key = |vk: u16, up: bool| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let inputs =
+            [key(0x11, false), key(0x12, false), key(0x84, false), key(0x84, true), key(0x12, true), key(0x11, true)];
+        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+
+    #[test]
+    #[ignore = "registers Ctrl+Alt+F21 and injects that key chord into the desktop input queue"]
+    fn shutdown_completes_while_the_window_shortcut_is_being_pressed() {
+        let mut service = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        service.configure(&[binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F21")], 5).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.status().pending || service.status().active.is_empty() {
+            assert!(Instant::now() < deadline, "Ctrl+Alt+F21 could not be registered: {:?}", service.status());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let injector = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    press_ctrl_alt_f21();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!service.take_events().is_empty(), "the injected chord never reached the service");
+        let started = Instant::now();
+        service.shutdown();
+        let took = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        injector.join().unwrap();
+        assert!(took < Duration::from_millis(1500), "shutdown took {took:?} under key pressure");
     }
 }

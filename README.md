@@ -13,9 +13,9 @@ network access.
 - **Output and input devices:** volume, mute and stereo balance, plus
   default-device switching. The Devices view controls other active endpoints
   independently. Duplicate names have a numbered suffix and full ID tooltip.
-- **Sound properties:** expandable device sections show the selected format
-  and internal mix format. Format, enhancements, spatial and mono controls
-  open Windows Settings. See [probe findings](docs/SOUND_PROPERTIES_SPIKE.md).
+- **Sound properties:** in the Devices view, expandable device sections show
+  balance, the selected format and the internal mix format. Format,
+  enhancements, spatial and mono controls open Windows Settings. See [probe findings](docs/SOUND_PROPERTIES_SPIKE.md).
 - **Tray notifications:** warnings and errors while hidden, with throttling,
   duplicate suppression and a Settings toggle. Windows notification policy applies.
 - **Optional global shortcuts:** assign chords for output/microphone mute,
@@ -67,8 +67,10 @@ network access.
 ## Requirements
 
 - Windows 10 1809 or later, or Windows 11 (the primary target).
-- A graphics driver supporting OpenGL or a wgpu backend. Glass Mixer tries
-  OpenGL first, then an opaque wgpu window if OpenGL initialization fails.
+- A graphics driver supporting OpenGL, or Direct3D 12 or Vulkan for the
+  fallback. Glass Mixer tries OpenGL first, then an opaque window on
+  Direct3D 12 or Vulkan if OpenGL initialization fails. The log records which
+  renderer and graphics adapter are in use.
 
 ## Install
 
@@ -79,6 +81,13 @@ network access.
 
 Settings are stored in `%APPDATA%\GlassMixer\settings.json`. The log is
 `%LOCALAPPDATA%\GlassMixer\glass-mixer.log`.
+
+**Upgrading from 0.1.0:** the first time 0.2.0 reads an older settings file,
+it keeps an untouched copy as `settings.v1.backup.json` in the same folder.
+**Going back to 0.1.0:** 0.1.0 cannot keep 0.2.0's pins, presets and global
+shortcuts; on its next save it drops them and rewrites the file in the old
+format. To return cleanly, exit Glass Mixer and rename
+`settings.v1.backup.json` to `settings.json` before starting 0.1.0.
 
 Command line: `glass-mixer.exe --minimized` starts with only the tray icon.
 
@@ -155,7 +164,7 @@ MIT. See [LICENSE](LICENSE).
 
 | Symptom | What to do |
 | --- | --- |
-| "Glass Mixer couldn't start its window" | Both OpenGL and the opaque wgpu fallback failed. Update the GPU driver or run it locally. |
+| "Glass Mixer couldn't start its window" | Both OpenGL and the opaque Direct3D 12/Vulkan fallback failed. Update the GPU driver or run it locally. The log's `renderer:` line shows what was tried last. |
 | An app is missing from the list | It has no audio session on the default output yet. Play something in it, or press ↻ Refresh. Apps playing to another device aren't listed. |
 | The device menu is greyed out | Default switching isn't available on this system. Use Windows Settings > System > Sound. |
 | No glass effect | Check Settings > Glass effect. The status line explains why it's off (Windows version, transparency effects, high contrast). |

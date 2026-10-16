@@ -217,6 +217,20 @@ impl AudioHandle {
         Self { tx, shared, thread: Arc::new(Mutex::new(Some((thread, done_rx)))) }
     }
 
+    /// A handle with no engine behind it, for UI tests: commands are accepted and dropped.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let shared = Arc::new(Shared {
+            snapshot: Mutex::new(Arc::new(AudioSnapshot::default())),
+            meters: Mutex::new(Meters::default()),
+            notices: Mutex::new(VecDeque::new()),
+            listeners: Mutex::new(Vec::new()),
+            meters_wanted: AtomicBool::new(false),
+        });
+        Self { tx, shared, thread: Arc::new(Mutex::new(None)) }
+    }
+
     pub fn send(&self, cmd: Command) {
         let _ = self.tx.send(Msg::Cmd(cmd));
     }

@@ -3,6 +3,8 @@
 pub mod mixer;
 pub mod presets;
 pub mod settings_view;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod theme;
 pub mod widgets;
 

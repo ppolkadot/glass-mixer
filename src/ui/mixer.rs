@@ -92,7 +92,8 @@ impl MixerState {
 
 pub enum Outcome {
     None,
-    OpenSettings,
+    /// The user asked for the balance and sound-property controls, which live in Devices.
+    OpenDevices,
 }
 
 pub struct MixerCtx<'a> {
@@ -125,7 +126,7 @@ pub fn show(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> Outcome {
         .show_separator_line(false)
         .show(ui, |ui| {
             if header(ui, st, cx) {
-                outcome = Outcome::OpenSettings;
+                outcome = Outcome::OpenDevices;
             }
         });
     egui::Panel::bottom("mixer-footer")
@@ -137,10 +138,10 @@ pub fn show(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> Outcome {
     outcome
 }
 
-/// Returns `true` when Settings was requested.
+/// Returns `true` when the Devices view (balance, sound properties) was requested.
 fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
     let look = cx.look;
-    let mut open_settings = false;
+    let mut open_devices = false;
     card(look).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if let ServiceStatus::Unavailable(message) = &cx.snap.status {
@@ -159,14 +160,17 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
 
         ui.horizontal(|ui| {
             device_label(ui, look, glyph::SPEAKER, "Output");
-            let width = ui.available_width() - look.m.button - ui.spacing().item_spacing.x;
+            let width = ui.available_width();
             device_combo(ui, cx, Flow::Output, width);
-            if icon_button(ui, look, glyph::SETTINGS, "Set", "Settings", None).clicked() {
-                open_settings = true;
-            }
         });
         match &cx.snap.output {
-            Some(ep) => endpoint_row(ui, st, cx, Flow::Output, ep),
+            Some(ep) => {
+                endpoint_row(ui, st, cx, Flow::Output, ep, false);
+                // Balance and sound properties need room; they live in the Devices view.
+                if ui.link("Balance and sound properties").clicked() {
+                    open_devices = true;
+                }
+            }
             None if cx.snap.status == ServiceStatus::Starting => {
                 ui.label(RichText::new("Connecting to Windows audio…").color(look.p.text_muted));
             }
@@ -178,7 +182,7 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
             }
         }
     });
-    open_settings
+    open_devices
 }
 
 fn input_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
@@ -191,7 +195,7 @@ fn input_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
             device_combo(ui, cx, Flow::Input, width);
         });
         match &cx.snap.input {
-            Some(ep) => endpoint_row(ui, st, cx, Flow::Input, ep),
+            Some(ep) => endpoint_row(ui, st, cx, Flow::Input, ep, false),
             None => {
                 ui.label(RichText::new("No microphone or other input device was found.").color(look.p.text_muted));
             }
@@ -255,11 +259,14 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
         } else {
             "Switching the default device isn't available on this system".to_string()
         };
+        widgets::set_name(ui, &response, &format!("{} device", if flow == Flow::Output { "Output" } else { "Input" }));
         response.on_hover_text(hint).on_disabled_hover_text(selected.to_string());
     });
 }
 
-fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow, ep: &EndpointState) {
+/// Volume row for an endpoint. `details` adds the balance and sound-property section,
+/// which only the Devices view (a full-height scroll area) has room for.
+fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow, ep: &EndpointState, details: bool) {
     let look = cx.look;
     ui.horizontal(|ui| {
         let target = Target::Volume(Ctl::Device(ep.id.clone()));
@@ -290,15 +297,14 @@ fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow,
         let pct = if ep.muted { "Muted".to_string() } else { format!("{}%", to_percent(v)) };
         percent_label(ui, look, &pct, ep.muted);
     });
-    ui.push_id((&ep.id, "properties"), |ui| {
-        egui::CollapsingHeader::new("Balance and sound properties").show(ui, |ui| {
-            let height = (ui.ctx().content_rect().height() * 0.18).clamp(50.0, 140.0);
-            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
+    if details {
+        ui.push_id((&ep.id, "properties"), |ui| {
+            egui::CollapsingHeader::new("Balance and sound properties").show(ui, |ui| {
                 endpoint_balance(ui, st, cx, ep);
                 sound_properties(ui, cx, ep);
             });
         });
-    });
+    }
 }
 
 fn sound_properties(ui: &mut Ui, cx: &MixerCtx, ep: &EndpointState) {
@@ -403,7 +409,7 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
                         }
                         match cx.snap.device_states.iter().find(|s| s.info.id == d.id) {
                             Some(s) => match &s.state {
-                                Ok(ep) => endpoint_row(ui, st, cx, flow, ep),
+                                Ok(ep) => endpoint_row(ui, st, cx, flow, ep, true),
                                 Err(e) => {
                                     ui.label(e);
                                 }
@@ -451,6 +457,7 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
             if search.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                 st.filter.clear();
             }
+            widgets::set_name(ui, &search, "Filter apps");
             search.on_hover_text("Filter apps by name (Ctrl+F)");
         });
     });
@@ -482,6 +489,8 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
     let look = cx.look;
     ui.push_id((&app.key, "offline"), |ui| {
         card(look).show(ui, |ui| {
+            // Fill the row, so long names truncate instead of widening the card.
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let px = (look.m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
                 cx.icons.request(app, px);
@@ -500,7 +509,7 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(&app.name).strong().color(look.p.text_muted));
+                    ui.add(egui::Label::new(RichText::new(&app.name).strong().color(look.p.text_muted)).truncate());
                     ui.label("Not running");
                 });
             });
@@ -510,14 +519,21 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                     widgets::unavailable_slider(ui, look, &format!("{} volume unavailable — not running", app.name));
                 });
             });
-            ui.horizontal(|ui| {
-                if ui.button(format!("Unpin {}", app.name)).clicked() {
+            ui.horizontal_wrapped(|ui| {
+                let unpin = ui.button("Unpin");
+                // The visible text is short so the row fits; the accessible name says which app.
+                widgets::set_name(ui, &unpin, &format!("Unpin {}", app.name));
+                if unpin.on_hover_text(format!("Unpin {}", app.name)).clicked() {
                     cx.settings.pinned_apps.retain(|p| p.key != app.key);
                 }
                 ui.label(RichText::new("No active audio session").small().color(look.p.text_muted));
             });
-            ui.label(
-                RichText::new("Moved or uninstalled? Unpin this row, then pin the app again when it plays.").small(),
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Moved or uninstalled? Unpin this row, then pin the app again when it plays.")
+                        .small(),
+                )
+                .wrap(),
             );
         });
         ui.add_space(4.0);
@@ -720,5 +736,210 @@ mod tests {
         state.prune_cache(&HashSet::from([a.clone()]), 42);
         assert_eq!(state.cached_icon_keys(), HashSet::from([(a, 42)]));
         assert!(!state.names.contains_key(&b));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::audio::preferences::PinnedApp;
+    use crate::audio::{DeviceInfo, DeviceState, EndpointState};
+    use crate::settings::{Density, MIN_WIDTH};
+    use crate::ui::test_support::{Frame, Harness, past_right_edge, unnamed};
+
+    const LONG_DEVICE: &str = "HDMI-1 (NVIDIA High Definition Audio)";
+    const LONG_MIC: &str = "Microphone (USB Audio Device With A Long Name)";
+
+    fn endpoint(id: &str, name: &str, volume: f32) -> EndpointState {
+        EndpointState { id: id.into(), name: name.into(), volume, muted: false, balance: Some(0.0) }
+    }
+
+    fn device(id: &str, name: &str) -> DeviceInfo {
+        DeviceInfo { id: id.into(), name: name.into(), is_default: true }
+    }
+
+    fn app(key: AppKey, name: &str) -> AppEntry {
+        AppEntry {
+            key,
+            name: name.into(),
+            exe_path: None,
+            aumid: None,
+            icon_resource: None,
+            volume: 1.0,
+            muted: false,
+            activity: Activity::Idle,
+            session_count: 1,
+            balance: None,
+        }
+    }
+
+    pub(super) fn snapshot() -> AudioSnapshot {
+        AudioSnapshot {
+            status: ServiceStatus::Ok,
+            output: Some(endpoint("out", LONG_DEVICE, 1.0)),
+            input: Some(endpoint("in", LONG_MIC, 0.5)),
+            outputs: vec![device("out", LONG_DEVICE)],
+            inputs: vec![device("in", LONG_MIC)],
+            apps: vec![
+                app(AppKey::System, "System sounds"),
+                app(AppKey::Exe(r"c:\apps\player.exe".into()), "A Media Player With A Remarkably Long Display Name"),
+            ],
+            can_switch_default: true,
+            ..Default::default()
+        }
+    }
+
+    fn offline_pin() -> PinnedApp {
+        PinnedApp {
+            key: AppKey::Exe(r"c:\apps\gone.exe".into()),
+            name: "Gone App With A Rather Long Display Name".into(),
+            exe_path: None,
+            aumid: None,
+        }
+    }
+
+    /// Renders the Mixer view at the content width of a window `window_width` wide.
+    fn render_mixer(density: Density, window_width: f32, settings: Settings) -> (f32, Frame) {
+        let harness = Harness::new(density);
+        let look = harness.look;
+        let width = window_width - 2.0 * look.m.pad;
+        let (audio, snap, meters) = (AudioHandle::detached(), snapshot(), Meters::default());
+        let (mut settings, mut icons, mut state) = (settings, IconService::detached(), MixerState::default());
+        let frame = harness.run(width, 560.0, |ui| {
+            let mut cx = MixerCtx {
+                audio: &audio,
+                snap: &snap,
+                meters: &meters,
+                look: &look,
+                settings: &mut settings,
+                icons: &mut icons,
+            };
+            show(ui, &mut state, &mut cx);
+        });
+        (width, frame)
+    }
+
+    fn assert_fits(what: &str, width: f32, frame: &Frame) {
+        let clipped: Vec<_> = past_right_edge(&frame.widgets, width)
+            .iter()
+            .map(|w| format!("{:?} '{}' {:?}", w.role, w.name, w.bounds))
+            .collect();
+        assert!(clipped.is_empty(), "{what}: controls past the right edge ({width}): {clipped:#?}");
+        assert!(
+            frame.content_right <= width + 0.5,
+            "{what}: content reaches {} in a {width}-wide window",
+            frame.content_right
+        );
+    }
+
+    #[test]
+    fn mixer_view_stays_inside_a_minimum_width_window() {
+        for density in [Density::Comfortable, Density::Compact] {
+            let (width, frame) = render_mixer(density, MIN_WIDTH, Settings::default());
+            assert_fits(&format!("{density:?}"), width, &frame);
+        }
+    }
+
+    #[test]
+    fn offline_pin_with_a_long_name_stays_inside_the_window() {
+        for window in [MIN_WIDTH, 480.0] {
+            let mut settings = Settings::default();
+            settings.pinned_apps.push(offline_pin());
+            let (width, frame) = render_mixer(Density::Comfortable, window, settings);
+            assert_fits(&format!("window {window}"), width, &frame);
+        }
+    }
+
+    #[test]
+    fn every_mixer_control_has_an_accessible_name() {
+        let mut settings = Settings::default();
+        settings.pinned_apps.push(offline_pin());
+        let (_, frame) = render_mixer(Density::Comfortable, MIN_WIDTH, settings);
+        let nameless: Vec<_> = unnamed(&frame.widgets).iter().map(|w| format!("{:?} {:?}", w.role, w.bounds)).collect();
+        assert!(nameless.is_empty(), "controls without an accessible name: {nameless:#?}");
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        for expected in
+            ["Output device", "Input device", "Filter apps", "Unpin Gone App With A Rather Long Display Name"]
+        {
+            assert!(names.contains(&expected), "missing accessible name '{expected}' in {names:?}");
+        }
+    }
+
+    #[test]
+    fn mixer_view_has_a_single_settings_route_and_no_properties_panel() {
+        let (_, frame) = render_mixer(Density::Comfortable, 480.0, Settings::default());
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(!names.contains(&"Settings"), "the header gear duplicated the Settings tab: {names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("Open Windows sound settings")),
+            "sound properties belong to the Devices view: {names:?}"
+        );
+    }
+
+    fn device_snapshot() -> AudioSnapshot {
+        let mut snap = snapshot();
+        snap.device_states = vec![DeviceState {
+            flow: Flow::Output,
+            info: device("out", LONG_DEVICE),
+            state: Ok(endpoint("out", LONG_DEVICE, 1.0)),
+        }];
+        snap
+    }
+
+    /// Balance and sound properties now live in the Devices view, which is one
+    /// full-height scroll area, not a nested one in a fixed panel.
+    #[test]
+    fn devices_view_has_the_properties_section_and_fits() {
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (snap, audio, meters) = (device_snapshot(), AudioHandle::detached(), Meters::default());
+        let (mut settings, mut icons, mut state) =
+            (Settings::default(), IconService::detached(), MixerState::default());
+        let frame = harness.run(width, 600.0, |ui| {
+            let mut cx = MixerCtx {
+                audio: &audio,
+                snap: &snap,
+                meters: &meters,
+                look: &look,
+                settings: &mut settings,
+                icons: &mut icons,
+            };
+            show_devices(ui, &mut state, &mut cx);
+        });
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&"Balance and sound properties"), "properties section missing: {names:?}");
+        assert_fits("devices view", width, &frame);
+        assert!(unnamed(&frame.widgets).is_empty(), "unnamed controls: {:?}", unnamed(&frame.widgets));
+    }
+
+    #[test]
+    fn sound_property_controls_are_named_and_fit_at_minimum_width() {
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (snap, audio, meters) = (device_snapshot(), AudioHandle::detached(), Meters::default());
+        let (mut settings, mut icons, mut state) =
+            (Settings::default(), IconService::detached(), MixerState::default());
+        let ep = endpoint("out", LONG_DEVICE, 1.0);
+        let frame = harness.run(width, 900.0, |ui| {
+            let cx = MixerCtx {
+                audio: &audio,
+                snap: &snap,
+                meters: &meters,
+                look: &look,
+                settings: &mut settings,
+                icons: &mut icons,
+            };
+            endpoint_balance(ui, &mut state, &cx, &ep);
+            sound_properties(ui, &cx, &ep);
+        });
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        for expected in
+            ["Open Windows sound settings", "Open mono audio settings", "HDMI-1 (NVIDIA High Definition Audio) balance"]
+        {
+            assert!(names.contains(&expected), "missing '{expected}' in {names:?}");
+        }
+        assert_fits("sound properties", width, &frame);
     }
 }

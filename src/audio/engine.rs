@@ -425,8 +425,7 @@ struct Engine {
     devices_loaded: bool,
     properties: HashMap<String, super::properties::DeviceProperties>,
     preset_rules: Vec<super::preferences::VolumePreset>,
-    rules_armed_at: u64,
-    last_started: HashMap<AppKey, u64>,
+    start_tracker: super::preferences::StartTracker,
 }
 
 impl Engine {
@@ -457,8 +456,7 @@ impl Engine {
             devices_loaded: false,
             properties: HashMap::new(),
             preset_rules: Vec::new(),
-            rules_armed_at: current_filetime(),
-            last_started: HashMap::new(),
+            start_tracker: super::preferences::StartTracker::new(current_filetime()),
         })
     }
 
@@ -717,23 +715,20 @@ impl Engine {
 
     fn set_preset_rules(&mut self, presets: Vec<super::preferences::VolumePreset>) {
         self.preset_rules = presets.into_iter().filter(|p| p.apply_on_start).collect();
-        self.rules_armed_at = current_filetime();
-        self.last_started.clear();
+        self.start_tracker.rearm(current_filetime());
     }
 
     fn apply_preset(&mut self, preset: super::preferences::VolumePreset) -> Result<(usize, usize), ApplyError> {
         let Some(preset) = preset.sanitize() else {
             return Err(ApplyError::Message("Preset has no valid name.".into()));
         };
-        let mut applied = 0;
-        let mut missing = 0;
-        for entry in &preset.entries {
+        let plan = super::preferences::plan_preset(&preset, |key| {
+            self.sessions.iter().flat_map(|set| set.sessions.iter()).any(|s| &s.key == key)
+        });
+        let (missing, mut applied) = (plan.missing, 0);
+        for entry in plan.present {
             let sessions: Vec<_> =
                 self.sessions.iter().flat_map(|set| set.sessions.iter()).filter(|s| s.key == entry.key).collect();
-            if sessions.is_empty() {
-                missing += 1;
-                continue;
-            }
             for session in sessions {
                 unsafe {
                     session
@@ -756,8 +751,7 @@ impl Engine {
         if let Some(set) = &self.sessions {
             for session in set.sessions.iter().filter(|s| &s.key == key) {
                 if let Some(created) = set.processes.get(&session.pid).and_then(|p| p.started_at) {
-                    let last = self.last_started.entry(key.clone()).or_insert(created);
-                    *last = (*last).max(created);
+                    self.start_tracker.note_intervention(key, created);
                 }
             }
         }
@@ -779,11 +773,11 @@ impl Engine {
                 groups.entry((session.key.clone(), created)).or_default().push(session);
             }
         }
+        // Oldest process first, so each new process is judged in launch order
+        // (hash-map order would let a newer process hide an older one).
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        groups.sort_by_key(|((_, created), _)| *created);
         for ((key, created), sessions) in groups {
-            let previous = self.last_started.get(&key).copied();
-            if previous.is_none_or(|last| created > last) {
-                self.last_started.insert(key.clone(), created);
-            }
             let untouched = sessions.iter().all(|s| {
                 !s.changed.load(Ordering::Relaxed)
                     && unsafe {
@@ -791,7 +785,7 @@ impl Engine {
                             && s.simple.GetMute().ok().is_some_and(|m| !m.as_bool())
                     }
             });
-            if !super::preferences::may_apply_at_start(Some(created), self.rules_armed_at, previous, untouched) {
+            if !self.start_tracker.observe(&key, created, untouched) {
                 continue;
             }
             let Some(entry) = self.preset_rules.iter().flat_map(|p| &p.entries).find(|e| e.key == key) else {
