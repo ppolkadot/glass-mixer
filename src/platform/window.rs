@@ -6,13 +6,14 @@
 //! allowed by Windows' focus-stealing rules.
 
 use std::ffi::c_void;
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowPos, ShowWindow,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -44,6 +45,17 @@ pub fn hide(hwnd: Hwnd) {
     unsafe {
         let _ = ShowWindow(hwnd.get(), SW_HIDE);
     }
+}
+
+/// Physical screen coordinates, independent of the window's current DPI.
+pub fn outer_position(hwnd: Hwnd) -> Option<(f32, f32)> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd.get(), &mut rect) }.ok()?;
+    Some((rect.left as f32, rect.top as f32))
+}
+
+pub fn set_outer_position(hwnd: Hwnd, x: i32, y: i32) -> windows::core::Result<()> {
+    unsafe { SetWindowPos(hwnd.get(), None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) }
 }
 
 /// Cloaking keeps a window "visible" to Windows but undrawn. Used to start hidden

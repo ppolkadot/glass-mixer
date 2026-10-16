@@ -4,9 +4,10 @@ use super::widgets::{self, card, glyph, icon_button, segmented, semibold, toggle
 use super::{GlassStatus, Look, theme};
 use crate::audio::{AudioHandle, Command};
 use crate::platform::backdrop::Support;
+use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
-use crate::settings::{Accent, Backdrop, Density, Settings, ThemeMode};
-use egui::{Align, Align2, CornerRadius, Key, Layout, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode};
+use egui::{Align, Align2, CornerRadius, Key, Layout, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportCommand};
 use std::path::Path;
 
 pub enum Outcome {
@@ -22,6 +23,7 @@ pub struct SettingsCtx<'a> {
     pub support: Support,
     pub can_switch_default: bool,
     pub audio: &'a AudioHandle,
+    pub icons: &'a mut IconService,
     pub settings_path: &'a Path,
     /// Error messages to show as notices.
     pub errors: &'a mut Vec<String>,
@@ -101,6 +103,9 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
         );
     });
     toggle_row(ui, &look, &mut s.show_meters, "Level meters", Some("Show live audio levels under the sliders"));
+    if ui.button("Use recommended window size (480 × 720)").clicked() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT)));
+    }
 }
 
 fn swatch(ui: &mut Ui, look: &Look, current: &mut Accent, accent: Accent) {
@@ -186,6 +191,7 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
     let look = *cx.look;
     ui.horizontal(|ui| {
         if ui.button("Refresh audio devices").on_hover_text("Reconnect to all devices and audio sessions").clicked() {
+            cx.icons.retry_failed();
             cx.audio.send(Command::Refresh);
         }
     });

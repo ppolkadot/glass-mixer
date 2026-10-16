@@ -99,6 +99,7 @@ pub(crate) enum Msg {
 }
 
 pub(crate) type Listener = Arc<dyn Fn() + Send + Sync>;
+type EngineThread = (JoinHandle<()>, Receiver<()>);
 
 pub(crate) struct Shared {
     snapshot: Mutex<Arc<AudioSnapshot>>,
@@ -162,7 +163,7 @@ impl Shared {
 pub struct AudioHandle {
     tx: Sender<Msg>,
     shared: Arc<Shared>,
-    thread: Arc<Mutex<Option<(JoinHandle<()>, Receiver<()>)>>>,
+    thread: Arc<Mutex<Option<EngineThread>>>,
 }
 
 impl AudioHandle {

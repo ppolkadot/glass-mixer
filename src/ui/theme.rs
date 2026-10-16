@@ -143,15 +143,17 @@ pub fn metrics(density: Density) -> Metrics {
 }
 
 pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
-    let mut style = egui::Style::default();
-    style.text_styles = [
-        (TextStyle::Heading, FontId::new(17.0, FontFamily::Name(crate::platform::fonts::SEMIBOLD.into()))),
-        (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
-    ]
-    .into();
+    let mut style = egui::Style {
+        text_styles: [
+            (TextStyle::Heading, FontId::new(17.0, FontFamily::Name(crate::platform::fonts::SEMIBOLD.into()))),
+            (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+            (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+            (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+            (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+        ]
+        .into(),
+        ..Default::default()
+    };
     style.animation_time = if animations { 0.12 } else { 0.0 };
     style.spacing.item_spacing = Vec2::new(8.0, m.gap * 0.6);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
