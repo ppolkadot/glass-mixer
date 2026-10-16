@@ -1,5 +1,26 @@
 # Architecture
 
+## Opt-in shortcuts, pins and presets
+
+`platform/hotkeys.rs` owns a blocking Win32 message thread. It registers only
+user-assigned chords, sends mute/relative-volume commands directly to the
+audio handle, and shows or hides the HWND immediately. Reconfiguration keeps
+the previous working set if Windows rejects a new chord. Drop unregisters all
+shortcuts and joins before the audio engine stops. The thread has no timer.
+
+`audio/preferences.rs` normalizes stable app identities. Pins persist only
+identity/name/icon hints; a missing app becomes a disabled UI placeholder with
+no numeric value or meter. The `settings.json` schema is v4 and parses list
+items individually so one bad pin, preset or hotkey does not reset preferences.
+
+Presets are the explicit exception to never persisting volumes. Saving captures
+current app volume/mute only. Applying changes currently running sessions with
+the regular event context and one read after the command batch. The optional
+automatic rule is conservative: it arms at configuration, considers only a
+new process with a new audio session, rejects observed external changes or a
+nondefault initial state, and never repeats for the same process. A process
+creation timestamp avoids PID reuse; no polling or startup-wide restore occurs.
+
 ## Additional endpoints and sound properties
 
 Opening Devices sends `LoadDevices`. The engine lazily opens non-default
@@ -59,7 +80,7 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Process exit | `RegisterWaitForSingleObject` on the process handle (no polling) |
 | Icons | `IAudioSessionControl::GetIconPath` → AppsFolder shell item (packaged apps) → `IShellItemImageFactory` on the exe → generic tile |
 | Sleep/resume | `PowerRegisterSuspendResumeNotification` |
-| Glass | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`), with a transparent GL surface |
+| Glass and fallback | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`), with a transparent GL surface; if GL startup fails, retry eframe/wgpu with an opaque surface |
 | Tray | `tray-icon` (Shell_NotifyIcon) with a `muda` menu |
 | Launch at login | `HKCU\...\CurrentVersion\Run` (plus `StartupApproved` for the Task Manager state) |
 
@@ -129,4 +150,6 @@ be retried on Refresh or when an app returns.
 
 **Glass verification.** `examples/glass_spike.rs` is the minimal test case
 that confirmed DWM backdrops render behind a transparent eframe/glow window.
-Run it with `GM_BACKDROP=acrylic|mica|none`.
+Run it with `GM_BACKDROP=acrylic|mica|none` and `GM_RENDERER=glow|wgpu`.
+The fallback uses a solid surface to avoid presenting a broken backdrop on
+machines where OpenGL cannot initialize.
