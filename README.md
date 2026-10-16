@@ -1,8 +1,8 @@
 # Glass Mixer
 
 A lightweight, native Windows audio mixer that lives in the system tray. It
-controls every device and per-app volume Windows exposes, with a Windows 11
-glass look.
+controls the default output and input devices and apps with sessions on the
+default output, with a Windows 11 glass look.
 
 Written in Rust and built on the Windows Core Audio APIs. It doesn't use a
 web view, needs no administrator rights for normal use, and makes no
@@ -10,8 +10,9 @@ network access.
 
 ## Features
 
-- **Output and input devices:** volume, mute, balance and default-device
-  switching for speakers and microphones.
+- **Output and input devices:** volume and mute for the default output and
+  input devices, plus default-device switching. Device balance is supported
+  by the engine but does not yet have a UI control.
 - **Per-app mixer:** independent volume, mute and balance for every app
   with a Windows audio session.
   - Each row shows the app's own icon, its name, and whether it is
@@ -19,7 +20,7 @@ network access.
   - An app's sessions are grouped into one row. Apps are matched by
     executable path or package identity (AUMID), not by display name.
   - Live peak meters (optional).
-  - Filter by name (Ctrl+F). Idle apps can be hidden.
+  - Filter by name (Ctrl+F). Idle apps can be hidden; System sounds stays visible.
 - **Always in sync with Windows:** changes made with the volume keys,
   Windows Settings, hardware buttons or other apps appear in the mixer
   within milliseconds. Windows is the only source of truth; Glass Mixer
@@ -38,6 +39,7 @@ network access.
   - Light, dark, or follow Windows.
   - Seven accent colours.
   - Comfortable or compact density.
+  - A 480×720 starting window and a Settings action to return to that size.
 - **Accessibility:**
   - Full keyboard navigation with a visible focus ring.
   - Sliders: arrow keys (1 %), Shift+arrows or Page Up/Down (larger
@@ -72,8 +74,8 @@ Command line: `glass-mixer.exe --minimized` starts with only the tray icon.
 Prerequisites:
 
 - Rust stable with the MSVC toolchain (`rustup default stable-msvc`).
-- Visual Studio 2022 Build Tools with the "Desktop development with C++"
-  workload, which includes the Windows SDK.
+- Visual Studio 2022 or later with the "Desktop development with C++"
+  workload and a Windows SDK.
 
 ```powershell
 cargo build --release                 # target\release\glass-mixer.exe
@@ -112,7 +114,7 @@ engine sees and watches for changes for 30 seconds. It changes nothing.
   sessions, such as exclusive-mode streams, some protected or DRM paths,
   and hardware mixers. Some system sounds share the System sounds session.
 - **Balance** needs a stereo device or session. Elsewhere it is shown as
-  unavailable rather than as a value.
+  unavailable rather than as a value. Device balance does not yet have a UI.
 - **Glass:**
   - Acrylic and Mica need Windows 11 22H2 or later.
   - Windows 11 21H2 gets Mica only.
@@ -144,3 +146,4 @@ MIT. See [LICENSE](LICENSE).
 | No glass effect | Check Settings > Glass effect. The status line explains why it's off (Windows version, transparency effects, high contrast). |
 | Launch at login doesn't work | It may be disabled in Task Manager > Startup apps; Settings shows this. Turn the toggle off and on to re-enable it. |
 | Volumes look stuck after sleep | The app rebuilds automatically after resume. Press ↻ or Settings > Refresh audio devices to force it, and check the log file. |
+| The window is too small | Use Settings > Appearance > Use recommended window size. Existing saved sizes are preserved. |

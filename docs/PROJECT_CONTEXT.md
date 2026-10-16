@@ -4,9 +4,10 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-15, after release v0.1.0. Code at commit `9c5c528`.
+Last updated: 2026-10-15, after the Phase 1 maintenance work on branch
+`codex/glass-mixer-features`. The v0.1.0 release record remains below.
 
-- Repository: https://github.com/ppolkadot/glass-mixer (private)
+- Repository: https://github.com/ppolkadot/glass-mixer (public)
 - Release: https://github.com/ppolkadot/glass-mixer/releases/tag/v0.1.0
 
 Related documents:
@@ -44,7 +45,7 @@ gaps and section 11 the risks.
 | Executable | `glass-mixer.exe`, 8.05 MB (release, stripped, thin LTO) |
 | Installer | `glass-mixer-0.1.0-setup.exe`, 4.83 MB (Inno Setup, per user, no admin) |
 | Portable | `glass-mixer-0.1.0-portable.zip`, 3.46 MB |
-| Source | about 5,400 lines of Rust in 31 files, plus docs and scripts |
+| Source | about 5,900 lines of Rust in 27 `src/` files, plus build code, examples, tests, docs and scripts |
 | License | MIT (copyright 2026 ppolkadot) |
 | Toolchain | Rust 1.99.0 stable MSVC, Rust edition 2024, MSRV 1.95 |
 
@@ -80,8 +81,8 @@ full in [Appendix A](#appendix-a--original-specification-verbatim). In short:
 Follow-up requests in the same session:
 
 1. "Yes, install Inno Setup and build the installer, then create a GitHub
-   repository and upload the project." The repo is private by the owner's
-   choice and MIT-licensed by the owner's choice.
+   repository and upload the project." The repo was initially private by the
+   owner's choice and MIT-licensed by the owner's choice. It is public now.
 2. "Create a doc that summarizes everything about the project …, add it to
    the repo and commit it." That is this file.
 
@@ -147,8 +148,13 @@ isn't part of the app.
 10. **Publishing.**
     - GitHub CLI 2.102.0 was installed and the owner signed in as
       `ppolkadot`.
-    - The private repo was created, `main` pushed, and release v0.1.0
+    - The initially private repo was created, `main` pushed, and release v0.1.0
       published with both binaries.
+11. **Phase 1 maintenance on a feature branch.** Text encoding, backdrop
+    status, icon retry, cache pruning, System sounds visibility, window
+    geometry and sizing, and the two clippy lints were addressed. The
+    settings schema was hardened before later phases add fields. No Phase 2
+    feature is included in this record yet.
 
 ---
 
@@ -199,6 +205,8 @@ Dependencies, as locked in `Cargo.lock`:
   changes (by us or anyone else), an "Output switched to …" notice appears.
 - **Missing output:** "No output device is available. Connect speakers or
   headphones."
+- The engine can read and set stereo device balance, but the UI does not yet
+  expose it. Only the default devices have independent controls today.
 - **Starting up:** "Connecting to Windows audio…"
 - **Audio service unreachable:** a warning banner with the error, "keeps
   retrying automatically", and a **Retry now** button.
@@ -225,6 +233,8 @@ Dependencies, as locked in `Cargo.lock`:
   if **all** its sessions are. Commands apply to every session in the group.
 - **Order:** System sounds first, then by name (case-insensitive), so rows
   don't jump around.
+- Hiding idle apps leaves System sounds visible so its control remains
+  reachable even when Windows reports the session idle.
 - **Naming:**
   1. The session's display name (indirect `@dll,-id` strings are
      resolved).
@@ -241,7 +251,8 @@ Dependencies, as locked in `Cargo.lock`:
      System sounds).
 
   Icons are rendered at the exact pixel size (icon points × DPI scale) and
-  cached per (app, size) for the life of the process.
+  cached per (app, size). Missing apps and obsolete sizes are pruned; failed
+  lookups retry on Refresh or when the app returns.
 - **Filter box:** Ctrl+F focuses it, Esc clears it. An "Apps N" count is
   shown. The ↻ button rebuilds every audio object.
 - **Empty list:** says "No apps match …" or "No apps have audio sessions
@@ -271,8 +282,11 @@ Dependencies, as locked in `Cargo.lock`:
   launch finds the first window (same title and exe name), shows it, and
   exits.
 - **Window position and size:** saved, and restored only if the saved
-  position is still on a monitor. The default is 420×640, centred; the
-  minimum is 360×440.
+  position is still on a monitor. New positions use physical screen pixels;
+  version-1 logical positions are checked against each monitor's DPI. If an
+  old position is ambiguous, the window centers instead of guessing. The
+  new default is 480×720, centred; the minimum remains 360×440. Existing
+  saved sizes are preserved and Appearance offers a recommended-size action.
 - **Exit:** tray **Exit**, or close with close-to-tray off. Shutdown is a
   single path:
   1. Save settings.
@@ -331,7 +345,7 @@ four sections:
 
 | Section | Contents |
 | --- | --- |
-| **Appearance** | Theme, Glass effect (with a status line), Backdrop, Accent, Density, Level meters |
+| **Appearance** | Theme, Glass effect (with a status line), Backdrop, Accent, Density, Level meters, recommended window size |
 | **Behavior** | Launch at login (shows when Task Manager has disabled it), Start minimized, Keep running when closed, Minimize to tray, Show idle apps |
 | **Audio** | A "Refresh audio devices" button, plus a note about default-device switching |
 | **About** | The version, "No telemetry…", the settings path, and "Open settings folder" |
@@ -349,12 +363,13 @@ four sections:
 | Mutex `Local\GlassMixer.SingleInstance` | Single instance per logon session |
 | `%LOCALAPPDATA%\Programs\Glass Mixer\` | Installer target, plus a Start-menu shortcut and an HKCU uninstall entry |
 
-`settings.json` schema (version 1). Unknown or invalid values fall back to
-their default field by field:
+`settings.json` schema (version 2). Invalid known values fall back to their
+default field by field. Unknown fields and newer version numbers are retained
+when the file is saved:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "theme": "system | light | dark",
   "glass": true,
   "backdrop": "acrylic | mica",
@@ -365,9 +380,14 @@ their default field by field:
   "minimize_to_tray": false,
   "show_inactive_apps": true,
   "show_meters": true,
-  "window": { "x": 0.0, "y": 0.0, "width": 420.0, "height": 640.0 }
+  "window": { "x": 0.0, "y": 0.0, "width": 480.0, "height": 720.0 },
+  "window_position_physical": true
 }
 ```
+
+`window` is normally omitted until the first window geometry is saved. A
+version-1 file lacks `window_position_physical`; its coordinates are treated
+as egui logical points. An ambiguous legacy position is not restored.
 
 Volume levels are deliberately **never** stored; Windows stays
 authoritative. There is no network access, telemetry or analytics, and no
@@ -399,38 +419,39 @@ Windows change ─► callback ─► Msg::*Changed ─► engine re-reads ─�
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `src/main.rs` | 115 | Logging, panic hook, single-instance check, settings load, window options, OpenGL failure message box |
-| `src/app.rs` | 472 | `MixerApp`: lifecycle, tray actions, close and minimize to tray, start-hidden cloak, prefs polling, look and backdrop refresh, settings debounce (800 ms), toasts, shutdown |
-| `src/settings.rs` | 288 | `Settings`, enums, lenient parsing, `SettingsStore` (load outcomes, atomic save), with tests |
-| `src/icon_art.rs` | 169 | Procedural app icon (SDF, 4×4 supersampled) and ICO encoder. Shared with `build.rs`. |
-| `build.rs` | 62 | Generates `app.ico` and the `.rc`; embeds the icon, manifest (PerMonitorV2, asInvoker, UTF-8, Common Controls 6) and VERSIONINFO |
-| `src/audio/mod.rs` | 215 | `Command`, `Notice`, internal `Msg`, `Shared` (snapshot, meters, notices, listeners), `AudioHandle` (start / send / snapshot / shutdown with a 2 s timeout) |
-| `src/audio/model.rs` | 341 | Snapshot types, `AppKey`, `group_sessions`, balance math, `to_percent`, filter, names, tooltip, with tests |
-| `src/audio/engine.rs` | 861 | `Runner` (dirty flags, backoff, delayed resume rebuild, meters), `Engine`, `Endpoint`, `SessionSet`, `Session`, command application, error mapping, with tests |
-| `src/audio/callbacks.rs` | 157 | `IMMNotificationClient`, `IAudioEndpointVolumeCallback`, `IAudioSessionNotification`, `IAudioSessionEvents`; `OWN_EVENT_CONTEXT` |
-| `src/audio/policy_config.rs` | 46 | The undocumented `IPolicyConfig` vtable and `set_default` (all three roles) |
-| `src/audio/process.rs` | 168 | `OpenProcess` (limited), image path, AUMID, `FileDescription`, `ProcessWatch` |
-| `src/audio/power.rs` | 54 | Suspend/resume subscription |
-| `src/audio/com.rs` | 61 | `ComGuard`, `take_pwstr`, fatal and not-found HRESULT classification |
-| `src/platform/backdrop.rs` | 103 | `Support::for_build`, `apply()` (dark title bar, round corners, frame extension, backdrop type), with tests |
-| `src/platform/tray.rs` | 98 | Tray icon, menu, event handlers, `update(snapshot)` |
-| `src/platform/icons.rs` | 267 | `IconService` (request / take_ready / shutdown), resolution chain, HBITMAP/HICON to RGBA, with tests |
-| `src/platform/window.rs` | 108 | `Hwnd`, show / hide / cloak / visibility, `activate_existing_instance` |
-| `src/platform/startup.rs` | 94 | Run key state, enable/disable, path repair |
-| `src/platform/sysprefs.rs` | 56 | Dark mode, transparency, animations, high contrast, build number |
-| `src/platform/fonts.rs` | 42 | Segoe UI, semibold and icon-font families |
-| `src/platform/single_instance.rs` | 32 | Mutex guard |
-| `src/platform/mod.rs` | 49 | Registry read helpers |
-| `src/ui/theme.rs` | 198 | `Palette`, accents, `Metrics`, `apply()` (same style for both egui theme slots; egui's window-theme sync disabled) |
-| `src/ui/widgets.rs` | 397 | Glyphs, `Slider`, `icon_button`, `toggle_row`, `segmented`, `fallback_tile`, `card`, `percent_label`, focus ring |
-| `src/ui/mixer.rs` | 457 | Mixer view, `MixerState` (filter, expanded rows, value holds, textures, names) |
-| `src/ui/settings_view.rs` | 206 | Settings view |
-| `src/ui/mod.rs` | 33 | `Look`, `GlassStatus` |
-| `tests/audio_integration.rs` | 184 | Real-hardware tests (ignored by default) plus the silent-stream helper |
-| `examples/audio_probe.rs` | 92 | Read-only diagnostic: dumps state and watches for changes |
-| `examples/glass_spike.rs` | 79 | Minimal glass test case (`GM_BACKDROP`, `GM_EXTEND`, `GM_DARK`) |
-| `scripts/package.ps1` | 44 | Release build, portable zip, and the installer when ISCC is present |
-| `installer/glass-mixer.iss` | 58 | Inno Setup script |
+| `src/main.rs` | ~197 | Logging, panic hook, single-instance check, settings load, monitor-aware physical window restore, window options, OpenGL failure message box |
+| `src/app.rs` | ~590 | `MixerApp`: lifecycle, tray actions, close and minimize to tray, start-hidden cloak, prefs polling, sticky backdrop status, settings debounce (800 ms), toasts, shutdown |
+| `src/settings.rs` | ~356 | `Settings`, enums, lenient versioned parsing, preservation of future fields, `SettingsStore` (load outcomes, atomic save), with tests |
+| `src/icon_art.rs` | ~187 | Procedural app icon (SDF, 4×4 supersampled) and ICO encoder. Shared with `build.rs`. |
+| `build.rs` | ~72 | Generates `app.ico` and the `.rc`; embeds the icon, manifest (PerMonitorV2, asInvoker, UTF-8, Common Controls 6) and VERSIONINFO |
+| `src/audio/mod.rs` | ~239 | `Command`, `Notice`, internal `Msg`, `Shared` (snapshot, meters, notices, listeners), `AudioHandle` (start / send / snapshot / shutdown with a 2 s timeout) |
+| `src/audio/model.rs` | ~384 | Snapshot types, `AppKey`, `group_sessions`, balance math, `to_percent`, filter including System sounds, names, tooltip, with tests |
+| `src/audio/engine.rs` | ~919 | `Runner` (dirty flags, backoff, delayed resume rebuild, meters), `Engine`, `Endpoint`, `SessionSet`, `Session`, command application, error mapping, with tests |
+| `src/audio/callbacks.rs` | ~173 | `IMMNotificationClient`, `IAudioEndpointVolumeCallback`, `IAudioSessionNotification`, `IAudioSessionEvents`; `OWN_EVENT_CONTEXT` |
+| `src/audio/policy_config.rs` | ~52 | The undocumented `IPolicyConfig` vtable and `set_default` (all three roles) |
+| `src/audio/process.rs` | ~185 | `OpenProcess` (limited), image path, AUMID, `FileDescription`, `ProcessWatch` |
+| `src/audio/power.rs` | ~59 | Suspend/resume subscription |
+| `src/audio/com.rs` | ~71 | `ComGuard`, `take_pwstr`, fatal and not-found HRESULT classification |
+| `src/platform/backdrop.rs` | ~115 | `Support::for_build`, `apply()` (dark title bar, round corners, frame extension, backdrop type), with tests |
+| `src/platform/tray.rs` | ~109 | Tray icon, menu, event handlers, `update(snapshot)` |
+| `src/platform/icons.rs` | ~418 | `IconService` (request / retry / prune / take_ready / shutdown), resolution chain, HBITMAP/HICON to RGBA, with tests |
+| `src/platform/window.rs` | ~133 | `Hwnd`, show / hide / cloak / visibility, physical window position, `activate_existing_instance` |
+| `src/platform/startup.rs` | ~101 | Run key state, enable/disable, path repair |
+| `src/platform/sysprefs.rs` | ~64 | Dark mode, transparency, animations, high contrast, build number |
+| `src/platform/fonts.rs` | ~50 | Segoe UI, semibold and icon-font families |
+| `src/platform/single_instance.rs` | ~36 | Mutex guard |
+| `src/platform/mod.rs` | ~53 | Registry read helpers |
+| `src/ui/theme.rs` | ~211 | `Palette`, accents, `Metrics`, `apply()` (same style for both egui theme slots; egui's window-theme sync disabled) |
+| `src/ui/widgets.rs` | ~417 | Glyphs, `Slider`, `icon_button`, `toggle_row`, `segmented`, `fallback_tile`, `card`, `percent_label`, focus ring |
+| `src/ui/mixer.rs` | ~520 | Mixer view, `MixerState` (filter, expanded rows, value holds, pruned textures, names) |
+| `src/ui/settings_view.rs` | ~224 | Settings view and recommended-size action |
+| `src/ui/mod.rs` | ~37 | `Look`, `GlassStatus` |
+| `tests/audio_integration.rs` | ~200 | Real-hardware tests (ignored by default) plus the silent-stream helper |
+| `tests/source_encoding.rs` | ~24 | Rust source UTF-8 and mojibake regression scan |
+| `examples/audio_probe.rs` | ~97 | Read-only diagnostic: dumps state and watches for changes |
+| `examples/glass_spike.rs` | ~85 | Minimal glass test case (`GM_BACKDROP`, `GM_EXTEND`, `GM_DARK`) |
+| `scripts/package.ps1` | ~51 | Release build, portable zip, and the installer when ISCC is present |
+| `installer/glass-mixer.iss` | ~67 | Inno Setup script |
 
 ### Important constants
 
@@ -498,6 +519,17 @@ error.
 13. **Icons are generated in code.** One source (`icon_art.rs`) feeds the
     exe ICO, the window icon and the tray icon, so the repo has no binary
     assets.
+14. **Window positions use physical screen pixels.** egui reports logical
+    points using the window's current scale. Saving those points without the
+    source monitor's DPI made mixed-DPI restore ambiguous. Win32 now stores
+    new positions in physical pixels and validates them against physical
+    monitor rectangles. An ambiguous version-1 position is centered.
+15. **Saved window sizes stay user-owned.** The new 480×720 default applies
+    only without saved geometry. Existing sizes are not silently enlarged;
+    Settings provides an explicit recommended-size action.
+16. **System sounds is exempt from the idle-app filter.** It is normally idle
+    yet is a useful control. Textures and icon results are pruned by live app
+    and pixel size, while failed lookups can retry.
 
 ---
 
@@ -568,6 +600,26 @@ All on the machine in section 4, on 2026-10-15.
   handlers share code paths that were tested).
 - Running for 24 hours or more.
 
+### Phase 1 maintenance verification (2026-10-15)
+
+This is a separate record for the unmerged `codex/glass-mixer-features`
+branch. It does not change the v0.1.0 release results above.
+
+- **Ran and passed:** `cargo fmt --check`; `cargo clippy --all-targets --
+  -D warnings`; `cargo test` (28 library, 1 binary and 1 source-encoding
+  test); and the seven ignored, self-restoring audio integration tests run
+  serially. `cargo build` and `git diff --check` also passed.
+- **Ran and failed during development:** the new regression tests first
+  exposed the unfixed source encoding, settings parsing and missing Phase 1
+  behavior. Initial formatting and clippy runs also identified changes that
+  were corrected before the passing runs above.
+- **Not run:** a fresh launch/tray/shutdown test of this branch, because an
+  installed `glass-mixer.exe` already owns the single-instance mutex; 100%,
+  150% and 200% visual checks in both densities; a real mixed-DPI restore;
+  actual DWM rejection; and Windows 10, microphone and multi-output checks.
+  These remain on the manual checklist. A test of the old release is not
+  evidence for the branch build.
+
 ---
 
 ## 10. Gaps against the specification
@@ -587,86 +639,64 @@ All on the machine in section 4, on 2026-10-15.
 
 ## 11. Possible bugs, risks and edge cases
 
-Found by reasoning over the code during this review, unless marked
-otherwise. None of these was reproduced in testing unless stated.
+The glass status, failed-icon retry, texture growth, System sounds filter
+and system-DPI position check were addressed in Phase 1. The following
+risks remain; hardware-dependent paths need the manual checks in section 9.
 
 ### Confirmed in code (not yet fixed)
 
-1. **The glass status can flip every frame if DWM rejects the backdrop.**
-   This happens in `app.rs` (`glass_status` and `refresh_look`), and only
-   when Windows refuses the backdrop on a build that should support it.
-   1. `apply()` fails and returns `glass: false`, so the status becomes
-      *Unsupported*.
-   2. The next `refresh_look` therefore requests no backdrop, which
-      changes the stored key.
-   3. Now the "Unsupported" condition (applied failed **and** a backdrop
-      was requested) is false, so the status returns to *Active*.
-   4. The backdrop is requested again, and the cycle repeats.
-
-   The result would be DWM calls on every `logic()` and possible
-   flicker. **Fix:** remember "backdrop rejected" in a sticky flag until
-   the settings or the Windows build change.
-2. **Failed icon lookups are never retried.** `IconService.requested` and
-   the worker cache keep failures for the whole process lifetime. An app
-   whose exe was briefly unreadable keeps the letter tile until restart.
-3. **Texture cache never shrinks.** `MixerState.textures` keeps one
-   texture per (app, pixel size) forever. After moving between monitors
-   with different DPI, the old sizes stay in memory. Over a long uptime
-   with many different apps this grows slowly (a few KB per icon).
-4. **Endpoint balance is unreachable from the UI** (see section 10).
-5. **Group volume flattens per-session differences.** The first change
+1. **Endpoint balance is unreachable from the UI** (see section 10).
+2. **Group volume flattens per-session differences.** The first change
    to a multi-session app sets every session to the same value.
    Intentional, but surprising if an app deliberately runs different
    streams at different volumes.
 
 ### Plausible risks
 
-6. **No OpenGL, no window.** In some Remote Desktop sessions, VMs or with
+3. **No OpenGL, no window.** In some Remote Desktop sessions, VMs or with
    the Microsoft Basic Display Adapter, eframe/glow can't start. The app
    shows a message box and exits. There's no wgpu/DirectX fallback.
-7. **Acrylic goes solid when the window loses focus.** This is Windows'
+4. **Acrylic goes solid when the window loses focus.** This is Windows'
    own behaviour for `DWMSBT_TRANSIENTWINDOW`, but users may read it as
    glass "turning off".
-8. **Single-instance activation needs the same exe name.** If the exe is
+5. **Single-instance activation needs the same exe name.** If the exe is
    renamed, the mutex still blocks a second instance, but the first
    window isn't found, so the second launch exits silently.
-9. **Portable copies fight over launch at login.** `repair_path_if_enabled`
+6. **Portable copies fight over launch at login.** `repair_path_if_enabled`
    re-points the Run key to whichever copy started last.
-10. **The uninstaller kills every running `glass-mixer.exe`**
+7. **The uninstaller kills every running `glass-mixer.exe`**
     (`taskkill /IM … /F`), including a separate portable copy.
-11. **Device names can repeat.** Two devices with the same friendly name
+8. **Device names can repeat.** Two devices with the same friendly name
     are indistinguishable in the drop-down.
-12. **Mixed per-monitor DPI can misplace the window.** Position is saved
-    in logical points, and the on-screen check converts with the
-    *system* DPI. On mixed-DPI setups the restored position can be off
-    or wrongly rejected (it then falls back to centred).
-13. **Meters are approximate.** Peaks are pre-mute and may be pre-volume
+9. **Legacy positions can be ambiguous.** A version-1 logical position
+    can correspond to more than one monitor at different scales. In that
+    case the app centers rather than claiming to know the original monitor.
+10. **Meters are approximate.** Peaks are pre-mute and may be pre-volume
     depending on the stream. The meter line is clipped to the slider value
     and hidden while muted.
-14. **Hiding idle apps also hides System sounds** (it's usually idle).
-15. **PID reuse.** The process cache is keyed by PID and pruned when no
+11. **PID reuse.** The process cache is keyed by PID and pruned when no
     session uses it. A reused PID inside that window could briefly show
     the wrong exe identity. This is very unlikely.
-16. **Elevated or protected processes:** limited process access may
+12. **Elevated or protected processes:** limited process access may
     fail, giving `AppKey::Pid`, no icon, and a "Process N" name unless the
     session supplies a name.
-17. **Untested recovery paths:**
+13. **Untested recovery paths:**
     - The rebuild 1.5 s after resume may come too early for slow drivers.
       The backoff should recover.
     - An audio service restart should show "unavailable" and then
       reconnect.
-18. **Prefs polling while visible** causes a repaint every 2 s (the
+14. **Prefs polling while visible** causes a repaint every 2 s (the
     visible CPU cost measured above). Listening for `WM_SETTINGCHANGE`
     would avoid this, but needs a message hook that eframe doesn't
     expose.
-19. **High contrast uses a fixed palette** (black, white and yellow), not
+15. **High contrast uses a fixed palette** (black, white and yellow), not
     the user's chosen system high-contrast colours.
-20. **Meter polling continues in silence.** Meters are polled at about
+16. **Meter polling continues in silence.** Meters are polled at about
     30 Hz while visible even when nothing plays. Repaints are skipped
     unless values change, but the COM calls continue.
-21. **Debug builds open a console** (`windows_subsystem` is only set for
+17. **Debug builds open a console** (`windows_subsystem` is only set for
     release). This is expected; mentioned to avoid confusion.
-22. **Hidden-window latency.** While hidden, eframe throttles repaints to
+18. **Hidden-window latency.** While hidden, eframe throttles repaints to
     10 Hz. Tray clicks act immediately (direct Win32), but processing
     `Exit` from the tray can take up to about 100 ms.
 
@@ -721,15 +751,15 @@ Worth adding to `scripts/` as a follow-up.
 
 ### Suggested next steps, in priority order
 
-1. Fix risk 1 (the sticky backdrop-rejected flag).
-2. Expose device balance in the UI.
-3. Retry failed icons on refresh.
-4. Run the manual checklist on Windows 10 and on a machine with a
+1. Expose device balance in the UI.
+2. Run the manual checklist on Windows 10 and on a machine with a
    microphone and two outputs.
-5. Show a Windows toast for errors while the window is hidden.
-6. Add independent controls for non-default devices.
+3. Show native notifications for warnings and errors while hidden.
+4. Add independent controls for non-default devices.
+5. Spike sound properties before implementing any undocumented setter.
+6. Add opt-in hotkeys, app pins and explicit presets.
 7. Add a wgpu fallback renderer for machines without OpenGL.
-8. Sign the binaries.
+8. Sign the binaries when the owner provides a certificate.
 9. Commit the lifecycle and UIA scripts, and run unit tests in CI on a
    Windows runner.
 

@@ -24,7 +24,7 @@
 | `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping, balance math, tooltip text. |
 | `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, launch at login (registry), DWM backdrop, system preferences, fonts, and app icon resolution. |
 | `ui/` | The design system (`theme.rs`), custom widgets (`widgets.rs`), the mixer view and the settings view. |
-| `settings.rs` | JSON preferences with per-field lenient parsing and atomic writes. |
+| `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown fields, and atomic writes. |
 | `app.rs` | Lifecycle. It wires everything together and owns the single shutdown path. |
 | `main.rs` | Logging, panic hook, single-instance check, window options. |
 
@@ -98,6 +98,17 @@ only while audio is playing.
 **Starting hidden.** eframe always shows its window after the first frame.
 To start in the tray without a flash, the window is DWM-cloaked at creation,
 hidden once eframe shows it, then uncloaked.
+
+**Window position.** New positions are saved in physical screen pixels and
+restored with Win32 after window creation. This avoids converting a position
+with the system DPI when monitors use different scales. Older settings saved
+egui logical points; restoration tries each monitor's DPI and centers the
+window if more than one monitor could match. The saved size is retained only
+when the position can be validated on a monitor.
+
+**Icon caches.** Both UI textures and worker results are pruned for apps that
+disappear and pixel sizes replaced by a DPI change. Failed icon lookups can
+be retried on Refresh or when an app returns.
 
 **Glass verification.** `examples/glass_spike.rs` is the minimal test case
 that confirmed DWM backdrops render behind a transparent eframe/glow window.
