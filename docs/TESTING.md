@@ -1,5 +1,27 @@
 # Testing
 
+## Phase 2 verification (2026-10-15)
+
+- **Ran and passed:** formatting, clippy with warnings denied, all-target check,
+  36 hardware-independent tests; read-only sound-properties probe on three
+  outputs and three inputs; `cargo test --test devices_integration -- --ignored
+  --test-threads=1 --nocapture`. The new hardware test restores master, mute
+  and every channel even on panic. All six endpoints accepted independent
+  volume changes; all three stereo outputs retained balance through subsequent
+  master changes. Spec and code-quality reviews completed; findings corrected.
+- **Ran and failed:** initial clippy module ordering (corrected); unavailable
+  enhancements and mono properties in the probe (reported, no fake defaults).
+- **Not run:** new-build GUI lifecycle/visual matrix, Focus Assist suppression,
+  Windows 10, hot-plug, device default switching, audio-service restart and
+  sleep/resume. Lifecycle verification follows with the development scripts.
+
+Manual additions: exercise both density modes at 100/150/200%; expand both
+device property panels and scroll to every button; adjust non-default devices;
+unplug/reconnect them; change format/effects/spatial settings in Windows while
+open and verify current readouts; check hidden notices, deduplication and Focus
+Assist; verify unavailable mono points to Accessibility audio settings.
+No format-changing integration test exists because no format setter was added.
+
 ## Automated
 
 ### Unit tests (no hardware)
