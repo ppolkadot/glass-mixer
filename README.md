@@ -18,6 +18,13 @@ network access.
   open Windows Settings. See [probe findings](docs/SOUND_PROPERTIES_SPIKE.md).
 - **Tray notifications:** warnings and errors while hidden, with throttling,
   duplicate suppression and a Settings toggle. Windows notification policy applies.
+- **Optional global shortcuts:** assign chords for output/microphone mute,
+  output volume up/down and showing the mixer. No chord is assigned by default.
+- **Pins and presets:** pin apps by executable or package identity; an offline
+  pin says "Not running" and exposes no volume. Presets save app volumes and
+  mutes only when you press Save, and apply only when you press Apply or enable
+  a visible once-per-new-process rule. Automatic rules skip already-running
+  processes and observed user changes.
 - **Per-app mixer:** independent volume, mute and balance for every app
   with a Windows audio session.
   - Each row shows the app's own icon, its name, and whether it is
@@ -29,7 +36,8 @@ network access.
 - **Always in sync with Windows:** changes made with the volume keys,
   Windows Settings, hardware buttons or other apps appear in the mixer
   within milliseconds. Windows is the only source of truth; Glass Mixer
-  never stores or restores volume levels.
+  never stores or restores volume levels automatically except when you
+  explicitly save and enable a preset rule.
 - **Event-driven:** device add/remove, default-device changes, apps starting
   and quitting, sleep/resume, and Windows Audio service restarts are all
   detected and recovered from automatically.
@@ -59,8 +67,8 @@ network access.
 ## Requirements
 
 - Windows 10 1809 or later, or Windows 11 (the primary target).
-- A GPU driver with OpenGL 2.0 or later. Every normal desktop GPU
-  qualifies; see *Troubleshooting* for remote and virtual machines.
+- A graphics driver supporting OpenGL or a wgpu backend. Glass Mixer tries
+  OpenGL first, then an opaque wgpu window if OpenGL initialization fails.
 
 ## Install
 
@@ -90,7 +98,9 @@ powershell -ExecutionPolicy Bypass -File scripts\package.ps1   # dist\ zip (+ in
 
 `scripts\package.ps1` always produces a portable zip. It also builds the
 installer when Inno Setup 6 is installed
-(`winget install JRSoftware.InnoSetup`).
+(`winget install JRSoftware.InnoSetup`). Optional signing and the development
+lifecycle, UI Automation and window-capture scripts are documented in
+[scripts/README.md](scripts/README.md).
 
 ## Tests
 
@@ -126,8 +136,8 @@ engine sees and watches for changes for 30 seconds. It changes nothing.
   - Windows 10 uses a matching solid background.
   - Glass also turns off automatically when Windows transparency effects
     or high contrast are on.
-- **Notifications** appear inside the app window, not as Windows toast
-  notifications.
+- **Notifications** appear in the app while it is visible; while hidden,
+  warnings and errors use tray notifications subject to Windows quiet policy.
 
 ## Project documentation
 
@@ -145,7 +155,7 @@ MIT. See [LICENSE](LICENSE).
 
 | Symptom | What to do |
 | --- | --- |
-| "Glass Mixer couldn't start its window" | OpenGL isn't available. This is common in Remote Desktop and some VMs. Update the GPU driver or run it locally. |
+| "Glass Mixer couldn't start its window" | Both OpenGL and the opaque wgpu fallback failed. Update the GPU driver or run it locally. |
 | An app is missing from the list | It has no audio session on the default output yet. Play something in it, or press ↻ Refresh. Apps playing to another device aren't listed. |
 | The device menu is greyed out | Default switching isn't available on this system. Use Windows Settings > System > Sound. |
 | No glass effect | Check Settings > Glass effect. The status line explains why it's off (Windows version, transparency effects, high contrast). |

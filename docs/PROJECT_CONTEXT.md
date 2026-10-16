@@ -4,7 +4,7 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-15, after Phase 2 on branch
+Last updated: 2026-10-15, during Phase 4 on branch
 `codex/glass-mixer-features`. The v0.1.0 release record remains below.
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
@@ -31,8 +31,9 @@ Through the Windows Core Audio APIs it controls:
 - Every app with an audio session: volume, mute and balance, shown with
   the app's own icon and status.
 
-Its UI is built on eframe/egui (OpenGL renderer) and uses a Windows 11
-Acrylic/Mica glass backdrop, which is on by default.
+Its UI is built on eframe/egui (OpenGL first, opaque wgpu fallback) and uses
+a Windows 11 Acrylic/Mica glass backdrop when OpenGL is available. Glass is on
+by default.
 
 Status: **v0.1.0 is functional and released.** The core requirements are
 implemented and checked on one Windows 11 machine. Windows 10, microphones,
@@ -40,12 +41,16 @@ switching between several outputs, and sleep/resume have **not** been tested
 (no suitable hardware or OS was available). Section 10 lists the remaining
 gaps and section 11 the risks.
 
+The table below records the published v0.1.0 build. The feature branch is
+unreleased; its latest release exe is 15,735,296 bytes after adding wgpu,
+versus 8,442,880 bytes for the installed glow-only exe.
+
 | Item | Value |
 | --- | --- |
 | Executable | `glass-mixer.exe`, 8.05 MB (release, stripped, thin LTO) |
 | Installer | `glass-mixer-0.1.0-setup.exe`, 4.83 MB (Inno Setup, per user, no admin) |
 | Portable | `glass-mixer-0.1.0-portable.zip`, 3.46 MB |
-| Source | about 5,900 lines of Rust in 27 `src/` files, plus build code, examples, tests, docs and scripts |
+| Source | Rust modules in `src/` plus build code, examples, tests, docs and scripts; section 7 maps the current branch |
 | License | MIT (copyright 2026 ppolkadot) |
 | Toolchain | Rust 1.99.0 stable MSVC, Rust edition 2024, MSRV 1.95 |
 
@@ -160,6 +165,14 @@ isn't part of the app.
     Settings shortcuts, and hidden warning/error tray notifications. A read-only
     probe on six endpoints ruled out assuming enhancement, spatial-provider or
     mono values. See `SOUND_PROPERTIES_SPIKE.md`. Settings schema is now 3.
+13. **Phase 3 optional controls.** Added no-default global shortcuts; stable
+    identity pins with unavailable placeholders; explicit volume/mute presets
+    and conservative once-per-new-process automatic rules. Settings schema is 4.
+    No per-app routing or hiding was added.
+14. **Phase 4 quality and delivery.** Added Windows CI, development lifecycle,
+    UI Automation and window-capture scripts, a debug-only isolated test
+    profile, GL-to-wgpu fallback with a solid surface, and optional
+    certificate-store signing in the packaging script.
 
 ---
 
@@ -178,7 +191,7 @@ Dependencies, as locked in `Cargo.lock`:
 
 | Crate | Version | Use |
 | --- | --- | --- |
-| eframe / egui | 0.36.2 | UI. Features: `accesskit`, `default_fonts`, `glow`. wgpu is disabled. |
+| eframe / egui | 0.36.2 | UI. Features: `accesskit`, `default_fonts`, `glow`, `wgpu`. GL is primary; wgpu is an opaque fallback. |
 | windows / windows-core | 0.62.2 | All Win32/COM bindings, `#[implement]`, `#[interface]` |
 | tray-icon (muda 0.21.2) | 0.26.1 | Tray icon and context menu |
 | winit (via eframe) | 0.30.13 | Windowing and event loop |
@@ -217,6 +230,9 @@ Dependencies, as locked in `Cargo.lock`:
   No new undocumented setter or elevation path is used.
 - Hidden warnings/errors use quiet-policy-aware tray notifications, configurable
   in Behavior; 10-second throttle and 60-second text deduplication.
+- Shortcuts are opt-in and registered on a blocking Win32 message thread.
+  Pins never store values; offline rows show "Not running" and disabled controls.
+  User-saved presets are the explicit exception to never storing volume/mute.
 - **Starting up:** "Connecting to Windows audio…"
 - **Audio service unreachable:** a warning banner with the error, "keeps
   retrying automatically", and a **Retry now** button.
@@ -241,8 +257,8 @@ Dependencies, as locked in `Cargo.lock`:
 
   A group shows the **loudest** session's volume, and counts as muted only
   if **all** its sessions are. Commands apply to every session in the group.
-- **Order:** System sounds first, then by name (case-insensitive), so rows
-  don't jump around.
+- **Order:** System sounds first, saved pins in stable order, then other apps
+  by name (case-insensitive).
 - Hiding idle apps leaves System sounds visible so its control remains
   reachable even when Windows reports the session idle.
 - **Naming:**
@@ -290,7 +306,8 @@ Dependencies, as locked in `Cargo.lock`:
   with no flash (DWM cloak, then hide, then uncloak).
 - **Single instance:** a `Local\GlassMixer.SingleInstance` mutex. A second
   launch finds the first window (same title and exe name), shows it, and
-  exits.
+  exits. An absolute debug-only profile path uses separate settings, logs
+  and a separate mutex for isolated testing.
 - **Window position and size:** saved, and restored only if the saved
   position is still on a monitor. New positions use physical screen pixels;
   version-1 logical positions are checked against each monitor's DPI. If an
@@ -310,6 +327,8 @@ Dependencies, as locked in `Cargo.lock`:
   only on 21H2 (undocumented attribute 1029). It turns off automatically
   when Windows transparency effects or high contrast are on, or on
   Windows 10. The settings page explains why it's off.
+- **Renderer:** OpenGL first. If it cannot initialize, eframe retries with
+  wgpu and a solid surface; the Settings status explains the fallback.
 - **Theme:** System (default), Light or Dark. The title bar follows
   through `DWMWA_USE_IMMERSIVE_DARK_MODE`, and windows get rounded corners.
 - **Accents:** Violet (default), Blue, Teal, Green, Amber, Coral and Pink.
@@ -351,13 +370,14 @@ Dependencies, as locked in `Cargo.lock`:
 ### 5.7 Settings page
 
 Settings is a separate page with a back button (Esc also goes back). It has
-four sections:
+five sections:
 
 | Section | Contents |
 | --- | --- |
 | **Appearance** | Theme, Glass effect (with a status line), Backdrop, Accent, Density, Level meters, recommended window size |
 | **Behavior** | Launch at login (shows when Task Manager has disabled it), Start minimized, Keep running when closed, Minimize to tray, Show idle apps |
 | **Audio** | A "Refresh audio devices" button, plus a note about default-device switching |
+| **Global shortcuts** | Optional mute, relative output volume and show/hide bindings, with conflict feedback and no defaults |
 | **About** | The version, "No telemetry…", the settings path, and "Open settings folder" |
 
 ---
@@ -373,13 +393,17 @@ four sections:
 | Mutex `Local\GlassMixer.SingleInstance` | Single instance per logon session |
 | `%LOCALAPPDATA%\Programs\Glass Mixer\` | Installer target, plus a Start-menu shortcut and an HKCU uninstall entry |
 
-`settings.json` schema (version 3). Invalid known values fall back to their
+In debug builds, `GLASS_MIXER_DEV_PROFILE` can point to an absolute directory
+for isolated settings and logs with its own mutex. The development scripts
+use it; `GLASS_MIXER_DEV_RENDERER=wgpu` exercises the opaque fallback.
+
+`settings.json` schema (version 4). Invalid known values fall back to their
 default field by field. Unknown fields and newer version numbers are retained
 when the file is saved:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "theme": "system | light | dark",
   "glass": true,
   "backdrop": "acrylic | mica",
@@ -391,6 +415,10 @@ when the file is saved:
   "show_inactive_apps": true,
   "show_meters": true,
   "hidden_notifications": true,
+  "pinned_apps": [],
+  "presets": [],
+  "hotkeys": [],
+  "hotkey_step": 5,
   "window": { "x": 0.0, "y": 0.0, "width": 480.0, "height": 720.0 },
   "window_position_physical": true
 }
@@ -400,8 +428,9 @@ when the file is saved:
 version-1 file lacks `window_position_physical`; its coordinates are treated
 as egui logical points. An ambiguous legacy position is not restored.
 
-Volume levels are deliberately **never** stored; Windows stays
-authoritative. There is no network access, telemetry or analytics, and no
+Volume levels are normally read from Windows. User-saved presets are the
+explicit exception: they store selected app volumes and mutes, and apply only
+on request or through a rule the user enables. There is no network access, telemetry or analytics, and no
 admin rights or services are needed.
 
 ---
@@ -430,46 +459,47 @@ Windows change ─► callback ─► Msg::*Changed ─► engine re-reads ─�
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `src/main.rs` | ~197 | Logging, panic hook, single-instance check, settings load, monitor-aware physical window restore, window options, OpenGL failure message box |
-| `src/app.rs` | ~590 | `MixerApp`: lifecycle, tray actions, close and minimize to tray, start-hidden cloak, prefs polling, sticky backdrop status, settings debounce (800 ms), toasts, shutdown |
-| `src/settings.rs` | ~356 | `Settings`, enums, lenient versioned parsing, preservation of future fields, `SettingsStore` (load outcomes, atomic save), with tests |
+| `src/main.rs` | ~221 | Logging, panic hook, single-instance check, settings load, monitor-aware restore, GL-to-wgpu fallback |
+| `src/app.rs` | ~702 | `MixerApp`: lifecycle, tray, hotkeys, views, backdrop status, settings debounce, toasts, shutdown |
+| `src/settings.rs` | ~436 | Lenient versioned settings, pins/presets/hotkeys, atomic save, isolated debug profile, tests |
 | `src/icon_art.rs` | ~187 | Procedural app icon (SDF, 4×4 supersampled) and ICO encoder. Shared with `build.rs`. |
 | `build.rs` | ~72 | Generates `app.ico` and the `.rc`; embeds the icon, manifest (PerMonitorV2, asInvoker, UTF-8, Common Controls 6) and VERSIONINFO |
-| `src/audio/mod.rs` | ~239 | `Command`, `Notice`, internal `Msg`, `Shared` (snapshot, meters, notices, listeners), `AudioHandle` (start / send / snapshot / shutdown with a 2 s timeout) |
-| `src/audio/model.rs` | ~384 | Snapshot types, `AppKey`, `group_sessions`, balance math, `to_percent`, filter including System sounds, names, tooltip, with tests |
-| `src/audio/engine.rs` | ~919 | `Runner` (dirty flags, backoff, delayed resume rebuild, meters), `Engine`, `Endpoint`, `SessionSet`, `Session`, command application, error mapping, with tests |
-| `src/audio/callbacks.rs` | ~173 | `IMMNotificationClient`, `IAudioEndpointVolumeCallback`, `IAudioSessionNotification`, `IAudioSessionEvents`; `OWN_EVENT_CONTEXT` |
+| `src/audio/mod.rs` | ~263 | `Command`, `Notice`, internal `Msg`, `Shared` (snapshot, meters, notices, listeners), `AudioHandle` (start / send / snapshot / shutdown with a 2 s timeout) |
+| `src/audio/model.rs` | ~415 | Snapshot types, `AppKey`, `group_sessions`, balance math, `to_percent`, filter including System sounds, names, tooltip, with tests |
+| `src/audio/engine.rs` | ~1215 | `Runner`, `Engine`, endpoint/session owners, independent devices, preset rules, command application |
+| `src/audio/callbacks.rs` | ~179 | Device, endpoint and session callbacks; `OWN_EVENT_CONTEXT` |
 | `src/audio/policy_config.rs` | ~52 | The undocumented `IPolicyConfig` vtable and `set_default` (all three roles) |
-| `src/audio/process.rs` | ~185 | `OpenProcess` (limited), image path, AUMID, `FileDescription`, `ProcessWatch` |
+| `src/audio/process.rs` | ~193 | `OpenProcess` (limited), image path, AUMID, `FileDescription`, `ProcessWatch` |
 | `src/audio/power.rs` | ~59 | Suspend/resume subscription |
 | `src/audio/com.rs` | ~71 | `ComGuard`, `take_pwstr`, fatal and not-found HRESULT classification |
 | `src/platform/backdrop.rs` | ~115 | `Support::for_build`, `apply()` (dark title bar, round corners, frame extension, backdrop type), with tests |
-| `src/platform/tray.rs` | ~109 | Tray icon, menu, event handlers, `update(snapshot)` |
+| `src/platform/tray.rs` | ~228 | Tray icon, menu, hidden warning/error notifications |
 | `src/platform/icons.rs` | ~418 | `IconService` (request / retry / prune / take_ready / shutdown), resolution chain, HBITMAP/HICON to RGBA, with tests |
 | `src/platform/window.rs` | ~133 | `Hwnd`, show / hide / cloak / visibility, physical window position, `activate_existing_instance` |
 | `src/platform/startup.rs` | ~101 | Run key state, enable/disable, path repair |
 | `src/platform/sysprefs.rs` | ~64 | Dark mode, transparency, animations, high contrast, build number |
 | `src/platform/fonts.rs` | ~50 | Segoe UI, semibold and icon-font families |
-| `src/platform/single_instance.rs` | ~36 | Mutex guard |
-| `src/platform/mod.rs` | ~53 | Registry read helpers |
+| `src/platform/single_instance.rs` | ~50 | Mutex guard; isolated debug-profile identity |
+| `src/platform/mod.rs` | ~54 | Registry read helpers |
 | `src/ui/theme.rs` | ~211 | `Palette`, accents, `Metrics`, `apply()` (same style for both egui theme slots; egui's window-theme sync disabled) |
-| `src/ui/widgets.rs` | ~417 | Glyphs, `Slider`, `icon_button`, `toggle_row`, `segmented`, `fallback_tile`, `card`, `percent_label`, focus ring |
-| `src/ui/mixer.rs` | ~520 | Mixer view, `MixerState` (filter, expanded rows, value holds, pruned textures, names) |
-| `src/ui/settings_view.rs` | ~224 | Settings view and recommended-size action |
-| `src/ui/mod.rs` | ~37 | `Look`, `GlassStatus` |
+| `src/ui/widgets.rs` | ~429 | Glyphs, `Slider`, `icon_button`, `toggle_row`, `segmented`, `fallback_tile`, `card`, `percent_label`, focus ring |
+| `src/ui/mixer.rs` | ~724 | Mixer and Devices views, pins, device properties, value holds, pruned textures |
+| `src/ui/settings_view.rs` | ~241 | Settings view, hotkey editor and recommended-size action |
+| `src/ui/mod.rs` | ~42 | `Look`, `GlassStatus` |
 | `tests/audio_integration.rs` | ~200 | Real-hardware tests (ignored by default) plus the silent-stream helper |
 | `tests/source_encoding.rs` | ~24 | Rust source UTF-8 and mojibake regression scan |
 | `examples/audio_probe.rs` | ~97 | Read-only diagnostic: dumps state and watches for changes |
-| `examples/glass_spike.rs` | ~85 | Minimal glass test case (`GM_BACKDROP`, `GM_EXTEND`, `GM_DARK`) |
-| `scripts/package.ps1` | ~51 | Release build, portable zip, and the installer when ISCC is present |
+| `examples/glass_spike.rs` | ~90 | Minimal glass test case with `GM_RENDERER=glow|wgpu` |
+| `scripts/package.ps1` | ~74 | Release zip/installer and optional certificate-store signing |
 | `installer/glass-mixer.iss` | ~67 | Inno Setup script |
 
 ### Important constants
 
-Phase 2 adds `audio/properties.rs`, `examples/sound_properties_probe.rs` and
-`tests/devices_integration.rs`. The earlier approximate source-map counts above
-describe Phase 1; the additional code is organized around those modules and
-the existing engine, mixer and tray owners.
+Additional modules: `audio/properties.rs` (~278 lines), `audio/preferences.rs`
+(~208), `platform/hotkeys.rs` (~549), `ui/presets.rs` (~92), the read-only
+`examples/sound_properties_probe.rs` (~87), and the self-restoring
+`tests/devices_integration.rs` (~130). Phase 4 adds test scripts under
+`scripts/`, its README, and `.github/workflows/ci.yml`.
 
 | Constant | Value |
 | --- | --- |
@@ -497,7 +527,7 @@ error.
 
 ## 8. Key decisions and why
 
-1. **egui/eframe on glow (OpenGL), not wgpu, iced or Slint.**
+1. **egui/eframe on glow (OpenGL) first, wgpu as a fallback.**
    - Immediate mode makes "render from the latest Windows snapshot"
      trivial.
    - AccessKit provides screen-reader support.
@@ -505,7 +535,8 @@ error.
    - eframe only repaints on events, so idle cost is near zero.
    - glow was chosen because a transparent glow surface was confirmed to
      composite with DWM backdrops in the spike.
-   - Cost: OpenGL is required (see section 11).
+   - The fallback uses an opaque wgpu surface because reliable glass under
+     wgpu has not been established across adapters.
 2. **Our own DWM calls rather than the `window-vibrancy` crate.** This
    means one dependency fewer and full control over fallback detection.
 3. **Windows is the single source of truth.** Callbacks carry no values;
@@ -553,6 +584,9 @@ error.
     creates callbacks; removal/rebuild drops them. Fatal read errors rebuild.
 19. **Shell notifications reuse the tray icon.** No AUMID/shortcut deployment
     is needed. The GUID includes the executable path for unsigned portable builds.
+20. **Pinned state is metadata, preset state is an explicit volume exception.**
+    Offline pins cannot assert Windows values. The once-per-process rule refuses
+    known post-start changes and never reapplies to an existing process.
 
 ---
 
@@ -645,12 +679,37 @@ branch. It does not change the v0.1.0 release results above.
 
 ---
 
+### Phase 4 quality verification (2026-10-15)
+
+This branch uses Rust 1.99.1 MSVC. Formatting, clippy with warnings denied,
+unit tests (43 library passed, one hardware-key-registration test ignored;
+binary and encoding tests passed), debug and optimized builds passed. An
+isolated debug profile let the lifecycle script verify launch,
+second-instance rejection, close-to-tray, `--minimized`, settings save and
+clean shutdown with both glow and forced wgpu. The show/hide global shortcut
+was delivered while hidden. UI Automation found all four views under both
+renderers, and `PrintWindow` captured the default view at 496×759 without
+clipping. The portable zip and Inno installer built with signing skipped.
+
+Three debug launches to first window took 1092/1251/1131 ms on glow and
+1536/1134/1139 ms on wgpu (100 ms polling resolution); OS caching and
+concurrent build activity limit comparison. `PrintWindow` does not prove DWM
+transparency under wgpu. The fallback deliberately uses an opaque surface.
+The GL-less fallback, Windows-hosted CI, code signing without an owner's
+certificate, Windows 10, and the full DPI/audio/hot-plug matrix were not run.
+See `TESTING.md` for the detailed phase report and manual checklist.
+
+---
+
 ## 10. Gaps against the specification
 
 Phase 2 verification: 36 hardware-independent tests, clippy with warnings denied,
 formatting, the read-only properties probe and the six-endpoint self-restoring
 device test passed. An initial clippy module-ordering failure was corrected.
-GUI lifecycle/visual DPI, Focus Assist, Windows 10, hot-plug, sleep/resume and
+Phase 3 unit and hotkey registration checks passed; show/hide shortcut delivery
+and four-view UI Automation passed in the isolated debug profile. Live
+audio hotkeys and preset application remain manual verification.
+Other DPI scales, Focus Assist, Windows 10, hot-plug, sleep/resume and
 service restart were not run. Full categories are in `TESTING.md`.
 
 | Spec item | Status |
@@ -660,10 +719,10 @@ service restart were not run. Full categories are in `TESTING.md`.
 | Native notifications (§2) | Implemented while hidden; Focus Assist visual suppression remains unverified. |
 | Sound properties | Reliable readouts and Windows Settings alternatives; no unverified setters. |
 | Windows 10 testing (§13, §14 Phase 5) | Not done (no machine available). The fallback paths are written but unverified. |
-| Integration tests for tray, startup, appearance, sleep, device switching (§13 items 6–9, 12–13) | Covered by scripts outside the repo or by the manual checklist, not by `cargo test`. |
+| Integration tests for tray, startup, appearance, sleep, device switching (§13 items 6–9, 12–13) | Some lifecycle and UI Automation checks are in `scripts/`; the remaining hardware and OS matrix stays manual. |
 | Mic tests (§13 item 7) | Three input endpoints accepted volume changes; real recording, mute and hot-plug remain unverified. |
 | Accessible names (§11) | Done for all custom widgets. The device ComboBox uses egui's default accessibility. |
-| Code signing | Not done. The exe and installer are unsigned, so SmartScreen may warn on first run. |
+| Code signing | Optional packaging hook added. No certificate is configured, so current builds remain unsigned. |
 
 ---
 
@@ -683,9 +742,9 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
 
 ### Plausible risks
 
-3. **No OpenGL, no window.** In some Remote Desktop sessions, VMs or with
-   the Microsoft Basic Display Adapter, eframe/glow can't start. The app
-   shows a message box and exits. There's no wgpu/DirectX fallback.
+3. **Renderer fallback is unverified on GL-less hardware.** OpenGL failure
+   now retries wgpu with an opaque surface, but a machine without OpenGL has
+   not yet been available to exercise the full path.
 4. **Acrylic goes solid when the window loses focus.** This is Windows'
    own behaviour for `DWMSBT_TRANSIENTWINDOW`, but users may read it as
    glass "turning off".
@@ -759,17 +818,18 @@ cargo clippy --all-targets; cargo fmt       # rustfmt.toml: max_width 120
 2. Run `scripts\package.ps1`.
 3. Commit, then run `gh release create vX.Y.Z dist\* --title …`.
 
-### Test scripts not in the repo
+### Development test scripts
 
-These were used during development and live in the session scratchpad:
+The branch now includes these scripts under `scripts/`:
 
 | Script | What it does | Built on |
 | --- | --- | --- |
-| Lifecycle | Close-to-tray, second instance, `--minimized`, CPU and memory, settings | `EnumWindows` + `PostMessage(WM_CLOSE)` |
-| UI Automation | Invokes "Mute System sounds", calls `RangeValue.SetValue` on "System sounds volume", and checks the result with `audio_probe` | `System.Windows.Automation` |
-| Window capture | Captures only the app's own window | `PrintWindow(PW_RENDERFULLCONTENT)` |
+| `lifecycle.ps1` | Isolated debug launch, second instance, close-to-tray, `--minimized`, CPU/memory sample, saved settings and timed clean exit | `EnumWindows` + `PostMessage(WM_CLOSE)` |
+| `ui-automation.ps1` | Read-only view-selector check; optional self-restoring System sounds actions | `System.Windows.Automation` |
+| `capture-window.ps1` | Captures only the selected app window | `PrintWindow(PW_RENDERFULLCONTENT)` |
+| `hotkey-smoke.ps1` | Isolated show/hide global shortcut delivery, including while hidden | `RegisterHotKey` exercised through synthetic Ctrl+Alt+F23 |
 
-Worth adding to `scripts/` as a follow-up.
+Usage and optional signing are in `scripts/README.md`.
 
 ### Conventions
 
@@ -787,11 +847,10 @@ Worth adding to `scripts/` as a follow-up.
 3. Verify notification suppression under Focus Assist.
 4. Verify hot-plug and external changes for independent device controls.
 5. Revisit sound-property setters only with reproducible cross-build evidence.
-6. Add opt-in hotkeys, app pins and explicit presets.
-7. Add a wgpu fallback renderer for machines without OpenGL.
+6. Verify opt-in hotkeys, pins and presets in a desktop session.
+7. Test the opaque wgpu fallback on a machine without OpenGL.
 8. Sign the binaries when the owner provides a certificate.
-9. Commit the lifecycle and UIA scripts, and run unit tests in CI on a
-   Windows runner.
+9. Confirm the new Windows CI workflow on GitHub after a push or PR.
 
 ---
 

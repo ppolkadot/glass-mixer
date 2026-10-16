@@ -22,12 +22,34 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
+# Optional certificate-store signing. Set GLASS_MIXER_SIGN_CERT_SHA1 to the
+# thumbprint of a code-signing certificate with its private key installed.
+function Sign-File([string]$Path) {
+    $thumbprint = $env:GLASS_MIXER_SIGN_CERT_SHA1
+    if (-not $thumbprint) { return }
+    $thumbprint = $thumbprint -replace '\s', ''
+    if ($thumbprint -notmatch '^[0-9a-fA-F]{40}$') { throw 'GLASS_MIXER_SIGN_CERT_SHA1 must be a 40-digit SHA-1 thumbprint.' }
+    $tool = $env:GLASS_MIXER_SIGNTOOL
+    if (-not $tool) { $tool = (Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source) }
+    if (-not $tool -or -not (Test-Path -LiteralPath $tool)) { throw 'Signing was requested but signtool.exe was not found; set GLASS_MIXER_SIGNTOOL.' }
+    $arguments = @('sign', '/sha1', $thumbprint, '/fd', 'SHA256')
+    if ($env:GLASS_MIXER_SIGN_TIMESTAMP_URL) { $arguments += @('/tr', $env:GLASS_MIXER_SIGN_TIMESTAMP_URL, '/td', 'SHA256') }
+    $arguments += $Path
+    & $tool @arguments
+    if ($LASTEXITCODE -ne 0) { throw "Signing failed: $Path" }
+    & $tool verify /pa $Path
+    if ($LASTEXITCODE -ne 0) { throw "Signature verification failed: $Path" }
+}
+Sign-File (Join-Path $root 'target\release\glass-mixer.exe')
+
 # The build script writes the generated icon to OUT_DIR; copy it where the installer expects it.
 $ico = Get-ChildItem target\release\build -Recurse -Filter app.ico | Sort-Object LastWriteTime | Select-Object -Last 1
 Copy-Item $ico.FullName target\release\app.ico -Force
 
 New-Item -ItemType Directory -Force dist | Out-Null
-$staging = Join-Path dist "glass-mixer-$version"
+$distRoot = [IO.Path]::GetFullPath((Join-Path $root 'dist')).TrimEnd('\') + '\'
+$staging = Join-Path $distRoot "glass-mixer-$version"
+if (-not ([IO.Path]::GetFullPath($staging)).StartsWith($distRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staging path.' }
 Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $staging | Out-Null
 Copy-Item target\release\glass-mixer.exe, README.md $staging
@@ -45,6 +67,7 @@ $iscc = @(
 if ($iscc) {
     & $iscc "/DAppVersion=$version" installer\glass-mixer.iss
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+    Sign-File (Join-Path $root "dist\glass-mixer-$version-setup.exe")
     Write-Host "Installer: dist\glass-mixer-$version-setup.exe"
 } else {
     Write-Warning "Inno Setup 6 not found; skipping installer. Install it with: winget install JRSoftware.InnoSetup"

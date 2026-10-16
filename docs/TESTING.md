@@ -1,5 +1,57 @@
 # Testing
 
+## Phase 4 verification (2026-10-15)
+
+- **Ran and passed:** `cargo fmt`, `cargo clippy --all-targets -- -D
+  warnings`, `cargo test` (43 library tests passed, one ignored; binary and
+  encoding tests passed), `cargo build`, `cargo build --release`, and PowerShell
+  syntax checks for all scripts. The isolated lifecycle script verified launch,
+  second-instance rejection, close-to-tray, `--minimized`, settings/geometry
+  save and clean shutdown under both glow and forced opaque wgpu. The UI
+  Automation script found Mixer, Devices, Settings and Presets under both
+  renderers; 496×759 window captures showed no clipping in the default view.
+  The live Ctrl+Alt+F23 smoke test hid and reopened the mixer while hidden.
+  `scripts/package.ps1` built a portable zip and Inno installer with no signing
+  certificate configured. The wgpu spike launched and rendered.
+- **Ran and failed, corrected:** the first hotkey smoke fixture used a
+  PowerShell UTF-8 byte order mark. After fixing that, its assertion still
+  watched the tray helper window rather than the titled mixer window. The
+  scripts now resolve the window by title and PID; the same smoke test passed.
+- **Renderer cost:** the prior installed glow-only exe is 8,442,880 bytes;
+  the branch release exe is 15,735,296 bytes (+86.4%). Three debug launches
+  to first window took 1092/1251/1131 ms on glow and 1536/1134/1139 ms on
+  wgpu, with a 100 ms polling resolution. These local measurements include
+  OS cache and concurrent activity, and are not a release benchmark.
+- **Not run:** Windows-hosted CI (workflow is local until pushed), code signing
+  (no certificate configured), a GL-less machine, Windows 10, other DPI
+  scales, and full live audio controls/preset rules. `PrintWindow` captures the client drawing
+  but cannot establish DWM transparency under wgpu, so the fallback is opaque.
+
+Scripts and optional signing are described in [scripts/README.md](../scripts/README.md).
+
+## Phase 3 verification (2026-10-15)
+
+- **Ran and passed:** formatting, clippy with warnings denied, and unit tests
+  for pin identity/deduplication, disabled placeholders, preset sanitization,
+  automatic-rule eligibility, hotkey parsing/conflict detection and lenient
+  settings. The ignored hotkey test registered Ctrl+Alt+F23, confirmed that
+  Windows rejected a second registration, then unregistered and re-registered
+  the chord.
+- **Ran and failed, corrected:** incomplete Phase 3 wiring first failed
+  compilation; clippy then reported small style issues, which were fixed.
+- **Not run:** live delivery for the four audio-changing hotkey actions,
+  conflict with a separate application, a UI Automation pass over pinned
+  placeholders, live preset application and automatic rule on a real process.
+  Those remain on the manual checklist. The show/hide shortcut was later
+  tested while hidden in Phase 4.
+
+Manual additions: bind/clear all shortcuts, verify a conflict explains that
+the previous binding remains active, hide the window and invoke each action;
+pin an app, close it, inspect its disabled slider and screen reader state,
+then restart it; filter pinned rows; save/apply/delete a preset and restore
+levels; enable an automatic rule, change an app after it starts, and verify
+the rule does not reapply. Repeat after restart and on mixed DPI.
+
 ## Phase 2 verification (2026-10-15)
 
 - **Ran and passed:** formatting, clippy with warnings denied, all-target check,
