@@ -1,5 +1,22 @@
 # Architecture
 
+## Additional endpoints and sound properties
+
+Opening Devices sends `LoadDevices`. The engine lazily opens non-default
+endpoints and owns each volume callback until the device disappears or the
+engine rebuilds. Device commands use endpoint IDs; fatal read errors rebuild
+the engine. The app session list remains scoped to the default output.
+Properties are read on structural/property notifications, never by a new timer.
+`audio/properties.rs` exposes read-only formats and qualified availability;
+unverified setters are replaced by Windows Settings shortcuts.
+
+Tray notifications use the existing icon's GUID with `NIF_INFO`, `NIF_REALTIME`,
+quiet-time and no-sound flags, plus `SHQueryUserNotificationState`. The GUID
+depends on the executable path, respecting Windows' unsigned-icon binding.
+Only hidden warnings/errors are eligible: at most one per 10 seconds, and
+identical text at most once per 60 seconds. No WinRT AUMID or installer change.
+See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/win32/shell/notification-area).
+
 ## Overview
 
 ```

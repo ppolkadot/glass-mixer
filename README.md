@@ -1,7 +1,7 @@
 # Glass Mixer
 
 A lightweight, native Windows audio mixer that lives in the system tray. It
-controls the default output and input devices and apps with sessions on the
+controls active output and input devices and apps with sessions on the
 default output, with a Windows 11 glass look.
 
 Written in Rust and built on the Windows Core Audio APIs. It doesn't use a
@@ -10,9 +10,14 @@ network access.
 
 ## Features
 
-- **Output and input devices:** volume and mute for the default output and
-  input devices, plus default-device switching. Device balance is supported
-  by the engine but does not yet have a UI control.
+- **Output and input devices:** volume, mute and stereo balance, plus
+  default-device switching. The Devices view controls other active endpoints
+  independently. Duplicate names have a numbered suffix and full ID tooltip.
+- **Sound properties:** expandable device sections show the selected format
+  and internal mix format. Format, enhancements, spatial and mono controls
+  open Windows Settings. See [probe findings](docs/SOUND_PROPERTIES_SPIKE.md).
+- **Tray notifications:** warnings and errors while hidden, with throttling,
+  duplicate suppression and a Settings toggle. Windows notification policy applies.
 - **Per-app mixer:** independent volume, mute and balance for every app
   with a Windows audio session.
   - Each row shows the app's own icon, its name, and whether it is
@@ -114,7 +119,7 @@ engine sees and watches for changes for 30 seconds. It changes nothing.
   sessions, such as exclusive-mode streams, some protected or DRM paths,
   and hardware mixers. Some system sounds share the System sounds session.
 - **Balance** needs a stereo device or session. Elsewhere it is shown as
-  unavailable rather than as a value. Device balance does not yet have a UI.
+  unavailable rather than as a value. Double-click a balance slider to center it.
 - **Glass:**
   - Acrylic and Mica need Windows 11 22H2 or later.
   - Windows 11 21H2 gets Mica only.

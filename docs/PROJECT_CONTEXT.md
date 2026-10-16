@@ -4,7 +4,7 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-15, after the Phase 1 maintenance work on branch
+Last updated: 2026-10-15, after Phase 2 on branch
 `codex/glass-mixer-features`. The v0.1.0 release record remains below.
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
@@ -154,7 +154,12 @@ isn't part of the app.
     status, icon retry, cache pruning, System sounds visibility, window
     geometry and sizing, and the two clippy lints were addressed. The
     settings schema was hardened before later phases add fields. No Phase 2
-    feature is included in this record yet.
+    feature was included in that maintenance commit.
+12. **Phase 2 device controls and properties.** Added independent active-device
+    controls, stereo balance, qualified sound-property readouts and Windows
+    Settings shortcuts, and hidden warning/error tray notifications. A read-only
+    probe on six endpoints ruled out assuming enhancement, spatial-provider or
+    mono values. See `SOUND_PROPERTIES_SPIKE.md`. Settings schema is now 3.
 
 ---
 
@@ -205,8 +210,13 @@ Dependencies, as locked in `Cargo.lock`:
   changes (by us or anyone else), an "Output switched to …" notice appears.
 - **Missing output:** "No output device is available. Connect speakers or
   headphones."
-- The engine can read and set stereo device balance, but the UI does not yet
-  expose it. Only the default devices have independent controls today.
+- Both default-device cards expose stereo balance; the Devices view controls
+  all active endpoints independently and disambiguates duplicate names.
+- Expandable sound properties show selected/default versus internal mix formats.
+  Unverified format, spatial, enhancements and mono setters open Windows Settings.
+  No new undocumented setter or elevation path is used.
+- Hidden warnings/errors use quiet-policy-aware tray notifications, configurable
+  in Behavior; 10-second throttle and 60-second text deduplication.
 - **Starting up:** "Connecting to Windows audio…"
 - **Audio service unreachable:** a warning banner with the error, "keeps
   retrying automatically", and a **Retry now** button.
@@ -363,13 +373,13 @@ four sections:
 | Mutex `Local\GlassMixer.SingleInstance` | Single instance per logon session |
 | `%LOCALAPPDATA%\Programs\Glass Mixer\` | Installer target, plus a Start-menu shortcut and an HKCU uninstall entry |
 
-`settings.json` schema (version 2). Invalid known values fall back to their
+`settings.json` schema (version 3). Invalid known values fall back to their
 default field by field. Unknown fields and newer version numbers are retained
 when the file is saved:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "theme": "system | light | dark",
   "glass": true,
   "backdrop": "acrylic | mica",
@@ -380,6 +390,7 @@ when the file is saved:
   "minimize_to_tray": false,
   "show_inactive_apps": true,
   "show_meters": true,
+  "hidden_notifications": true,
   "window": { "x": 0.0, "y": 0.0, "width": 480.0, "height": 720.0 },
   "window_position_physical": true
 }
@@ -454,6 +465,11 @@ Windows change ─► callback ─► Msg::*Changed ─► engine re-reads ─�
 | `installer/glass-mixer.iss` | ~67 | Inno Setup script |
 
 ### Important constants
+
+Phase 2 adds `audio/properties.rs`, `examples/sound_properties_probe.rs` and
+`tests/devices_integration.rs`. The earlier approximate source-map counts above
+describe Phase 1; the additional code is organized around those modules and
+the existing engine, mixer and tray owners.
 
 | Constant | Value |
 | --- | --- |
@@ -530,6 +546,13 @@ error.
 16. **System sounds is exempt from the idle-app filter.** It is normally idle
     yet is a useful control. Textures and icon results are pruned by live app
     and pixel size, while failed lookups can retry.
+17. **Properties degrade to Windows Settings.** Stream format support does not
+    prove default-format setter compatibility; missing effects/mono properties
+    are unknown. Build reliable readouts and shortcuts without guessed setters.
+18. **Additional device owners are lazy and RAII-managed.** Opening Devices
+    creates callbacks; removal/rebuild drops them. Fatal read errors rebuild.
+19. **Shell notifications reuse the tray icon.** No AUMID/shortcut deployment
+    is needed. The GUID includes the executable path for unsigned portable builds.
 
 ---
 
@@ -624,14 +647,21 @@ branch. It does not change the v0.1.0 release results above.
 
 ## 10. Gaps against the specification
 
+Phase 2 verification: 36 hardware-independent tests, clippy with warnings denied,
+formatting, the read-only properties probe and the six-endpoint self-restoring
+device test passed. An initial clippy module-ordering failure was corrected.
+GUI lifecycle/visual DPI, Focus Assist, Windows 10, hot-plug, sleep/resume and
+service restart were not run. Full categories are in `TESTING.md`.
+
 | Spec item | Status |
 | --- | --- |
-| Per-device volume and mute (§3.4) | **Partial.** Only the *default* output and input devices are controllable. Other devices can be selected (which makes them default) but not adjusted independently. |
-| Device balance (§3.4) | **Engine only.** `Command::SetEndpointBalance` is implemented and endpoint balance is in the snapshot, but **no UI control exposes it.** App balance is in the UI. |
-| Native notifications (§2) | **Not implemented.** Notices appear inside the app window only, so nothing is visible while it's hidden in the tray. |
+| Per-device volume and mute (§3.4) | Implemented in Devices; six active endpoints tested. |
+| Device balance (§3.4) | Implemented; three stereo outputs tested through master-volume changes. |
+| Native notifications (§2) | Implemented while hidden; Focus Assist visual suppression remains unverified. |
+| Sound properties | Reliable readouts and Windows Settings alternatives; no unverified setters. |
 | Windows 10 testing (§13, §14 Phase 5) | Not done (no machine available). The fallback paths are written but unverified. |
 | Integration tests for tray, startup, appearance, sleep, device switching (§13 items 6–9, 12–13) | Covered by scripts outside the repo or by the manual checklist, not by `cargo test`. |
-| Mic tests (§13 item 7) | Not run; the machine has no input device. |
+| Mic tests (§13 item 7) | Three input endpoints accepted volume changes; real recording, mute and hot-plug remain unverified. |
 | Accessible names (§11) | Done for all custom widgets. The device ComboBox uses egui's default accessibility. |
 | Code signing | Not done. The exe and installer are unsigned, so SmartScreen may warn on first run. |
 
@@ -645,7 +675,7 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
 
 ### Confirmed in code (not yet fixed)
 
-1. **Endpoint balance is unreachable from the UI** (see section 10).
+1. **Sound-property setters are unavailable in-app** (see the spike report).
 2. **Group volume flattens per-session differences.** The first change
    to a multi-session app sets every session to the same value.
    Intentional, but surprising if an app deliberately runs different
@@ -751,12 +781,12 @@ Worth adding to `scripts/` as a follow-up.
 
 ### Suggested next steps, in priority order
 
-1. Expose device balance in the UI.
+1. Validate the expanded UI and device lifecycle on additional hardware.
 2. Run the manual checklist on Windows 10 and on a machine with a
    microphone and two outputs.
-3. Show native notifications for warnings and errors while hidden.
-4. Add independent controls for non-default devices.
-5. Spike sound properties before implementing any undocumented setter.
+3. Verify notification suppression under Focus Assist.
+4. Verify hot-plug and external changes for independent device controls.
+5. Revisit sound-property setters only with reproducible cross-build evidence.
 6. Add opt-in hotkeys, app pins and explicit presets.
 7. Add a wgpu fallback renderer for machines without OpenGL.
 8. Sign the binaries when the owner provides a certificate.
