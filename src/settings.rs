@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SETTINGS_VERSION: u32 = 2;
+pub const SETTINGS_VERSION: u32 = 3;
 pub const DEFAULT_WIDTH: f32 = 480.0;
 pub const DEFAULT_HEIGHT: f32 = 720.0;
 pub const MIN_WIDTH: f32 = 360.0;
@@ -117,6 +117,8 @@ pub struct Settings {
     pub show_inactive_apps: bool,
     #[serde(deserialize_with = "lenient")]
     pub show_meters: bool,
+    #[serde(deserialize_with = "lenient_true")]
+    pub hidden_notifications: bool,
     #[serde(deserialize_with = "lenient")]
     pub window: Option<WindowGeometry>,
     /// Version 1 stored egui logical points; version 2 stores screen pixels.
@@ -140,6 +142,7 @@ impl Default for Settings {
             minimize_to_tray: false,
             show_inactive_apps: true,
             show_meters: true,
+            hidden_notifications: true,
             window: None,
             window_position_physical: false,
             extra: serde_json::Map::new(),

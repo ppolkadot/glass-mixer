@@ -27,7 +27,7 @@ const HOLD: Duration = Duration::from_millis(450);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Ctl {
-    Endpoint(Flow),
+    Device(String),
     App(AppKey),
 }
 
@@ -215,7 +215,10 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
         Flow::Output => "No output device",
         Flow::Input => "No input device",
     };
-    let selected = current.map_or(none, |e| e.name.as_str());
+    let selected = current
+        .and_then(|ep| devices.iter().find(|d| d.id == ep.id))
+        .map(|d| crate::audio::device_label(d, devices))
+        .unwrap_or_else(|| none.into());
     let can_switch = cx.snap.can_switch_default && !devices.is_empty();
     let kind = match flow {
         Flow::Output => "output",
@@ -225,10 +228,15 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
         let response = egui::ComboBox::from_id_salt(("device", kind))
             .width(width.max(80.0))
             .truncate()
-            .selected_text(RichText::new(selected).font(semibold(14.0)))
+            .selected_text(RichText::new(&selected).font(semibold(14.0)))
             .show_ui(ui, |ui| {
                 for d in devices {
-                    if ui.selectable_label(d.is_default, &d.name).clicked() && !d.is_default {
+                    if ui
+                        .selectable_label(d.is_default, crate::audio::device_label(d, devices))
+                        .on_hover_text(&d.id)
+                        .clicked()
+                        && !d.is_default
+                    {
                         cx.audio.send(Command::SetDefaultDevice { flow, id: d.id.clone() });
                     }
                 }
@@ -248,32 +256,161 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
 fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow, ep: &EndpointState) {
     let look = cx.look;
     ui.horizontal(|ui| {
-        let target = Target::Volume(Ctl::Endpoint(flow));
+        let target = Target::Volume(Ctl::Device(ep.id.clone()));
         let mut v = st.value(&target, ep.volume);
         let (g, what) = match flow {
             Flow::Output => (glyph::volume(v, ep.muted), "output"),
             Flow::Input => (if ep.muted { glyph::MIC_OFF } else { glyph::MIC }, "microphone"),
         };
-        let label = format!("{} {what}", if ep.muted { "Unmute" } else { "Mute" });
+        let label = format!("{} {what}: {}", if ep.muted { "Unmute" } else { "Mute" }, ep.name);
         let emphasis = ep.muted.then_some(look.p.danger);
         if icon_button(ui, look, g, if ep.muted { "M" } else { "On" }, &label, emphasis).clicked() {
-            cx.audio.send(Command::SetEndpointMute { flow, muted: !ep.muted });
+            cx.audio.send(Command::SetDeviceMute { id: ep.id.clone(), muted: !ep.muted });
         }
         let width = ui.available_width() - 40.0 - ui.spacing().item_spacing.x;
-        let meter = cx.settings.show_meters.then_some(match flow {
-            Flow::Output => cx.meters.output,
-            Flow::Input => cx.meters.input,
-        });
+        let meter =
+            (cx.settings.show_meters && cx.snap.endpoint(flow).is_some_and(|d| d.id == ep.id)).then_some(match flow {
+                Flow::Output => cx.meters.output,
+                Flow::Input => cx.meters.input,
+            });
         let a11y = format!("{} volume", ep.name);
         let response = Slider { muted: ep.muted, meter, ..Slider::volume(&mut v, &a11y, width) }.show(ui, &look.p);
         if response.changed() {
             st.hold(target.clone(), v);
-            cx.audio.send(Command::SetEndpointVolume { flow, volume: v });
+            cx.audio.send(Command::SetDeviceVolume { id: ep.id.clone(), volume: v });
         } else if response.dragged() {
             st.hold(target, v);
         }
         let pct = if ep.muted { "Muted".to_string() } else { format!("{}%", to_percent(v)) };
         percent_label(ui, look, &pct, ep.muted);
+    });
+    ui.push_id((&ep.id, "properties"), |ui| {
+        egui::CollapsingHeader::new("Balance and sound properties").show(ui, |ui| {
+            let height = (ui.ctx().content_rect().height() * 0.18).clamp(50.0, 140.0);
+            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
+                endpoint_balance(ui, st, cx, ep);
+                sound_properties(ui, cx, ep);
+            });
+        });
+    });
+}
+
+fn sound_properties(ui: &mut Ui, cx: &MixerCtx, ep: &EndpointState) {
+    if let Some(props) = cx.snap.properties.get(&ep.id) {
+        match &props.default_format {
+            Ok(format) => {
+                ui.label(format!("Default format: {format}"));
+            }
+            Err(reason) => {
+                ui.label(format!("Default format unavailable: {reason}"));
+            }
+        }
+        if let Ok(format) = &props.mix_format {
+            ui.label(format!("Internal mix format: {format}"));
+        }
+        match &props.enhancements {
+            Ok(enabled) => {
+                ui.label(format!("Legacy system effects: {}", if *enabled { "Enabled" } else { "Disabled" }));
+            }
+            Err(_) => {
+                ui.label("Audio enhancements: state unavailable from this device");
+            }
+        }
+        ui.label("Vendor enhancements and the selected spatial provider are managed in Windows Settings.");
+        match &props.spatial {
+            Ok(support) => {
+                ui.label(support.to_string());
+            }
+            Err(reason) => {
+                ui.label(reason);
+            }
+        }
+    } else {
+        ui.label("Sound properties are not available yet.");
+    }
+    ui.label("Changing formats may briefly interrupt playing audio. Supported choices and reliable controls are available in Windows.");
+    if ui.button("Open Windows sound settings").clicked() {
+        cx.audio.send(Command::OpenSoundSettings);
+    }
+    ui.label("Mono audio: live state/control unavailable. Use Windows Accessibility audio settings.");
+    if ui.button("Open mono audio settings").clicked() {
+        cx.audio.send(Command::OpenMonoSettings);
+    }
+}
+
+fn endpoint_balance(ui: &mut Ui, st: &mut MixerState, cx: &MixerCtx, ep: &EndpointState) {
+    ui.horizontal(|ui| {
+        ui.label("Balance");
+        if let Some(balance) = ep.balance {
+            ui.label("L");
+            let target = Target::Balance(Ctl::Device(ep.id.clone()));
+            let mut b = st.value(&target, balance);
+            let response =
+                Slider::balance(&mut b, &format!("{} balance", ep.name), (ui.available_width() - 60.0).min(220.0))
+                    .show(ui, &cx.look.p);
+            if response.double_clicked() {
+                b = 0.0;
+            }
+            if response.changed() || response.double_clicked() {
+                st.hold(target.clone(), b);
+                cx.audio.send(Command::SetDeviceBalance { id: ep.id.clone(), balance: b });
+            } else if response.dragged() {
+                st.hold(target, b);
+            }
+            ui.label("R");
+            response.on_hover_text(
+                "Left/right balance. Double-click to center. Arrow keys adjust; Home/End choose a side.",
+            );
+        } else {
+            ui.label("Not available — this device is not stereo");
+        }
+    });
+}
+
+pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
+    st.expire(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.heading("Devices");
+        if ui.button("Refresh").clicked() {
+            cx.audio.send(Command::LoadDevices);
+        }
+    });
+    ui.label("Apps in the Mixer use the default output. Device controls below are independent.");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for flow in [Flow::Output, Flow::Input] {
+            ui.heading(if flow == Flow::Output { "Outputs" } else { "Inputs" });
+            let devices = cx.snap.devices(flow);
+            if devices.is_empty() {
+                ui.label("No active devices");
+            }
+            for d in devices {
+                ui.push_id(&d.id, |ui| {
+                    card(cx.look).show(ui, |ui| {
+                        ui.label(RichText::new(crate::audio::device_label(d, devices)).strong()).on_hover_text(&d.id);
+                        if d.is_default {
+                            ui.label("Default device");
+                        } else if ui
+                            .add_enabled(cx.snap.can_switch_default, egui::Button::new("Make default"))
+                            .clicked()
+                        {
+                            cx.audio.send(Command::SetDefaultDevice { flow, id: d.id.clone() });
+                        }
+                        match cx.snap.device_states.iter().find(|s| s.info.id == d.id) {
+                            Some(s) => match &s.state {
+                                Ok(ep) => endpoint_row(ui, st, cx, flow, ep),
+                                Err(e) => {
+                                    ui.label(e);
+                                }
+                            },
+                            None => {
+                                ui.label("Opening device…");
+                            }
+                        }
+                    })
+                });
+                ui.add_space(cx.look.m.gap);
+            }
+        }
     });
 }
 
