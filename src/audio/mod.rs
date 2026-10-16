@@ -13,6 +13,7 @@ pub mod model;
 mod policy_config;
 mod power;
 mod process;
+pub mod properties;
 
 pub use model::*;
 
@@ -31,6 +32,22 @@ use std::{
 /// Requests from the UI (or tray) to the audio engine.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    OpenSoundSettings,
+    OpenMonoSettings,
+    /// Lazily open all active endpoints for independent controls.
+    LoadDevices,
+    SetDeviceVolume {
+        id: String,
+        volume: f32,
+    },
+    SetDeviceMute {
+        id: String,
+        muted: bool,
+    },
+    SetDeviceBalance {
+        id: String,
+        balance: f32,
+    },
     SetEndpointVolume {
         flow: Flow,
         volume: f32,

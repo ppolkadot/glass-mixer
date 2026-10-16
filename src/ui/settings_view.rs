@@ -181,6 +181,13 @@ fn behavior(ui: &mut Ui, cx: &mut SettingsCtx) {
     toggle_row(
         ui,
         &look,
+        &mut s.hidden_notifications,
+        "Tray notifications",
+        Some("Warnings and errors while hidden; Windows notification settings apply"),
+    );
+    toggle_row(
+        ui,
+        &look,
         &mut s.show_inactive_apps,
         "Show idle apps",
         Some("List apps that have an audio session but aren't playing"),

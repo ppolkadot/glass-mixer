@@ -36,6 +36,17 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 type WinResult<T> = windows::core::Result<T>;
 
+fn open_settings(uri: &str) -> Result<(), String> {
+    use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+    let result =
+        unsafe { ShellExecuteW(None, windows::core::w!("open"), &HSTRING::from(uri), None, None, SW_SHOWNORMAL) };
+    if result.0 as isize <= 32 {
+        Err("Couldn't open Windows Settings. Open Settings > System > Sound manually.".into())
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct Dirty {
     rebuild: bool,
@@ -64,6 +75,7 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
         last_meter_poll: Instant::now(),
         last_meters: Meters::default(),
         was_unavailable: false,
+        devices_loaded: false,
     };
 
     loop {
@@ -102,6 +114,7 @@ struct Runner {
     last_meter_poll: Instant,
     last_meters: Meters,
     was_unavailable: bool,
+    devices_loaded: bool,
 }
 
 impl Runner {
@@ -130,6 +143,20 @@ impl Runner {
     }
 
     fn apply(&mut self, cmd: Command) {
+        if matches!(cmd, Command::OpenSoundSettings | Command::OpenMonoSettings) {
+            let uri = if cmd == Command::OpenSoundSettings {
+                super::properties::SOUND_SETTINGS_URI
+            } else {
+                super::properties::MONO_SETTINGS_URI
+            };
+            if let Err(e) = open_settings(uri) {
+                self.shared.push_notice(NoticeLevel::Error, e);
+            }
+            return;
+        }
+        if cmd == Command::LoadDevices {
+            self.devices_loaded = true;
+        }
         if cmd == Command::Refresh {
             log::info!("manual audio refresh requested");
             self.dirty.rebuild = true;
@@ -178,7 +205,8 @@ impl Runner {
                 return;
             }
             match Engine::new(self.tx.clone()) {
-                Ok(engine) => {
+                Ok(mut engine) => {
+                    engine.devices_loaded = self.devices_loaded;
                     self.engine = Some(engine);
                     self.retry_at = None;
                     self.dirty = Dirty { devices: true, sessions: true, values: true, rebuild: false };
@@ -282,6 +310,8 @@ fn push_coalesced(commands: &mut Vec<Command>, cmd: Command) {
         | (Command::SetEndpointBalance { flow: x, .. }, Command::SetEndpointBalance { flow: y, .. }) => x == y,
         (Command::SetAppVolume { key: x, .. }, Command::SetAppVolume { key: y, .. })
         | (Command::SetAppBalance { key: x, .. }, Command::SetAppBalance { key: y, .. }) => x == y,
+        (Command::SetDeviceVolume { id: x, .. }, Command::SetDeviceVolume { id: y, .. })
+        | (Command::SetDeviceBalance { id: x, .. }, Command::SetDeviceBalance { id: y, .. }) => x == y,
         _ => false,
     };
     commands.retain(|c| !same_target(c, &cmd));
@@ -342,6 +372,10 @@ struct Engine {
     output: Option<Endpoint>,
     input: Option<Endpoint>,
     sessions: Option<SessionSet>,
+    extra_endpoints: HashMap<String, Endpoint>,
+    endpoint_errors: HashMap<String, String>,
+    devices_loaded: bool,
+    properties: HashMap<String, super::properties::DeviceProperties>,
 }
 
 impl Engine {
@@ -367,6 +401,10 @@ impl Engine {
             output: None,
             input: None,
             sessions: None,
+            extra_endpoints: HashMap::new(),
+            endpoint_errors: HashMap::new(),
+            devices_loaded: false,
+            properties: HashMap::new(),
         })
     }
 
@@ -415,6 +453,39 @@ impl Engine {
             for d in &mut self.inputs {
                 d.is_default = in_id.as_ref() == Some(&d.id);
             }
+            // Default endpoints already have owners. Keep one callback owner per
+            // additional endpoint and release it as soon as that device disappears.
+            self.extra_endpoints
+                .retain(|id, _| self.outputs.iter().chain(&self.inputs).any(|d| &d.id == id && !d.is_default));
+            self.endpoint_errors.clear();
+            if self.devices_loaded {
+                for d in self.outputs.iter().chain(&self.inputs).filter(|d| !d.is_default) {
+                    if let Some(ep) = self.extra_endpoints.get_mut(&d.id) {
+                        ep.name.clone_from(&d.name);
+                    } else {
+                        match Endpoint::open(&self.enumerator, &d.id, self.tx.clone()) {
+                            Ok(ep) => {
+                                self.extra_endpoints.insert(d.id.clone(), ep);
+                            }
+                            Err(e) if is_fatal(e.code()) => return Err(e),
+                            Err(e) => {
+                                self.endpoint_errors.insert(d.id.clone(), format!("Device unavailable: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if dirty.devices {
+            self.properties.clear();
+            for (flow, devices) in [(Flow::Output, &self.outputs), (Flow::Input, &self.inputs)] {
+                for d in devices {
+                    if let Ok(ep) = self.device(&d.id) {
+                        let props = super::properties::read_device_properties(&ep.device, flow == Flow::Output);
+                        self.properties.insert(d.id.clone(), props);
+                    }
+                }
+            }
         }
         if (dirty.sessions || dirty.devices)
             && let Some(set) = self.sessions.as_mut()
@@ -447,6 +518,22 @@ impl Engine {
         if needs_sync {
             let _ = self.tx.send(Msg::SessionsChanged);
         }
+        let mut device_states = Vec::new();
+        if self.devices_loaded {
+            for (flow, d) in
+                self.outputs.iter().map(|d| (Flow::Output, d)).chain(self.inputs.iter().map(|d| (Flow::Input, d)))
+            {
+                let state = match self.device(&d.id) {
+                    Ok(ep) => match ep.state() {
+                        Ok(state) => Ok(state),
+                        Err(e) if is_fatal(e.code()) => return Err(e),
+                        Err(e) => Err(e.to_string()),
+                    },
+                    Err(e) => Err(e.to_string()),
+                };
+                device_states.push(DeviceState { flow, info: d.clone(), state });
+            }
+        }
         Ok(AudioSnapshot {
             status: ServiceStatus::Ok,
             output: self.output.as_ref().map(Endpoint::state).transpose()?,
@@ -454,6 +541,8 @@ impl Engine {
             outputs: self.outputs.clone(),
             inputs: self.inputs.clone(),
             apps: group_sessions(&facts),
+            device_states,
+            properties: self.properties.clone(),
             can_switch_default: self.policy.is_some(),
         })
     }
@@ -481,6 +570,23 @@ impl Engine {
     fn apply(&mut self, cmd: &Command) -> Result<bool, ApplyError> {
         let ctx = &OWN_EVENT_CONTEXT;
         match cmd {
+            Command::LoadDevices => {
+                self.devices_loaded = true;
+                return Ok(true);
+            }
+            Command::SetDeviceVolume { id, volume } => {
+                let ep = self.device(id)?;
+                unsafe { ep.volume.SetMasterVolumeLevelScalar(volume.clamp(0.0, 1.0), ctx) }
+                    .context(|| format!("Couldn't change the volume of {}", ep.name))?;
+            }
+            Command::SetDeviceMute { id, muted } => {
+                let ep = self.device(id)?;
+                unsafe { ep.volume.SetMute(*muted, ctx) }
+                    .context(|| format!("Couldn't change mute for {}", ep.name))?;
+            }
+            Command::SetDeviceBalance { id, balance } => {
+                self.device(id)?.set_balance(*balance)?;
+            }
             Command::SetEndpointVolume { flow, volume } => {
                 let ep = self.endpoint(*flow)?;
                 unsafe { ep.volume.SetMasterVolumeLevelScalar(volume.clamp(0.0, 1.0), ctx) }
@@ -498,17 +604,7 @@ impl Engine {
                 unsafe { ep.volume.SetMute(!muted, ctx) }.context(what)?;
             }
             Command::SetEndpointBalance { flow, balance } => {
-                let ep = self.endpoint(*flow)?;
-                let what = || format!("Couldn't change the balance of {}", ep.name);
-                if unsafe { ep.volume.GetChannelCount() }.context(what)? != 2 {
-                    return Err(ApplyError::Message(format!("{} doesn't support balance.", ep.name)));
-                }
-                let master = unsafe { ep.volume.GetMasterVolumeLevelScalar() }.context(what)?;
-                let (l, r) = channels_from_balance(*balance);
-                unsafe {
-                    ep.volume.SetChannelVolumeLevelScalar(0, master * l, ctx).context(what)?;
-                    ep.volume.SetChannelVolumeLevelScalar(1, master * r, ctx).context(what)?;
-                }
+                self.endpoint(*flow)?.set_balance(*balance)?;
             }
             Command::SetDefaultDevice { flow, id } => {
                 let policy = self.policy.as_ref().ok_or_else(|| {
@@ -542,7 +638,7 @@ impl Engine {
                     _ => Ok(()),
                 })?;
             }
-            Command::Refresh => {}
+            Command::Refresh | Command::OpenSoundSettings | Command::OpenMonoSettings => {}
         }
         Ok(false)
     }
@@ -558,6 +654,22 @@ impl Engine {
                 Flow::Input => "No input device is available.".into(),
             })
         })
+    }
+
+    fn device(&self, id: &str) -> Result<&Endpoint, ApplyError> {
+        self.output
+            .iter()
+            .chain(self.input.iter())
+            .chain(self.extra_endpoints.values())
+            .find(|ep| ep.id == id)
+            .ok_or_else(|| {
+                ApplyError::Message(
+                    self.endpoint_errors
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| "That device is no longer available. Refresh the Devices view.".into()),
+                )
+            })
     }
 
     fn for_app(&self, key: &AppKey, what: &str, f: impl Fn(&Session) -> WinResult<()>) -> Result<(), ApplyError> {
@@ -581,6 +693,7 @@ impl Drop for Engine {
         self.sessions = None;
         self.output = None;
         self.input = None;
+        self.extra_endpoints.clear();
         unsafe {
             let _ = self.enumerator.UnregisterEndpointNotificationCallback(&self.device_notifier);
         }
@@ -628,6 +741,19 @@ struct Endpoint {
 }
 
 impl Endpoint {
+    fn set_balance(&self, balance: f32) -> Result<(), ApplyError> {
+        let what = || format!("Couldn't change the balance of {}", self.name);
+        unsafe {
+            if self.volume.GetChannelCount().context(what)? != 2 {
+                return Err(ApplyError::Message(format!("{} doesn't support stereo balance.", self.name)));
+            }
+            let master = self.volume.GetMasterVolumeLevelScalar().context(what)?;
+            let (l, r) = channels_from_balance(balance);
+            self.volume.SetChannelVolumeLevelScalar(0, master * l, &OWN_EVENT_CONTEXT).context(what)?;
+            self.volume.SetChannelVolumeLevelScalar(1, master * r, &OWN_EVENT_CONTEXT).context(what)?;
+        }
+        Ok(())
+    }
     fn open(enumerator: &IMMDeviceEnumerator, id: &str, tx: Sender<Msg>) -> WinResult<Self> {
         let device = unsafe { enumerator.GetDevice(&HSTRING::from(id))? };
         let volume: IAudioEndpointVolume = unsafe { device.Activate(CLSCTX_ALL, None)? };

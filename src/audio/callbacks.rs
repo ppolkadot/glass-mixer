@@ -61,11 +61,10 @@ impl IMMNotificationClient_Impl for DeviceNotifier_Impl {
         Ok(())
     }
 
-    fn OnPropertyValueChanged(&self, _id: &PCWSTR, key: &PROPERTYKEY) -> windows::core::Result<()> {
-        // Only the friendly name matters to us; other property changes are frequent and irrelevant.
-        if *key == windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName {
-            let _ = self.tx.send(Msg::DevicesChanged);
-        }
+    fn OnPropertyValueChanged(&self, _id: &PCWSTR, _key: &PROPERTYKEY) -> windows::core::Result<()> {
+        // Format, effects and driver-specific spatial properties can change
+        // externally. Coalesce notifications and re-read on the engine.
+        let _ = self.tx.send(Msg::DevicesChanged);
         Ok(())
     }
 }

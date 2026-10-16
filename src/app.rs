@@ -31,6 +31,7 @@ pub struct StartOptions {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Mixer,
+    Devices,
     Settings,
 }
 
@@ -291,6 +292,12 @@ impl MixerApp {
     }
 
     fn toast(&mut self, level: NoticeLevel, text: String) {
+        if self.settings.hidden_notifications
+            && self.hwnd.is_some_and(|h| !window::is_shown(h))
+            && let Some(tray) = self.tray.as_mut()
+        {
+            tray.notify(level, &text);
+        }
         let secs = match level {
             NoticeLevel::Info => 4,
             NoticeLevel::Warning => 7,
@@ -500,7 +507,26 @@ impl eframe::App for MixerApp {
 
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.view, View::Mixer, "Mixer");
+                if ui.selectable_value(&mut self.view, View::Devices, "Devices").clicked() {
+                    self.audio.send(crate::audio::Command::LoadDevices);
+                }
+                ui.selectable_value(&mut self.view, View::Settings, "Settings");
+            });
+            ui.add_space(look.m.gap);
             match self.view {
+                View::Devices => {
+                    let mut cx = mixer::MixerCtx {
+                        audio: &self.audio,
+                        snap: &snapshot,
+                        meters: &meters,
+                        look: &look,
+                        settings: &self.settings,
+                        icons: &mut self.icons,
+                    };
+                    mixer::show_devices(ui, &mut self.mixer, &mut cx);
+                }
                 View::Mixer => {
                     let mut cx = mixer::MixerCtx {
                         audio: &self.audio,

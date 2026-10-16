@@ -30,6 +30,25 @@ pub struct DeviceInfo {
     pub is_default: bool,
 }
 
+/// A device opened on demand by the Devices view. Failures remain visible.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceState {
+    pub flow: Flow,
+    pub info: DeviceInfo,
+    pub state: Result<EndpointState, String>,
+}
+
+/// Duplicate friendly names get a stable, unique suffix within their list.
+pub fn device_label(device: &DeviceInfo, devices: &[DeviceInfo]) -> String {
+    if devices.iter().filter(|d| d.name.eq_ignore_ascii_case(&device.name)).count() <= 1 {
+        return device.name.clone();
+    }
+    let mut ids: Vec<_> = devices.iter().filter(|d| d.name.eq_ignore_ascii_case(&device.name)).map(|d| &d.id).collect();
+    ids.sort();
+    let index = ids.iter().position(|id| **id == device.id).unwrap_or(0) + 1;
+    format!("{} · Device {index}", device.name)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EndpointState {
     pub id: String,
@@ -82,6 +101,8 @@ pub struct AudioSnapshot {
     pub outputs: Vec<DeviceInfo>,
     pub inputs: Vec<DeviceInfo>,
     pub apps: Vec<AppEntry>,
+    pub device_states: Vec<DeviceState>,
+    pub properties: HashMap<String, super::properties::DeviceProperties>,
     /// Whether the (undocumented) default-device switching interface is available.
     pub can_switch_default: bool,
 }
@@ -258,6 +279,15 @@ fn truncate_utf16(text: &str, max_units: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_device_labels_follow_ids_not_enumeration_order() {
+        let a = DeviceInfo { id: "a".into(), name: "Speakers".into(), is_default: false };
+        let b = DeviceInfo { id: "b".into(), name: "Speakers".into(), is_default: true };
+        assert_eq!(device_label(&a, &[b.clone(), a.clone()]), "Speakers · Device 1");
+        assert_eq!(device_label(&b, &[a.clone(), b.clone()]), "Speakers · Device 2");
+        assert_eq!(device_label(&a, std::slice::from_ref(&a)), "Speakers");
+    }
 
     fn facts(key: AppKey, name: &str, volume: f32, muted: bool, active: bool) -> SessionFacts {
         SessionFacts {
