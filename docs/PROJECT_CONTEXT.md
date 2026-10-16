@@ -4,7 +4,7 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-15, during Phase 4 on branch
+Last updated: 2026-10-16, after final review on branch
 `codex/glass-mixer-features`. The v0.1.0 release record remains below.
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
@@ -42,7 +42,7 @@ switching between several outputs, and sleep/resume have **not** been tested
 gaps and section 11 the risks.
 
 The table below records the published v0.1.0 build. The feature branch is
-unreleased; its latest release exe is 15,735,296 bytes after adding wgpu,
+unreleased; its latest release exe is 15,754,240 bytes after adding wgpu,
 versus 8,442,880 bytes for the installed glow-only exe.
 
 | Item | Value |
@@ -173,6 +173,11 @@ isn't part of the app.
     UI Automation and window-capture scripts, a debug-only isolated test
     profile, GL-to-wgpu fallback with a solid surface, and optional
     certificate-store signing in the packaging script.
+15. **Final review.** Recovered valid preset entries despite malformed nested
+    values, named repeated controls for AccessKit, reported partial automatic
+    preset failures, and deferred hotkeys until minimized startup is hidden.
+    The self-restoring scripts now rebuild and verify the debug executable
+    before launch.
 
 ---
 

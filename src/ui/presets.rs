@@ -43,15 +43,36 @@ pub fn show(
                 ui.separator();
                 ui.label(egui::RichText::new(&preset.name).strong());
                 ui.horizontal(|ui| {
-                    if ui.button("Apply now").clicked() {
+                    let apply = ui.button("Apply now");
+                    apply.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Apply {} now", preset.name))
+                    });
+                    if apply.clicked() {
                         audio.send(Command::ApplyPreset(preset.clone()));
                     }
-                    if ui.button("Delete preset").clicked() {
+                    let remove = ui.button("Delete preset");
+                    remove.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            format!("Delete preset {}", preset.name),
+                        )
+                    });
+                    if remove.clicked() {
                         delete = Some(index);
                     }
                 });
                 let mut on = preset.apply_on_start;
-                if ui.checkbox(&mut on, "Apply once when saved apps start").changed() {
+                let auto = ui.checkbox(&mut on, "Apply once when saved apps start");
+                auto.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Checkbox,
+                        true,
+                        on,
+                        format!("Apply {} once when saved apps start", preset.name),
+                    )
+                });
+                if auto.changed() {
                     if on {
                         enable = Some(index);
                     } else {

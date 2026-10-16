@@ -320,7 +320,10 @@ mod tests {
             ],
             "presets": [
                 {"name":"One","entries":[{"key":"system","name":"System sounds","volume":0.4,"muted":false}]},
-                {"name":"bad","entries":[],"apply_on_start":"oops"}
+                {"name":"Partial","entries":[
+                    {"key":{"exe":"C:\\Apps\\B.EXE"},"name":"B","volume":0.6,"muted":true},
+                    {"key":"system","name":"bad","volume":"oops","muted":false}
+                ],"apply_on_start":"oops"}
             ],
             "hotkeys": [
                 {"action":"VolumeUp","chord":"Ctrl+Alt+F23"},
@@ -332,11 +335,15 @@ mod tests {
         .to_string();
         let settings: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(settings.pinned_apps.len(), 1);
-        assert_eq!(settings.presets.len(), 1);
+        assert_eq!(settings.presets.len(), 2);
         assert_eq!(settings.hotkeys.len(), 1);
         assert_eq!(settings.hotkey_step, 5);
         assert!(settings.extra.contains_key("future"));
         assert_eq!(settings.presets[0].entries[0].volume, 0.4);
+        assert_eq!(settings.presets[1].name, "Partial");
+        assert_eq!(settings.presets[1].entries.len(), 1);
+        assert_eq!(settings.presets[1].entries[0].volume, 0.6);
+        assert!(!settings.presets[1].apply_on_start);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

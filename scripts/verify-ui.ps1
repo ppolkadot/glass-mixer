@@ -2,7 +2,14 @@ param([ValidateSet('glow', 'wgpu')][string]$Renderer = 'glow')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root 'target\debug\glass-mixer.exe'
+$cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+if (-not $cargo) { $cargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe' }
+if (-not (Test-Path -LiteralPath $cargo)) { throw 'Cargo is required. Install the Rust toolchain first.' }
+& $cargo build --quiet --manifest-path (Join-Path $root 'Cargo.toml')
+if ($LASTEXITCODE -ne 0) { throw 'Debug build failed.' }
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Build the debug executable first: cargo build' }
+$probe = Start-Process -FilePath $exe -ArgumentList '--dev-profile-check' -Wait -PassThru
+if ($probe.ExitCode -ne 0) { throw 'The UI verification script requires a debug build.' }
 $profile = Join-Path $root ('target\phase4-ui-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
 $oldProfile = $env:GLASS_MIXER_DEV_PROFILE

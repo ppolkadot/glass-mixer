@@ -159,7 +159,12 @@ impl MixerApp {
         let hotkeys = if tray.is_some() {
             hwnd.and_then(|h| match HotkeyService::start(audio.clone(), h, ctx.clone()) {
                 Ok(service) => {
-                    if let Err(e) = service.configure(&opts.settings.hotkeys, opts.settings.hotkey_step) {
+                    // A start-hidden window is cloaked until its first frame.
+                    // Registering the show/hide chord before that handoff can
+                    // consume a show request while the window is still cloaked.
+                    if !opts.hidden
+                        && let Err(e) = service.configure(&opts.settings.hotkeys, opts.settings.hotkey_step)
+                    {
                         log::warn!("global shortcut setup: {e}");
                     }
                     Some(service)
@@ -484,6 +489,11 @@ impl eframe::App for MixerApp {
                 self.pending_start_hide = false;
                 self.hide_to_tray();
                 window::set_cloaked(h, false);
+                if let Some(service) = &self.hotkeys
+                    && let Err(e) = service.configure(&self.settings.hotkeys, self.settings.hotkey_step)
+                {
+                    log::warn!("global shortcut setup after hidden start: {e}");
+                }
             } else {
                 ctx.request_repaint();
             }

@@ -10,6 +10,9 @@ use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--dev-profile-check") {
+        return if cfg!(debug_assertions) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
     init_logging();
     install_panic_hook();
     log::info!("Glass Mixer {} starting (args: {:?})", env!("CARGO_PKG_VERSION"), &args[1..]);

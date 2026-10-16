@@ -433,10 +433,11 @@ impl HotkeyEditor {
                     .find(|b| b.action == action)
                     .map(|b| b.chord.clone())
                     .unwrap_or_else(|| "Off".into());
-                ui.label(format!("{} — {current}", action.label()));
+                let label = ui.label(format!("{} — {current}", action.label()));
                 ui.horizontal(|ui| {
                     let draft = self.drafts.entry(action).or_default();
                     ui.add(egui::TextEdit::singleline(draft).hint_text("Ctrl+Alt+M").desired_width(140.0))
+                        .labelled_by(label.id)
                         .on_hover_text(format!("Shortcut for {}", action.label()));
                     if ui.button(format!("Bind {}", action.label())).clicked() {
                         let mut proposed = bindings.clone();
