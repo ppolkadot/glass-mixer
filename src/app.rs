@@ -12,7 +12,7 @@ use crate::platform::window::{self, Hwnd};
 use crate::settings::{Backdrop, Settings, SettingsStore, ThemeMode, WindowGeometry};
 use crate::ui::{GlassStatus, Look, mixer, settings_view, theme};
 use crossbeam_channel::Receiver;
-use egui::{Align2, Color32, CornerRadius, FontId, Margin, RichText, ViewportCommand};
+use egui::{Align2, Color32, CornerRadius, Margin, RichText, ViewportCommand};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,7 @@ pub struct StartOptions {
     pub load_error: Option<String>,
     /// Start with only the tray icon.
     pub hidden: bool,
+    pub restored_position: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,39 @@ struct Toast {
     until: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BackdropRetryKey {
+    glass: bool,
+    backdrop: Backdrop,
+    theme: ThemeMode,
+    dark: bool,
+    high_contrast: bool,
+    build: u32,
+}
+
+#[derive(Default)]
+struct BackdropRejection {
+    failed_for: Option<BackdropRetryKey>,
+}
+
+impl BackdropRejection {
+    fn reset_for(&mut self, key: BackdropRetryKey) {
+        if self.failed_for.is_some_and(|failed| failed != key) {
+            self.failed_for = None;
+        }
+    }
+
+    fn may_try(&self, key: BackdropRetryKey) -> bool {
+        self.failed_for != Some(key)
+    }
+
+    fn record(&mut self, key: BackdropRetryKey, applied: Applied) {
+        if !applied.glass {
+            self.failed_for = Some(key);
+        }
+    }
+}
+
 pub struct MixerApp {
     audio: AudioHandle,
     icons: IconService,
@@ -50,6 +84,7 @@ pub struct MixerApp {
     support: Support,
     backdrop_key: Option<(Option<Backdrop>, bool)>,
     applied: Option<Applied>,
+    backdrop_rejection: BackdropRejection,
     hwnd: Option<Hwnd>,
     tray: Option<Tray>,
     tray_rx: Receiver<TrayAction>,
@@ -74,6 +109,11 @@ impl MixerApp {
             RawWindowHandle::Win32(w) => Some(Hwnd(w.hwnd.get())),
             _ => None,
         });
+        if let (Some(h), Some((x, y))) = (hwnd, opts.restored_position)
+            && let Err(e) = window::set_outer_position(h, x, y)
+        {
+            log::warn!("couldn't restore the window position: {e}");
+        }
 
         let audio = AudioHandle::start();
         {
@@ -148,6 +188,7 @@ impl MixerApp {
             support,
             backdrop_key: None,
             applied: None,
+            backdrop_rejection: BackdropRejection::default(),
             hwnd,
             tray,
             tray_rx,
@@ -174,6 +215,17 @@ impl MixerApp {
         }
     }
 
+    fn backdrop_retry_key(&self) -> BackdropRetryKey {
+        BackdropRetryKey {
+            glass: self.settings.glass,
+            backdrop: self.settings.backdrop,
+            theme: self.settings.theme,
+            dark: self.prefs.dark,
+            high_contrast: self.prefs.high_contrast,
+            build: self.prefs.build,
+        }
+    }
+
     fn glass_status(&self) -> GlassStatus {
         if !self.settings.glass {
             GlassStatus::TurnedOff
@@ -181,9 +233,7 @@ impl MixerApp {
             GlassStatus::HighContrast
         } else if !self.prefs.transparency {
             GlassStatus::TransparencyOff
-        } else if self.support == Support::None
-            || self.applied.is_some_and(|a| !a.glass && self.backdrop_key.is_some_and(|k| k.0.is_some()))
-        {
+        } else if self.support == Support::None || !self.backdrop_rejection.may_try(self.backdrop_retry_key()) {
             GlassStatus::Unsupported
         } else {
             GlassStatus::Active
@@ -192,6 +242,7 @@ impl MixerApp {
 
     /// Applies the backdrop and egui style when anything affecting them changed.
     fn refresh_look(&mut self, ctx: &egui::Context) {
+        self.backdrop_rejection.reset_for(self.backdrop_retry_key());
         let dark = self.effective_dark() || self.prefs.high_contrast;
         let want_glass = matches!(self.glass_status(), GlassStatus::Active);
         let requested = want_glass.then_some(self.settings.backdrop);
@@ -200,6 +251,9 @@ impl MixerApp {
         {
             let applied = backdrop::apply(h, self.support, requested, dark);
             log::info!("backdrop applied: {applied:?}");
+            if requested.is_some() {
+                self.backdrop_rejection.record(self.backdrop_retry_key(), applied);
+            }
             self.applied = Some(applied);
             self.backdrop_key = Some((requested, dark));
         }
@@ -285,16 +339,20 @@ impl MixerApp {
             return;
         }
         let rects = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
-        if let (Some(outer), Some(inner)) = rects {
-            let g = WindowGeometry { x: outer.min.x, y: outer.min.y, width: inner.width(), height: inner.height() };
-            let changed = self.settings.window.is_none_or(|old| {
-                (old.x - g.x).abs() > 0.5
-                    || (old.y - g.y).abs() > 0.5
-                    || (old.width - g.width).abs() > 0.5
-                    || (old.height - g.height).abs() > 0.5
-            });
+        if let (Some(_outer), Some(inner), Some(h)) = (rects.0, rects.1, self.hwnd)
+            && let Some((x, y)) = window::outer_position(h)
+        {
+            let g = WindowGeometry { x, y, width: inner.width(), height: inner.height() };
+            let changed = !self.settings.window_position_physical
+                || self.settings.window.is_none_or(|old| {
+                    (old.x - g.x).abs() > 0.5
+                        || (old.y - g.y).abs() > 0.5
+                        || (old.width - g.width).abs() > 0.5
+                        || (old.height - g.height).abs() > 0.5
+                });
             if changed && g.width > 0.0 && g.height > 0.0 {
                 self.settings.window = Some(g);
+                self.settings.window_position_physical = true;
                 self.mark_dirty();
             }
         }
@@ -401,6 +459,7 @@ impl eframe::App for MixerApp {
         self.audio.set_meters_wanted(shown && self.settings.show_meters);
 
         let snapshot = self.audio.snapshot();
+        self.icons.sync_live_apps(snapshot.apps.iter().map(|app| app.key.clone()));
         if let Some(tray) = self.tray.as_mut() {
             tray.update(&snapshot);
         }
@@ -466,6 +525,7 @@ impl eframe::App for MixerApp {
                         support: self.support,
                         can_switch_default: snapshot.can_switch_default,
                         audio: &self.audio,
+                        icons: &mut self.icons,
                         settings_path: self.store.path(),
                         errors: &mut errors,
                     };
@@ -486,7 +546,6 @@ impl eframe::App for MixerApp {
             ctx.request_repaint();
         }
         self.draw_toasts(ui);
-        let _ = FontId::default();
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -501,5 +560,31 @@ impl eframe::App for MixerApp {
 impl Drop for MixerApp {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_backdrop_stays_rejected_until_appearance_or_build_changes() {
+        let key = BackdropRetryKey {
+            glass: true,
+            backdrop: Backdrop::Acrylic,
+            theme: ThemeMode::Dark,
+            dark: true,
+            high_contrast: false,
+            build: 26200,
+        };
+        let mut rejection = BackdropRejection::default();
+        assert!(rejection.may_try(key));
+        rejection.record(key, Applied { glass: false, dark: true, kind: None });
+        assert!(!rejection.may_try(key));
+        assert!(rejection.may_try(BackdropRetryKey { backdrop: Backdrop::Mica, ..key }));
+        assert!(rejection.may_try(BackdropRetryKey { theme: ThemeMode::Light, ..key }));
+        assert!(rejection.may_try(BackdropRetryKey { build: 26201, ..key }));
+        rejection.reset_for(BackdropRetryKey { backdrop: Backdrop::Mica, ..key });
+        assert!(rejection.may_try(key), "returning to the earlier setting should retry");
     }
 }

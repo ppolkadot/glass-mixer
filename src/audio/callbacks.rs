@@ -6,7 +6,7 @@
 //! re-entrancy into Core Audio from inside a notification (which can deadlock),
 //! and means the objects only hold a `Sender`.
 
-use super::{Flow, Msg};
+use super::Msg;
 use crossbeam_channel::Sender;
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl};
@@ -55,17 +55,8 @@ impl IMMNotificationClient_Impl for DeviceNotifier_Impl {
 
     fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _id: &PCWSTR) -> windows::core::Result<()> {
         // Windows fires this once per role; the console role is the one shown as "default".
-        if role == eConsole {
-            let flow = if flow == eRender {
-                Some(Flow::Output)
-            } else if flow == eCapture {
-                Some(Flow::Input)
-            } else {
-                None
-            };
-            if let Some(flow) = flow {
-                let _ = (flow, self.tx.send(Msg::DefaultDeviceChanged));
-            }
+        if role == eConsole && (flow == eRender || flow == eCapture) {
+            let _ = self.tx.send(Msg::DefaultDeviceChanged);
         }
         Ok(())
     }

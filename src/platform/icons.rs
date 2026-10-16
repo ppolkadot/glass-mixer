@@ -8,8 +8,8 @@
 //! 3. Desktop apps: the executable's icon via `IShellItemImageFactory`.
 //! 4. Otherwise none: the UI draws a consistent generic tile.
 //!
-//! Results (including failures) are cached per app and pixel size for the
-//! lifetime of the process, so each executable is read at most once per size.
+//! Successful results are cached per app and pixel size. Failed lookups can be
+//! retried on Refresh or when an app returns with a new session.
 
 use crate::audio::com::{ComGuard, take_pwstr};
 use crate::audio::{AppEntry, AppKey};
@@ -51,23 +51,40 @@ struct Request {
     icon_resource: Option<String>,
 }
 
+enum WorkerRequest {
+    Resolve(Request),
+    InvalidateFailed(Option<AppKey>),
+    Retain { live: HashSet<AppKey>, pixel_size: Option<u32> },
+}
+
 pub struct IconService {
-    tx: Option<Sender<Request>>,
+    tx: Option<Sender<WorkerRequest>>,
     ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>,
     requested: HashSet<IconKey>,
+    failed: HashSet<IconKey>,
+    active: HashSet<AppKey>,
+    pixel_size: Option<u32>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl IconService {
     /// `on_ready` is called from the worker thread whenever a result is available.
     pub fn start(on_ready: impl Fn() + Send + 'static) -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded::<Request>();
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerRequest>();
         let ready = Arc::new(Mutex::new(Vec::new()));
         let thread = {
             let ready = ready.clone();
             std::thread::Builder::new().name("icon-resolver".into()).spawn(move || worker(rx, ready, on_ready)).ok()
         };
-        Self { tx: Some(tx), ready, requested: HashSet::new(), thread }
+        Self {
+            tx: Some(tx),
+            ready,
+            requested: HashSet::new(),
+            failed: HashSet::new(),
+            active: HashSet::new(),
+            pixel_size: None,
+            thread,
+        }
     }
 
     /// Requests resolution for an app at a pixel size, once.
@@ -80,18 +97,71 @@ impl IconService {
             return;
         }
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Request {
+            let _ = tx.send(WorkerRequest::Resolve(Request {
                 key,
                 exe_path: app.exe_path.clone(),
                 aumid: app.aumid.clone(),
                 icon_resource: app.icon_resource.clone(),
-            });
+            }));
         }
     }
 
     /// Results completed since the last call.
-    pub fn take_ready(&self) -> Vec<(IconKey, IconResult)> {
-        std::mem::take(&mut *self.ready.lock())
+    pub fn take_ready(&mut self) -> Vec<(IconKey, IconResult)> {
+        let ready = std::mem::take(&mut *self.ready.lock());
+        for (key, result) in &ready {
+            if result.image.is_none() {
+                self.failed.insert(key.clone());
+            } else {
+                self.failed.remove(key);
+            }
+        }
+        ready
+    }
+
+    pub fn retry_failed(&mut self) {
+        for key in self.failed.drain() {
+            self.requested.remove(&key);
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(WorkerRequest::InvalidateFailed(None));
+        }
+    }
+
+    pub fn sync_live_apps(&mut self, keys: impl IntoIterator<Item = AppKey>) {
+        let live: HashSet<AppKey> = keys.into_iter().collect();
+        if live == self.active {
+            return;
+        }
+        for key in live.difference(&self.active) {
+            let failed: Vec<_> = self.failed.iter().filter(|icon| &icon.0 == key).cloned().collect();
+            if !failed.is_empty() {
+                for icon in failed {
+                    self.failed.remove(&icon);
+                    self.requested.remove(&icon);
+                }
+                if let Some(tx) = &self.tx {
+                    let _ = tx.send(WorkerRequest::InvalidateFailed(Some(key.clone())));
+                }
+            }
+        }
+        self.requested.retain(|(key, _)| live.contains(key));
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(WorkerRequest::Retain { live: live.clone(), pixel_size: self.pixel_size });
+        }
+        self.active = live;
+    }
+
+    pub fn prepare_pixel_size(&mut self, px: u32) {
+        if self.pixel_size == Some(px) {
+            return;
+        }
+        self.pixel_size = Some(px);
+        self.requested.retain(|(_, size)| *size == px);
+        self.failed.retain(|(_, size)| *size == px);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(WorkerRequest::Retain { live: self.active.clone(), pixel_size: Some(px) });
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -108,10 +178,23 @@ impl Drop for IconService {
     }
 }
 
-fn worker(rx: Receiver<Request>, ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>, on_ready: impl Fn()) {
+fn worker(rx: Receiver<WorkerRequest>, ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>, on_ready: impl Fn()) {
     let _com = ComGuard::apartment();
     let mut cache: HashMap<IconKey, IconResult> = HashMap::new();
-    for req in rx {
+    for message in rx {
+        let req = match message {
+            WorkerRequest::Resolve(req) => req,
+            WorkerRequest::InvalidateFailed(key) => {
+                cache.retain(|(app, _), result| {
+                    result.image.is_some() || key.as_ref().is_some_and(|wanted| wanted != app)
+                });
+                continue;
+            }
+            WorkerRequest::Retain { live, pixel_size } => {
+                cache.retain(|(key, size), _| live.contains(key) && pixel_size.is_none_or(|px| *size == px));
+                continue;
+            }
+        };
         let result = match cache.get(&req.key) {
             Some(r) => r.clone(),
             None => {
@@ -273,6 +356,52 @@ fn bgra_to_image(mut buf: Vec<u8>, w: usize, h: usize) -> ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_icon_requests_can_retry_and_reappearing_apps_retry() {
+        let key = AppKey::Exe("a.exe".into());
+        let icon_key = (key.clone(), 28);
+        let mut service = IconService {
+            tx: None,
+            ready: Arc::new(Mutex::new(Vec::new())),
+            requested: HashSet::new(),
+            failed: HashSet::new(),
+            active: HashSet::new(),
+            pixel_size: None,
+            thread: None,
+        };
+        service.requested.insert(icon_key.clone());
+        service.failed.insert(icon_key.clone());
+        service.retry_failed();
+        assert!(!service.requested.contains(&icon_key));
+        service.requested.insert(icon_key.clone());
+        service.failed.insert(icon_key.clone());
+        service.sync_live_apps([key.clone()]);
+        service.sync_live_apps([]);
+        service.sync_live_apps([key]);
+        assert!(!service.requested.contains(&icon_key));
+    }
+
+    #[test]
+    fn returned_apps_and_dpi_changes_can_request_icons_again() {
+        let key = AppKey::Exe("a.exe".into());
+        let icon_key = (key.clone(), 28);
+        let mut service = IconService {
+            tx: None,
+            ready: Arc::new(Mutex::new(Vec::new())),
+            requested: HashSet::from([icon_key.clone()]),
+            failed: HashSet::new(),
+            active: HashSet::new(),
+            pixel_size: None,
+            thread: None,
+        };
+        service.sync_live_apps([key.clone()]);
+        service.sync_live_apps([]);
+        assert!(!service.requested.contains(&icon_key));
+        service.requested.insert(icon_key.clone());
+        service.prepare_pixel_size(42);
+        assert!(!service.requested.contains(&icon_key));
+    }
 
     #[test]
     fn opaque_bitmaps_get_full_alpha() {

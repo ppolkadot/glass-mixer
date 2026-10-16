@@ -10,7 +10,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
+pub const DEFAULT_WIDTH: f32 = 480.0;
+pub const DEFAULT_HEIGHT: f32 = 720.0;
 pub const MIN_WIDTH: f32 = 360.0;
 pub const MIN_HEIGHT: f32 = 440.0;
 
@@ -93,9 +95,11 @@ impl WindowGeometry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(deserialize_with = "lenient")]
     pub version: u32,
     #[serde(deserialize_with = "lenient")]
     pub theme: ThemeMode,
+    #[serde(deserialize_with = "lenient_true")]
     pub glass: bool,
     #[serde(deserialize_with = "lenient")]
     pub backdrop: Backdrop,
@@ -103,13 +107,23 @@ pub struct Settings {
     pub accent: Accent,
     #[serde(deserialize_with = "lenient")]
     pub density: Density,
+    #[serde(deserialize_with = "lenient")]
     pub start_minimized: bool,
+    #[serde(deserialize_with = "lenient_true")]
     pub close_to_tray: bool,
+    #[serde(deserialize_with = "lenient")]
     pub minimize_to_tray: bool,
+    #[serde(deserialize_with = "lenient")]
     pub show_inactive_apps: bool,
+    #[serde(deserialize_with = "lenient")]
     pub show_meters: bool,
     #[serde(deserialize_with = "lenient")]
     pub window: Option<WindowGeometry>,
+    /// Version 1 stored egui logical points; version 2 stores screen pixels.
+    #[serde(deserialize_with = "lenient")]
+    pub window_position_physical: bool,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for Settings {
@@ -127,6 +141,8 @@ impl Default for Settings {
             show_inactive_apps: true,
             show_meters: true,
             window: None,
+            window_position_physical: false,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -141,6 +157,11 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+fn lenient_true<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or(true))
 }
 
 #[derive(Debug)]
@@ -204,7 +225,7 @@ impl SettingsStore {
         match serde_json::from_str::<Settings>(&text) {
             Ok(mut s) => {
                 s.window = s.window.and_then(WindowGeometry::sanitized);
-                s.version = SETTINGS_VERSION;
+                s.version = s.version.max(SETTINGS_VERSION);
                 LoadOutcome::Loaded(s)
             }
             Err(e) => {
@@ -281,6 +302,7 @@ mod tests {
             LoadOutcome::Loaded(loaded) => assert_eq!(loaded, s),
             other => panic!("unexpected {other:?}"),
         }
+        store.save(&s).expect("updating an existing settings file");
         assert!(!dir.join("settings.json.tmp").exists());
         let _ = fs::remove_dir_all(dir);
     }
@@ -294,6 +316,22 @@ mod tests {
         assert_eq!(s.accent, Accent::Violet);
         assert!(!s.glass);
         assert_eq!(s.theme, ThemeMode::Dark);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_boolean_preserves_other_fields_and_newer_schema_fields() {
+        let dir = temp_dir("future");
+        fs::write(dir.join("settings.json"), r#"{"version":99,"glass":"bad","theme":"dark","future_option":{"x":1}}"#)
+            .unwrap();
+        let store = SettingsStore::new(&dir);
+        let s = store.load().into_settings();
+        assert_eq!(s.version, 99);
+        assert!(s.glass);
+        assert_eq!(s.theme, ThemeMode::Dark);
+        store.save(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        assert_eq!(value["future_option"]["x"], 1);
         let _ = fs::remove_dir_all(dir);
     }
 

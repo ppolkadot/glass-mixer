@@ -211,6 +211,11 @@ pub fn matches_filter(name: &str, filter: &str) -> bool {
     filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
 }
 
+/// System sounds remains reachable even though Windows usually reports it idle.
+pub fn show_with_idle_filter(key: &AppKey, activity: Activity, show_idle: bool) -> bool {
+    show_idle || *key == AppKey::System || activity == Activity::Playing
+}
+
 /// A readable fallback name from an executable path: `C:\..\spotify.exe` -> `Spotify`.
 pub fn friendly_exe_name(path: &std::path::Path) -> String {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -336,6 +341,13 @@ mod tests {
         assert!(matches_filter("Spotify", "spot"));
         assert!(matches_filter("Microsoft Teams", "TEAMS"));
         assert!(!matches_filter("Spotify", "zoom"));
+    }
+
+    #[test]
+    fn system_sounds_stays_visible_when_idle_apps_are_hidden() {
+        assert!(show_with_idle_filter(&AppKey::System, Activity::Idle, false));
+        assert!(!show_with_idle_filter(&AppKey::Pid(7), Activity::Idle, false));
+        assert!(show_with_idle_filter(&AppKey::Pid(7), Activity::Playing, false));
     }
 
     #[test]

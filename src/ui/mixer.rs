@@ -10,7 +10,7 @@ use super::Look;
 use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label, semibold};
 use crate::audio::{
     Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, Command, EndpointState, Flow, Meters, ServiceStatus,
-    matches_filter, to_percent,
+    matches_filter, show_with_idle_filter, to_percent,
 };
 use crate::platform::icons::{IconKey, IconResult, IconService};
 use crate::settings::Settings;
@@ -47,6 +47,14 @@ pub struct MixerState {
 }
 
 impl MixerState {
+    fn prune_cache(&mut self, live: &HashSet<AppKey>, px: u32) {
+        self.textures.retain(|(key, size), _| live.contains(key) && *size == px);
+        self.names.retain(|key, _| live.contains(key));
+    }
+    #[cfg(test)]
+    fn cached_icon_keys(&self) -> HashSet<IconKey> {
+        self.textures.keys().cloned().collect()
+    }
     fn value(&self, target: &Target, truth: f32) -> f32 {
         match self.overrides.get(target) {
             Some((v, until)) if Instant::now() < *until => *v,
@@ -98,6 +106,10 @@ pub struct MixerCtx<'a> {
 
 pub fn show(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> Outcome {
     st.expire(ui.ctx());
+    let live: HashSet<AppKey> = cx.snap.apps.iter().map(|a| a.key.clone()).collect();
+    let icon_px = (cx.look.m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
+    st.prune_cache(&live, icon_px);
+    cx.icons.prepare_pixel_size(icon_px);
     let gap = cx.look.m.gap as i8;
     let mut outcome = Outcome::None;
 
@@ -150,7 +162,7 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
         match &cx.snap.output {
             Some(ep) => endpoint_row(ui, st, cx, Flow::Output, ep),
             None if cx.snap.status == ServiceStatus::Starting => {
-                ui.label(RichText::new("Connecting to Windows audioâ€¦").color(look.p.text_muted));
+                ui.label(RichText::new("Connecting to Windows audio…").color(look.p.text_muted));
             }
             None => {
                 ui.label(
@@ -271,7 +283,7 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
         .snap
         .apps
         .iter()
-        .filter(|a| cx.settings.show_inactive_apps || a.activity == Activity::Playing)
+        .filter(|a| show_with_idle_filter(&a.key, a.activity, cx.settings.show_inactive_apps))
         .filter(|a| matches_filter(st.display_name(a), &st.filter))
         .collect();
 
@@ -281,6 +293,7 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
         ui.label(RichText::new(format!("{}", visible.len())).small().color(look.p.text_muted));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if icon_button(ui, look, glyph::REFRESH, "R", "Refresh audio devices and apps", None).clicked() {
+                cx.icons.retry_failed();
                 cx.audio.send(Command::Refresh);
             }
             let search = ui.add(
@@ -303,7 +316,7 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
             let text = if !st.filter.trim().is_empty() {
-                format!("No apps match â€œ{}â€.", st.filter.trim())
+                format!("No apps match “{}”.", st.filter.trim())
             } else if cx.snap.status == ServiceStatus::Ok {
                 "No apps have audio sessions right now.\nApps appear here when they start playing sound.".to_string()
             } else {
@@ -375,7 +388,7 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 }
                 let mut text = status.to_string();
                 if app.session_count > 1 {
-                    text.push_str(&format!(" Â· {} streams", app.session_count));
+                    text.push_str(&format!(" · {} streams", app.session_count));
                 }
                 ui.painter().text(pos2(x, sy), Align2::LEFT_TOP, text, FontId::proportional(12.0), status_color);
             }
@@ -383,7 +396,7 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             widgets::focus_ring(ui, nrect, &nresp, p, 6);
             let a11y = format!("{name}, {status}. {details}");
             nresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &a11y));
-            let nresp = nresp.on_hover_text(format!("{name} â€” {status}. Click for details."));
+            let nresp = nresp.on_hover_text(format!("{name} — {status}. Click for details."));
             if nresp.clicked() {
                 if expanded {
                     st.expanded.remove(&app.key);
@@ -474,7 +487,7 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
     });
     let source = match (&app.key, &app.exe_path) {
         (AppKey::System, _) => "Windows system sounds".to_string(),
-        (AppKey::Package(aumid), _) => format!("Packaged app Â· {aumid}"),
+        (AppKey::Package(aumid), _) => format!("Packaged app · {aumid}"),
         (_, Some(path)) => path.display().to_string(),
         (AppKey::Pid(pid), None) => format!("Process {pid} (path unavailable)"),
         _ => String::new(),
@@ -485,4 +498,23 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
         job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width() - 8.0);
         ui.label(job).on_hover_text(source);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_prunes_missing_apps_and_old_pixel_sizes() {
+        let a = AppKey::Exe("a.exe".into());
+        let b = AppKey::Exe("b.exe".into());
+        let mut state = MixerState::default();
+        state.textures.insert((a.clone(), 28), None);
+        state.textures.insert((a.clone(), 42), None);
+        state.textures.insert((b.clone(), 42), None);
+        state.names.insert(b.clone(), "B".into());
+        state.prune_cache(&HashSet::from([a.clone()]), 42);
+        assert_eq!(state.cached_icon_keys(), HashSet::from([(a, 42)]));
+        assert!(!state.names.contains_key(&b));
+    }
 }
