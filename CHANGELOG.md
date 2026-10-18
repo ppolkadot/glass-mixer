@@ -1,10 +1,11 @@
 # Changelog
 
-## 0.2.0-beta.1 (unreleased, branch `experiments`)
+## 0.2.0-beta.2 (2026-10-18, branch `experiments`)
 
-A beta of the next feature release. It has been checked locally on one
-Windows 11 machine (section "Verification" below). It has **not** had a hosted
-CI run, is **not** merged into `main` and is **not** published.
+The second beta of the 0.2.0 feature release. It includes the follow-up review
+fixes documented below, plus a correction to the shortcut pressure-test cleanup
+that releases its error mutex before joining the injector thread. The build
+artifacts are packaged locally; this branch has not been merged into `main`.
 
 ### Added
 
@@ -23,14 +24,17 @@ CI run, is **not** merged into `main` and is **not** published.
 - **Pins:** keep an app's row in the mixer by executable or package identity.
   A pinned app that isn't running shows "Not running" with disabled controls.
 - **Presets:** save the current app volumes and mutes under a name and apply
-  them later. An optional automatic rule applies a preset once to a newly
-  launched process (see "Known limitations").
+  presets later. An optional automatic rule tracks each running process
+  instance (`(AppKey, pid, created)`) and applies a preset once to a newly
+  launched process whose initial session starts at `100%` and unmuted (see
+  "Known limitations").
 - **Tray notifications** for warnings and errors while the window is hidden,
   with throttling and duplicate suppression; Windows notification settings
   apply. Can be turned off in Settings.
 - **Renderer fallback:** if OpenGL cannot start, Glass Mixer opens an opaque
-  window on Direct3D 12 or Vulkan instead of failing. The log names the
-  renderer and graphics adapter in use.
+  window on Direct3D 12 or Vulkan instead of failing, and `--renderer=wgpu`
+  forces the opaque fallback on the command line in both release and debug
+  builds. The log names the renderer and graphics adapter in use.
 - Settings > Appearance > **Use recommended window size** (480 × 720, also the
   new default size for first launch).
 
@@ -44,11 +48,16 @@ CI run, is **not** merged into `main` and is **not** published.
   to the right monitor when monitors use different scaling. A position saved
   by 0.1.0 that could belong to more than one monitor is centered instead.
 - Settings file schema version 4. Each value is read on its own, so one
-  invalid entry no longer resets the others; unknown fields from newer
-  versions are kept.
+  invalid entry no longer resets the others; unknown top-level fields from
+  newer versions are kept. Saves flush temporary files to disk with `sync_all`
+  before atomic rename. Migration writes and verifies `settings.v1.backup.json`
+  atomically before promoting the schema or overwriting `settings.json`; if
+  backup creation fails, Glass Mixer reports a warning, keeps the migrated
+  settings in memory, and leaves the original `settings.json` untouched until
+  backup succeeds on a later save.
 - System sounds stays visible when idle apps are hidden.
-- Executable size grew from 8,442,880 to 15,789,056 bytes (about 8.4 MB to
-  15.8 MB) because the Direct3D 12/Vulkan fallback renderer is now included.
+- Executable size grew from 8,442,880 to about 15.8 MB because the Direct3D 12 /
+  Vulkan fallback renderer is now included.
 
 ### Fixed
 
@@ -56,26 +65,40 @@ CI run, is **not** merged into `main` and is **not** published.
 - Failed app-icon lookups can be retried with Refresh or when the app returns,
   and icon caches no longer grow without bound.
 - Found and fixed while auditing this beta:
-  - One invalid or conflicting global shortcut disabled every shortcut.
+  - One invalid or conflicting global shortcut disabled every shortcut, and
+    duplicate same-action entries in hand-edited settings could cause the
+    editor to display an active primary shortcut as "Not active".
   - Pressing the show/hide shortcut while Glass Mixer was exiting could hang
-    the exit, leaving the process running with no tray icon.
+    the exit, leaving the process running with no tray icon, and a dropped
+    request channel could leave a queued `WM_HOTKEY` unprocessed on shutdown.
   - With the fallback renderer, exit intermittently deadlocked inside the
     OpenGL driver (the process stayed running after "shutdown complete").
+    Ambient `WGPU_BACKEND=gl` environment variables outside a dev profile are
+    now stripped so they cannot re-enable the OpenGL backend in the fallback.
   - At the minimum window width, the output percentage and Settings button
-    were cut off; long names in offline pins, the shortcut editor and the
-    settings path ran past the window edge; the sound-properties panel was
-    squeezed into a small nested scroll area.
+    were cut off; long names in offline pins, the shortcut editor, expanded
+    non-stereo device balance labels and the settings path ran past the window
+    edge; the sound-properties panel was squeezed into a small nested scroll
+    area.
   - Several controls (device lists, filter box, preset name, volume step) had
     no name for screen readers, toggle descriptions such as the reason glass
     is off were not exposed, and a disabled **Save** gave no reason.
-  - When two processes of one app started together, an automatic preset rule
-    could skip the older one.
+  - Controls inside scrollable views (`Mixer`, `Devices`, `Presets`,
+    `Settings`) now scroll into view on focus transition (`gained_focus`)
+    without fighting manual pointer scrolling.
+  - Automatic preset start rules now track individual process instances
+    (`(AppKey, pid, created)`) rather than a per-executable timestamp
+    watermark, so multi-instance launches and older processes that open audio
+    late are handled independently; applying a preset continues across
+    remaining apps if one app returns a non-fatal COM error and reports the
+    failed app names.
 
 ### Upgrading and downgrading
 
 - **From 0.1.0:** settings are migrated automatically. The first time 0.2.0
-  reads the old file it keeps an untouched copy as `settings.v1.backup.json`
-  next to `settings.json` (`%APPDATA%\GlassMixer`).
+  reads the old file it writes and verifies an untouched copy as
+  `settings.v1.backup.json` next to `settings.json` (`%APPDATA%\GlassMixer`)
+  before overwriting `settings.json` with the new schema.
 - **Back to 0.1.0:** 0.1.0 cannot keep 0.2.0's pins, presets and shortcuts. On
   its next save it drops them and rewrites the file in the old format (this
   was reproduced). To go back cleanly, exit Glass Mixer and rename
@@ -85,34 +108,50 @@ CI run, is **not** merged into `main` and is **not** published.
 
 ### Known limitations
 
-- **Automatic preset rules may rarely fire.** A rule applies only when a newly
-  launched process's audio starts at 100% and unmuted with no change seen
-  first. Windows remembers per-app levels between launches, so an app whose
-  level was ever changed may never qualify. Not verified on real hardware.
-- **Keyboard focus is not scrolled into view** inside scrolling views, so a
-  control reached with Tab can be off-screen until you scroll.
-- The fallback renderer has only been exercised by forcing it in a debug
-  build. On the test machine (GeForce GT 340, no Direct3D 12 or Vulkan
-  driver) it uses Windows' software (WARP) adapter.
+- **Automatic preset rules only apply to default `100%` unmuted initial sessions.**
+  A rule applies once to a newly launched process after the rule is enabled,
+  and only when its initial session starts at `100%` and unmuted with no user
+  change seen first. Windows remembers per-app levels between launches, so an
+  app whose level was previously changed will keep its Windows-restored level
+  unless you press **Apply now**. Real-hardware interaction with
+  Windows-restored sessions remains unverified.
+- **Accessibility:** programmatic focus-transition auto-scrolling inside scroll
+  views, live Windows `Tab` traversal in Settings, and UI Automation
+  `FullDescription` exposure on Settings toggles are verified by tests, but real
+  Narrator speech, high-contrast themes and multi-DPI scaling remain unverified.
+- The fallback renderer can be forced with `--renderer=wgpu` in release and
+  debug builds, but has not been tested on a machine where OpenGL naturally
+  fails at startup. On the test machine (GeForce GT 340, no Direct3D 12 or
+  Vulkan driver) it uses Windows' software (WARP) adapter.
 - Sound properties are read-only by design. Default-device switching still
   uses the undocumented `IPolicyConfig` interface.
+- An in-window warning queued while hidden may expire after a long idle before
+  the window is shown again. Tray notifications depend on Windows settings.
+- The posted-message shortcut pressure test skips its pressure assertion if
+  another process already owns its test chord.
 - Builds are unsigned.
 
 ### Verification
 
 Checked locally on Windows 11 Pro 25H2 (build 26200), NVIDIA GeForce GT 340,
-one HDMI output and no microphone. Details are in `docs/TESTING.md`.
+one HDMI output and no microphone. Hosted GitHub Actions CI run `#38919273079`
+covered the earlier committed base `107a305`; beta.2 requires its own hosted
+CI run after push (details in `docs/TESTING.md`).
 
-- **Automated:** formatting, clippy with warnings denied, the full test suite
-  (unit tests, headless layout and accessibility tests, settings migration
-  tests) and the release build, all with `--locked`.
+- **Automated:** formatting, PowerShell script syntax, clippy with warnings
+  denied, the full test suite (unit tests, headless settled-tree layout /
+  accessibility / keyboard focus-scroll tests, settings migration/backup
+  gating tests, process-instance start-rule and batch execution tests) and the
+  release build, all with `--locked`.
 - **Manual on this machine:** repeated isolated start/exit runs with both
-  renderers, global-shortcut smoke and exit-stress tests, UI Automation and
-  screenshots of every view at the default and minimum width.
-- **Not verified:** a hosted CI run, Windows 10, microphones, several outputs,
-  hot-plug, sleep/resume, audio-service restart, 125–200% scaling, light and
-  high-contrast themes, Narrator speech and real Tab traversal, automatic
-  preset rules with live apps, the installer upgrade from 0.1.0, and the
+  renderers, global-shortcut smoke and exit-stress tests, UI Automation
+  (including Settings toggle `FullDescription` descriptions and live `Tab`
+  scroll into view) and screenshots of every view at the default and minimum
+  width.
+- **Not verified:** Windows 10, microphones, several outputs, hot-plug,
+  sleep/resume, audio-service restart, 125–200% scaling, light and
+  high-contrast themes, Narrator speech, automatic preset rules with live
+  Windows-restored app volumes, the installer upgrade from 0.1.0, and the
   fallback on a machine without OpenGL or over Remote Desktop.
 
 ## 0.1.0 (2026-10-15)

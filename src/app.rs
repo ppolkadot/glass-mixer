@@ -200,13 +200,6 @@ impl MixerApp {
         } else {
             None
         };
-        if let Some(err) = opts.load_error {
-            toasts.push(Toast {
-                level: NoticeLevel::Warning,
-                text: err,
-                until: Instant::now() + Duration::from_secs(10),
-            });
-        }
         // Never strand the user with no window and no tray icon.
         let start_hidden = opts.hidden && tray.is_some();
         if opts.hidden
@@ -271,6 +264,9 @@ impl MixerApp {
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(|ms| Instant::now() + Duration::from_millis(ms)),
         };
+        if let Some(err) = opts.load_error {
+            app.toast(NoticeLevel::Warning, err);
+        }
         app.refresh_look(&ctx);
         app
     }
@@ -431,17 +427,10 @@ impl MixerApp {
             return;
         }
         let rects = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
-        if let (Some(_outer), Some(inner), Some(h)) = (rects.0, rects.1, self.hwnd)
-            && let Some((x, y)) = window::outer_position(h)
-        {
-            let g = WindowGeometry { x, y, width: inner.width(), height: inner.height() };
-            let changed =
-                crate::settings::geometry_changed(self.settings.window, self.settings.window_position_physical, g);
-            if changed && g.width > 0.0 && g.height > 0.0 {
-                self.settings.window = Some(g);
-                self.settings.window_position_physical = true;
-                self.mark_dirty();
-            }
+        let outer_pos = rects.0.zip(self.hwnd).and_then(|(_, h)| window::outer_position(h));
+        let inner_size = rects.1.map(|inner| (inner.width(), inner.height()));
+        if record_window_geometry(&mut self.settings, shown, outer_pos, inner_size) {
+            self.mark_dirty();
         }
     }
 
@@ -500,6 +489,30 @@ impl MixerApp {
             self.toasts.remove(i);
         }
     }
+}
+
+fn record_window_geometry(
+    settings: &mut Settings,
+    shown: bool,
+    outer_pos: Option<(f32, f32)>,
+    inner_size: Option<(f32, f32)>,
+) -> bool {
+    if !shown {
+        return false;
+    }
+    let (Some((x, y)), Some((width, height))) = (outer_pos, inner_size) else {
+        return false;
+    };
+    if width <= 0.0 || height <= 0.0 {
+        return false;
+    }
+    let g = WindowGeometry { x, y, width, height };
+    let changed = crate::settings::geometry_changed(settings.window, settings.window_position_physical, g);
+    if changed {
+        settings.window = Some(g);
+        settings.window_position_physical = true;
+    }
+    changed
 }
 
 impl eframe::App for MixerApp {
@@ -604,6 +617,13 @@ impl eframe::App for MixerApp {
             // Pick up Windows theme/transparency changes while visible; idle cost is one
             // registry read every two seconds, and nothing at all while hidden.
             ctx.request_repaint_after(PREFS_INTERVAL);
+        } else {
+            let min_until = Instant::now() + Duration::from_secs(7);
+            for toast in &mut self.toasts {
+                if toast.until < min_until {
+                    toast.until = min_until;
+                }
+            }
         }
         self.track_window(ctx, shown);
         self.refresh_look(ctx);
@@ -753,5 +773,36 @@ mod tests {
         assert!(rejection.may_try(BackdropRetryKey { build: 26201, ..key }));
         rejection.reset_for(BackdropRetryKey { backdrop: Backdrop::Mica, ..key });
         assert!(rejection.may_try(key), "returning to the earlier setting should retry");
+    }
+
+    #[test]
+    fn window_tracking_ignores_hidden_or_empty_frames_and_marks_real_changes() {
+        let mut settings = Settings {
+            window: Some(WindowGeometry { x: 100.0, y: 120.0, width: 480.0, height: 720.0 }),
+            window_position_physical: false,
+            ..Default::default()
+        };
+        assert!(
+            !record_window_geometry(&mut settings, false, Some((200.0, 220.0)), Some((480.0, 720.0))),
+            "hidden windows must not overwrite saved geometry"
+        );
+        assert!(
+            !record_window_geometry(&mut settings, true, Some((200.0, 220.0)), Some((0.0, 720.0))),
+            "minimized/zero-width inner rect must be ignored"
+        );
+        assert!(
+            record_window_geometry(&mut settings, true, Some((100.0, 120.0)), Some((480.0, 720.0))),
+            "legacy logical coordinates upgrade to physical once"
+        );
+        assert!(settings.window_position_physical);
+        assert!(
+            !record_window_geometry(&mut settings, true, Some((100.2, 120.1)), Some((480.0, 720.0))),
+            "sub-pixel jitter does not dirty settings"
+        );
+        assert!(
+            record_window_geometry(&mut settings, true, Some((140.0, 160.0)), Some((500.0, 740.0))),
+            "real move/resize updates geometry"
+        );
+        assert_eq!(settings.window, Some(WindowGeometry { x: 140.0, y: 160.0, width: 500.0, height: 740.0 }));
     }
 }

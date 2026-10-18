@@ -167,23 +167,17 @@ impl Runner {
                 return;
             };
             match engine.apply_preset(preset.clone()) {
-                Ok((applied, missing)) => {
+                Ok(outcome) => {
                     self.dirty.values = true;
-                    if applied == 0 {
-                        self.shared.push_notice(
-                            NoticeLevel::Warning,
-                            "No saved apps are currently running; nothing was changed.",
-                        );
-                    } else if missing > 0 {
-                        self.shared.push_notice(
-                            NoticeLevel::Warning,
-                            format!("Preset applied to {applied} app(s); {missing} saved app(s) are not running."),
-                        );
-                    } else {
-                        self.shared.push_notice(NoticeLevel::Info, format!("Preset applied to {applied} app(s)."));
-                    }
+                    let (level, text) = outcome.notice();
+                    self.shared.push_notice(level, text);
                 }
                 Err(err) => {
+                    if let ApplyError::Windows(_, e) = &err
+                        && is_fatal(e.code())
+                    {
+                        self.dirty.rebuild = true;
+                    }
                     self.dirty.values = true;
                     self.shared.push_notice(NoticeLevel::Error, err.to_string());
                 }
@@ -379,6 +373,7 @@ fn meters_differ(a: &Meters, b: &Meters) -> bool {
     })
 }
 
+#[derive(Debug)]
 enum ApplyError {
     Windows(String, windows::core::Error),
     Message(String),
@@ -542,7 +537,9 @@ impl Engine {
         if (dirty.sessions || dirty.devices)
             && let Some(set) = self.sessions.as_mut()
         {
-            set.sync(&self.tx)?;
+            for exited_pid in set.sync(&self.tx)? {
+                self.start_tracker.forget_exited_pid(exited_pid);
+            }
         }
         Ok(())
     }
@@ -718,40 +715,32 @@ impl Engine {
         self.start_tracker.rearm(current_filetime());
     }
 
-    fn apply_preset(&mut self, preset: super::preferences::VolumePreset) -> Result<(usize, usize), ApplyError> {
-        let Some(preset) = preset.sanitize() else {
-            return Err(ApplyError::Message("Preset has no valid name.".into()));
+    fn apply_preset(&mut self, preset: super::preferences::VolumePreset) -> Result<PresetOutcome, ApplyError> {
+        let mut intervened = Vec::new();
+        let outcome = {
+            let sessions: &[Session] = self.sessions.as_ref().map_or(&[], |set| &set.sessions);
+            execute_preset(
+                preset,
+                sessions,
+                |s| &s.key,
+                |s, volume, muted| unsafe {
+                    s.simple.SetMasterVolume(volume, &OWN_EVENT_CONTEXT)?;
+                    s.simple.SetMute(muted, &OWN_EVENT_CONTEXT)
+                },
+                |key| intervened.push(key.clone()),
+            )?
         };
-        let plan = super::preferences::plan_preset(&preset, |key| {
-            self.sessions.iter().flat_map(|set| set.sessions.iter()).any(|s| &s.key == key)
-        });
-        let (missing, mut applied) = (plan.missing, 0);
-        for entry in plan.present {
-            let sessions: Vec<_> =
-                self.sessions.iter().flat_map(|set| set.sessions.iter()).filter(|s| s.key == entry.key).collect();
-            for session in sessions {
-                unsafe {
-                    session
-                        .simple
-                        .SetMasterVolume(entry.volume, &OWN_EVENT_CONTEXT)
-                        .context(|| format!("Preset partially applied; couldn't set volume for {}", entry.name))?;
-                    session
-                        .simple
-                        .SetMute(entry.muted, &OWN_EVENT_CONTEXT)
-                        .context(|| format!("Preset partially applied; couldn't set mute for {}", entry.name))?;
-                }
-            }
-            self.mark_key_intervened(&entry.key);
-            applied += 1;
+        for key in &intervened {
+            self.mark_key_intervened(key);
         }
-        Ok((applied, missing))
+        Ok(outcome)
     }
 
     fn mark_key_intervened(&mut self, key: &AppKey) {
         if let Some(set) = &self.sessions {
             for session in set.sessions.iter().filter(|s| &s.key == key) {
                 if let Some(created) = set.processes.get(&session.pid).and_then(|p| p.started_at) {
-                    self.start_tracker.note_intervention(key, created);
+                    self.start_tracker.note_process_intervention(key, session.pid, created);
                 }
             }
         }
@@ -764,65 +753,37 @@ impl Engine {
         let Some(set) = &self.sessions else {
             return Ok(());
         };
-        let mut groups: HashMap<(AppKey, u64), Vec<&Session>> = HashMap::new();
-        for session in &set.sessions {
-            let Some(created) = set.processes.get(&session.pid).and_then(|p| p.started_at) else {
-                continue;
-            };
-            if self.preset_rules.iter().any(|p| p.entries.iter().any(|e| e.key == session.key)) {
-                groups.entry((session.key.clone(), created)).or_default().push(session);
-            }
-        }
-        // Oldest process first, so each new process is judged in launch order
-        // (hash-map order would let a newer process hide an older one).
-        let mut groups: Vec<_> = groups.into_iter().collect();
-        groups.sort_by_key(|((_, created), _)| *created);
-        for ((key, created), sessions) in groups {
-            let untouched = sessions.iter().all(|s| {
-                !s.changed.load(Ordering::Relaxed)
+        let candidates: Vec<StartCandidate<&Session>> = set
+            .sessions
+            .iter()
+            .map(|s| {
+                let created = set.processes.get(&s.pid).and_then(|p| p.started_at);
+                let untouched = !s.changed.load(Ordering::Relaxed)
                     && unsafe {
                         s.simple.GetMasterVolume().ok().is_some_and(|v| (v - 1.0).abs() < 0.0001)
                             && s.simple.GetMute().ok().is_some_and(|m| !m.as_bool())
-                    }
-            });
-            if !self.start_tracker.observe(&key, created, untouched) {
-                continue;
-            }
-            let Some(entry) = self.preset_rules.iter().flat_map(|p| &p.entries).find(|e| e.key == key) else {
-                continue;
-            };
-            let mut first_error = None;
-            for s in sessions {
-                let result = unsafe {
+                    };
+                StartCandidate { id: s, key: s.key.clone(), pid: s.pid, created, untouched }
+            })
+            .collect();
+        execute_start_rules(
+            &self.preset_rules,
+            &mut self.start_tracker,
+            candidates,
+            |s, key, volume, muted| {
+                let res = unsafe {
                     s.simple
-                        .SetMasterVolume(entry.volume, &OWN_EVENT_CONTEXT)
-                        .and_then(|()| s.simple.SetMute(entry.muted, &OWN_EVENT_CONTEXT))
+                        .SetMasterVolume(volume, &OWN_EVENT_CONTEXT)
+                        .and_then(|()| s.simple.SetMute(muted, &OWN_EVENT_CONTEXT))
                 };
-                if let Err(err) = result {
-                    log::warn!("automatic preset failed for {:?}, session {}: {err}", key, s.instance_id);
-                    if first_error.is_none() || is_fatal(err.code()) {
-                        first_error = Some(err);
-                    }
+                if let Err(err) = &res {
+                    log::warn!("automatic preset failed for {key:?}, session {}: {err}", s.instance_id);
                 }
-            }
-            if let Some(err) = first_error {
-                shared.push_notice(
-                    NoticeLevel::Error,
-                    format!(
-                        "Automatic preset for {} could not be fully applied. Check the app levels, then use Apply now to retry.",
-                        entry.name
-                    ),
-                );
-                if is_fatal(err.code()) {
-                    return Err(err);
-                }
-            } else {
-                log::info!("automatic preset applied once to a new process for {:?}", key);
-            }
-        }
-        Ok(())
+                res
+            },
+            |msg| shared.push_notice(NoticeLevel::Error, msg),
+        )
     }
-
     fn endpoint(&self, flow: Flow) -> Result<&Endpoint, ApplyError> {
         let ep = match flow {
             Flow::Output => self.output.as_ref(),
@@ -866,6 +827,129 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresetOutcome {
+    applied: usize,
+    missing: usize,
+    failed: Vec<String>,
+}
+
+impl PresetOutcome {
+    fn notice(&self) -> (NoticeLevel, String) {
+        if !self.failed.is_empty() {
+            (
+                NoticeLevel::Error,
+                format!("Preset applied to {} app(s); couldn't change {}.", self.applied, self.failed.join(", ")),
+            )
+        } else if self.applied == 0 {
+            (NoticeLevel::Warning, "None of the apps in that preset are running right now.".into())
+        } else if self.missing > 0 {
+            (NoticeLevel::Info, format!("Preset applied to {} app(s) ({} not running).", self.applied, self.missing))
+        } else {
+            (NoticeLevel::Info, format!("Preset applied to {} app(s).", self.applied))
+        }
+    }
+}
+
+fn execute_preset<S>(
+    preset: super::preferences::VolumePreset,
+    sessions: &[S],
+    key_of: impl Fn(&S) -> &AppKey,
+    mut apply_one: impl FnMut(&S, f32, bool) -> WinResult<()>,
+    mut on_intervened: impl FnMut(&AppKey),
+) -> Result<PresetOutcome, ApplyError> {
+    let Some(preset) = preset.sanitize() else {
+        return Err(ApplyError::Message("Preset has no valid name.".into()));
+    };
+    let plan = super::preferences::plan_preset(&preset, |key| sessions.iter().any(|s| key_of(s) == key));
+    let mut outcome = PresetOutcome { applied: 0, missing: plan.missing, failed: Vec::new() };
+    for entry in plan.present {
+        let mut entry_failed = false;
+        for session in sessions.iter().filter(|s| key_of(s) == &entry.key) {
+            if let Err(err) = apply_one(session, entry.volume, entry.muted) {
+                if is_fatal(err.code()) {
+                    return Err(ApplyError::Windows(
+                        format!("Preset partially applied; couldn't change {}", entry.name),
+                        err,
+                    ));
+                }
+                log::warn!("preset failed for {:?} ({}): {err}", entry.key, entry.name);
+                entry_failed = true;
+            }
+        }
+        if entry_failed {
+            outcome.failed.push(entry.name.clone());
+        } else {
+            on_intervened(&entry.key);
+            outcome.applied += 1;
+        }
+    }
+    Ok(outcome)
+}
+
+struct StartCandidate<I> {
+    id: I,
+    key: AppKey,
+    pid: u32,
+    created: Option<u64>,
+    untouched: bool,
+}
+
+fn execute_start_rules<I>(
+    preset_rules: &[super::preferences::VolumePreset],
+    start_tracker: &mut super::preferences::StartTracker,
+    candidates: Vec<StartCandidate<I>>,
+    mut apply_one: impl FnMut(&I, &AppKey, f32, bool) -> WinResult<()>,
+    mut on_error_notice: impl FnMut(String),
+) -> WinResult<()> {
+    if preset_rules.is_empty() {
+        return Ok(());
+    }
+    let mut groups: HashMap<(AppKey, u32, u64), (bool, Vec<I>)> = HashMap::new();
+    for candidate in candidates {
+        let Some(created) = candidate.created else {
+            continue;
+        };
+        if preset_rules.iter().any(|p| p.entries.iter().any(|e| e.key == candidate.key)) {
+            let group = groups.entry((candidate.key, candidate.pid, created)).or_insert_with(|| (true, Vec::new()));
+            group.0 &= candidate.untouched;
+            group.1.push(candidate.id);
+        }
+    }
+    // Sort deterministically by creation time and PID so same-refresh processes
+    // are evaluated in launch order.
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|((_, pid, created), _)| (*created, *pid));
+    for ((key, pid, created), (untouched, sessions)) in groups {
+        if !start_tracker.observe_process(&key, pid, created, untouched) {
+            continue;
+        }
+        let Some(entry) = preset_rules.iter().flat_map(|p| &p.entries).find(|e| e.key == key) else {
+            continue;
+        };
+        let mut first_error = None;
+        for s in &sessions {
+            if let Err(err) = apply_one(s, &key, entry.volume, entry.muted)
+                && (first_error.is_none() || is_fatal(err.code()))
+            {
+                first_error = Some(err);
+            }
+        }
+        if let Some(err) = first_error {
+            on_error_notice(format!(
+                "Automatic preset for {} could not be fully applied. Check the app levels, then use Apply now to retry.",
+                entry.name
+            ));
+            if is_fatal(err.code()) {
+                return Err(err);
+            }
+        } else {
+            log::info!("automatic preset applied once to a new process for {key:?}");
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Engine {
@@ -995,7 +1079,7 @@ impl SessionSet {
         unsafe { manager.RegisterSessionNotification(&notifier)? };
         let mut set = Self { manager, notifier, sessions: Vec::new(), processes: HashMap::new() };
         // Enumerating after registering is required for creation notifications to be delivered.
-        set.sync(&tx)?;
+        let _ = set.sync(&tx)?;
         Ok(set)
     }
 
@@ -1003,7 +1087,13 @@ impl SessionSet {
         self.processes.get(&pid).and_then(|p| p.watch.as_ref()).is_some_and(ProcessWatch::has_exited)
     }
 
-    fn sync(&mut self, tx: &Sender<Msg>) -> WinResult<()> {
+    fn sync(&mut self, tx: &Sender<Msg>) -> WinResult<Vec<u32>> {
+        let mut exited_pids = Vec::new();
+        for (&pid, entry) in &self.processes {
+            if entry.watch.as_ref().is_some_and(ProcessWatch::has_exited) {
+                exited_pids.push(pid);
+            }
+        }
         let enumerator = unsafe { self.manager.GetSessionEnumerator()? };
         let count = unsafe { enumerator.GetCount()? };
         let mut seen = HashSet::new();
@@ -1031,6 +1121,11 @@ impl SessionSet {
                 Err(e) => log::warn!("couldn't open audio session: {e}"),
             }
         }
+        for (&pid, entry) in &self.processes {
+            if entry.watch.as_ref().is_some_and(ProcessWatch::has_exited) && !exited_pids.contains(&pid) {
+                exited_pids.push(pid);
+            }
+        }
         let processes = &self.processes;
         self.sessions.retain(|s| {
             let exited = processes.get(&s.pid).and_then(|p| p.watch.as_ref()).is_some_and(ProcessWatch::has_exited);
@@ -1042,7 +1137,7 @@ impl SessionSet {
         });
         let live: HashSet<u32> = self.sessions.iter().map(|s| s.pid).collect();
         self.processes.retain(|pid, _| live.contains(pid));
-        Ok(())
+        Ok(exited_pids)
     }
 }
 
@@ -1089,6 +1184,9 @@ impl Session {
         let (key, name, exe_path, aumid) = if is_system {
             (AppKey::System, "System sounds".to_string(), None, None)
         } else {
+            if processes.get(&pid).and_then(|p| p.watch.as_ref()).is_some_and(ProcessWatch::has_exited) {
+                processes.remove(&pid);
+            }
             let entry = processes.entry(pid).or_insert_with(|| match process::open(pid) {
                 Some(handle) => {
                     let info = process::query(&handle);
@@ -1226,5 +1324,149 @@ mod tests {
         assert!(!meters_differ(&a, &b));
         a.apps.insert(AppKey::Pid(1), 0.2);
         assert!(meters_differ(&a, &b));
+    }
+
+    #[test]
+    fn preset_execution_continues_after_nonfatal_app_error_and_stops_on_fatal_error() {
+        use super::super::com::AUDCLNT_E_DEVICE_INVALIDATED;
+        use super::super::preferences::{PresetEntry, VolumePreset};
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        let (a, b, c) = (AppKey::Exe("a.exe".into()), AppKey::Exe("b.exe".into()), AppKey::Exe("c.exe".into()));
+        let preset = VolumePreset {
+            name: "Work".into(),
+            apply_on_start: false,
+            entries: vec![
+                PresetEntry { key: a.clone(), name: "Alpha".into(), volume: 0.3, muted: false },
+                PresetEntry { key: b.clone(), name: "Beta".into(), volume: 0.5, muted: true },
+                PresetEntry { key: c.clone(), name: "Gamma".into(), volume: 0.8, muted: false },
+            ],
+        };
+        let live = [a.clone(), b.clone()];
+        let mut intervened = Vec::new();
+        let outcome = execute_preset(
+            preset.clone(),
+            &live,
+            |k| k,
+            |k, _vol, _muted| {
+                if *k == a { Err(windows::core::Error::from_hresult(E_ACCESSDENIED)) } else { Ok(()) }
+            },
+            |k| intervened.push(k.clone()),
+        )
+        .expect("non-fatal error on Alpha must still apply Beta");
+        assert_eq!(
+            outcome,
+            PresetOutcome { applied: 1, missing: 1, failed: vec!["Alpha".into()] },
+            "Beta must be applied and Gamma counted as missing despite Alpha failing"
+        );
+        assert_eq!(intervened, vec![b.clone()]);
+        assert_eq!(outcome.notice(), (NoticeLevel::Error, "Preset applied to 1 app(s); couldn't change Alpha.".into()));
+
+        let fatal = execute_preset(
+            preset,
+            &live,
+            |k| k,
+            |_, _, _| Err(windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_INVALIDATED)),
+            |_| {},
+        );
+        assert!(matches!(fatal, Err(ApplyError::Windows(_, ref e)) if is_fatal(e.code())));
+    }
+
+    #[test]
+    fn start_rules_execution_orders_processes_and_handles_partial_and_fatal_failures() {
+        use super::super::com::AUDCLNT_E_DEVICE_INVALIDATED;
+        use super::super::preferences::{PresetEntry, StartTracker, VolumePreset};
+        use windows::Win32::Foundation::E_FAIL;
+
+        let app = AppKey::Exe(r"c:\apps\player.exe".into());
+        let rules = vec![VolumePreset {
+            name: "Auto".into(),
+            apply_on_start: true,
+            entries: vec![PresetEntry { key: app.clone(), name: "Player".into(), volume: 0.4, muted: false }],
+        }];
+        let mut tracker = StartTracker::new(100);
+        // Newer process (160, pid 20) appears before older process (150, pid 10) in the input slice,
+        // and two distinct processes share timestamp 150 (pid 10 and pid 15).
+        let candidates = vec![
+            StartCandidate { id: "s-new", key: app.clone(), pid: 20, created: Some(160), untouched: true },
+            StartCandidate { id: "s-old-b", key: app.clone(), pid: 15, created: Some(150), untouched: true },
+            StartCandidate { id: "s-old-a", key: app.clone(), pid: 10, created: Some(150), untouched: true },
+        ];
+        let mut applied_ids = Vec::new();
+        let mut notices = Vec::new();
+        execute_start_rules(
+            &rules,
+            &mut tracker,
+            candidates,
+            |id, _key, vol, muted| {
+                assert_eq!((vol, muted), (0.4, false));
+                applied_ids.push(*id);
+                if *id == "s-old-a" { Err(windows::core::Error::from_hresult(E_FAIL)) } else { Ok(()) }
+            },
+            |msg| notices.push(msg),
+        )
+        .expect("non-fatal session error is reported via notice without aborting");
+        assert_eq!(
+            applied_ids,
+            vec!["s-old-a", "s-old-b", "s-new"],
+            "processes must be ordered by (created, pid) and distinct PIDs with equal timestamps must both qualify"
+        );
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("Player"));
+
+        // A later refresh discovers an even older process (pid 5, created 120) whose audio session
+        // appeared after pid 20 (created 160). It must still qualify once.
+        let mut later_applied = Vec::new();
+        execute_start_rules(
+            &rules,
+            &mut tracker,
+            vec![
+                StartCandidate { id: "s-delayed", key: app.clone(), pid: 5, created: Some(120), untouched: true },
+                StartCandidate { id: "s-new-repeat", key: app.clone(), pid: 20, created: Some(160), untouched: true },
+            ],
+            |id, _key, _vol, _muted| {
+                later_applied.push(*id);
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(later_applied, vec!["s-delayed"]);
+
+        // A fatal COM error aborts and returns Err so the engine rebuilds.
+        let fatal_candidates =
+            vec![StartCandidate { id: "s-fatal", key: app.clone(), pid: 30, created: Some(200), untouched: true }];
+        let err = execute_start_rules(
+            &rules,
+            &mut tracker,
+            fatal_candidates,
+            |_, _, _, _| Err(windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_INVALIDATED)),
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(is_fatal(err.code()));
+
+        // Even after exceeding tracker capacity with 1,024 additional live processes,
+        // the previously failed pid 10 (created 150) recreating a session at 100% unmuted
+        // must remain ineligible.
+        for offset in 0..1024u32 {
+            let _ = tracker.observe_process(&app, 1000 + offset, 300 + u64::from(offset), true);
+        }
+        let mut retried_after_capacity = Vec::new();
+        execute_start_rules(
+            &rules,
+            &mut tracker,
+            vec![StartCandidate { id: "s-old-a-recreated", key: app, pid: 10, created: Some(150), untouched: true }],
+            |id, _key, _vol, _muted| {
+                retried_after_capacity.push(*id);
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            retried_after_capacity.is_empty(),
+            "previously failed or considered live process must not re-qualify on recreated session after capacity"
+        );
     }
 }

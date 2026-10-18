@@ -22,10 +22,13 @@ items individually so one bad pin, preset or hotkey does not reset preferences.
 Presets are the explicit exception to never persisting volumes. Saving captures
 current app volume/mute only. Applying changes currently running sessions with
 the regular event context and one read after the command batch. The optional
-automatic rule is conservative: it arms at configuration, considers only a
-new process with a new audio session, rejects observed external changes or a
-nondefault initial state, and never repeats for the same process. A process
-creation timestamp avoids PID reuse; no polling or startup-wide restore occurs.
+automatic rule is conservative: it arms at configuration, tracks each running
+process instance by `(AppKey, pid, created)`, considers only a newly launched
+process instance with a new audio session, rejects observed external changes or
+a nondefault initial state (anything other than `100%` and unmuted), and never
+repeats for the same process instance. Tracking by `(AppKey, pid, created)`
+avoids PID reuse and handles multi-instance launches or older processes that
+open audio late independently; no polling or startup-wide restore occurs.
 
 ## Additional endpoints and sound properties
 
@@ -68,7 +71,7 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping, balance math, tooltip text. |
 | `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, launch at login (registry), DWM backdrop, system preferences, fonts, and app icon resolution. |
 | `ui/` | The design system (`theme.rs`), custom widgets (`widgets.rs`), the mixer view and the settings view. |
-| `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown fields, and atomic writes. |
+| `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown top-level fields, atomic migration backups, and atomic writes. |
 | `app.rs` | Lifecycle. It wires everything together and owns the single shutdown path. |
 | `main.rs` | Logging, panic hook, single-instance check, window options. |
 
