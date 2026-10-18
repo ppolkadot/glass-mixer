@@ -5,7 +5,7 @@ Run these from Windows PowerShell in the repository root.
 | Script | Purpose |
 | --- | --- |
 | `lifecycle.ps1` | Launches a debug build with a temporary, isolated settings profile; checks its window, single-instance guard, close-to-tray, and clean timed shutdown. |
-| `ui-automation.ps1` | Reads the visible window's UI Automation tree and checks the four view selectors (in the order Mixer, Devices, Presets, Settings), that Settings has a single route, that Settings toggles expose descriptions through `FullDescription` or `HelpText`, and that every interactive control has an accessible name. `-ExerciseAudio` optionally invokes System sounds mute and volume controls, restoring their original values. |
+| `ui-automation.ps1` | Reads the visible window's UI Automation tree and checks the four view selectors (in the order Mixer, Devices, Presets, Settings), that Settings has a single route, that Settings toggles expose descriptions through `FullDescription` or `HelpText`, and that every interactive control has an accessible name. It then activates the window and checks that real `Tab` traversal focuses and scrolls an off-screen control into view. `-ExerciseAudio` optionally invokes System sounds mute and volume controls, restoring their original values. |
 | `capture-window.ps1` | Saves the selected Glass Mixer window to `target/window-capture.png` with `PrintWindow`. |
 | `verify-ui.ps1` | Launches an isolated debug instance, runs the read-only UI Automation check, and captures its window. |
 | `hotkey-smoke.ps1` | Starts an isolated debug instance with Ctrl+Alt+F23 bound to show/hide, sends the chord, and checks both hidden and visible states. `-Minimized` also tests opening from a hidden startup. |

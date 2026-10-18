@@ -1,11 +1,15 @@
 # Changelog
 
-## 0.2.0-beta.2 (2026-10-18, branch `experiments`)
+## 0.2.0-beta.2 (2026-10-18, branch `experiments`; review corrections on `fix/beta2-review-corrections`)
 
 The second beta of the 0.2.0 feature release. It includes the follow-up review
 fixes documented below, plus a correction to the shortcut pressure-test cleanup
-that releases its error mutex before joining the injector thread. The build
-artifacts are packaged locally; this branch has not been merged into `main`.
+that releases its error mutex before joining the injector thread, and the final
+review corrections: the Linux-only glib advisory is removed from the lockfile,
+hidden in-window warnings keep their remaining display time, the posted-message
+shortcut pressure test no longer depends on a global chord, and the process
+tracker's saturation latch is documented. The build artifacts are packaged
+locally; this branch has not been merged into `main`.
 
 ### Added
 
@@ -92,6 +96,18 @@ artifacts are packaged locally; this branch has not been merged into `main`.
     late are handled independently; applying a preset continues across
     remaining apps if one app returns a non-fatal COM error and reports the
     failed app names.
+  - The lockfile no longer contains `glib 0.18.5` (RUSTSEC-2024-0429 /
+    GHSA-wrw7-89jp-8q8g): `tray-icon` is built without its default
+    `libappindicator` feature, which existed only for Linux GTK and was never
+    compiled on Windows. Glass Mixer is Windows-only, so the Win32 tray and
+    menu behaviour is unchanged.
+  - An in-window warning queued while the window is hidden no longer expires
+    during a long idle. Toast time is frozen while hidden and starts (or
+    resumes) when the window is shown, still without a hidden timer or repaint.
+  - The posted-message shortcut pressure test no longer needs Windows to grant
+    it a global chord: a synthetic registration seam resolves its posted
+    `WM_HOTKEY` messages, so the pressure assertion always runs. Real
+    `SendInput` delivery remains a separate ignored desktop-input test.
 
 ### Upgrading and downgrading
 
@@ -125,18 +141,23 @@ artifacts are packaged locally; this branch has not been merged into `main`.
   Vulkan driver) it uses Windows' software (WARP) adapter.
 - Sound properties are read-only by design. Default-device switching still
   uses the undocumented `IPolicyConfig` interface.
-- An in-window warning queued while hidden may expire after a long idle before
-  the window is shown again. Tray notifications depend on Windows settings.
-- The posted-message shortcut pressure test skips its pressure assertion if
-  another process already owns its test chord.
+- **Automatic preset rules stop arming after 1,024 un-reclaimed process
+  instances.** The tracker never evicts live markers, so it latches frozen and
+  skips unseen instances; the latch stays set until the rules are re-armed or
+  Glass Mixer restarts, even if confirmed exits later free slots. Instances
+  skipped while saturated were never recorded, so clearing the latch
+  automatically could requalify an untracked running process.
+- Tray notifications depend on Windows notification settings.
 - Builds are unsigned.
 
 ### Verification
 
 Checked locally on Windows 11 Pro 25H2 (build 26200), NVIDIA GeForce GT 340,
 one HDMI output and no microphone. Hosted GitHub Actions CI run `#38919273079`
-covered the earlier committed base `107a305`; beta.2 requires its own hosted
-CI run after push (details in `docs/TESTING.md`).
+covered the earlier committed base `107a305`; the pushed beta.2 commit
+`e47b328` passed run `#39094235224` on `windows-latest`. The final review
+corrections documented above were verified locally and need their own hosted
+run after push (details in `docs/TESTING.md`).
 
 - **Automated:** formatting, PowerShell script syntax, clippy with warnings
   denied, the full test suite (unit tests, headless settled-tree layout /

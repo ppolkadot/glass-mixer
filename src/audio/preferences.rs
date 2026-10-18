@@ -201,6 +201,10 @@ pub struct StartTracker {
     /// Latched when more than `MAX_TRACKED_PROCESSES` distinct un-reclaimed
     /// process instances are observed without exit reclamation. Live markers are
     /// never evicted; while saturated, unseen instances are conservatively skipped.
+    /// The latch stays set until [`StartTracker::rearm`] (or a restart) even when
+    /// confirmed exits later free slots: instances skipped while saturated were
+    /// never recorded, so clearing the latch could requalify an untracked
+    /// running process that is not a fresh launch.
     saturated: bool,
 }
 
@@ -459,6 +463,31 @@ mod tests {
             !tracker.observe_process(&app, 9999, 9999, true),
             "saturated tracker must conservatively refuse unseen processes rather than evicting live markers"
         );
+    }
+
+    #[test]
+    fn saturation_stays_latched_after_exits_free_slots_until_rearm() {
+        let app = exe("a.exe");
+        let mut tracker = StartTracker::new(100);
+        for offset in 0..(MAX_TRACKED_PROCESSES as u32) {
+            assert!(tracker.observe_process(&app, 10 + offset, 200 + u64::from(offset), true));
+        }
+        // The next unseen instance exceeds capacity and latches saturation.
+        assert!(!tracker.observe_process(&app, 9999, 5000, true), "the process that exceeds capacity is skipped");
+        assert!(tracker.saturated);
+
+        // Confirmed exits free slots, but the latch stays: the skipped
+        // instances were never recorded, so clearing it could requalify a
+        // genuinely running process that was skipped while saturated.
+        for offset in 0..64 {
+            tracker.forget_exited_pid(10 + offset);
+        }
+        assert!(tracker.saturated, "saturation is latched until rearming, not cleared by exit reclamation");
+        assert!(!tracker.observe_process(&app, 8888, 6000, true), "new instances stay skipped while latched");
+
+        tracker.rearm(7000);
+        assert!(!tracker.saturated);
+        assert!(tracker.observe_process(&app, 8888, 7001, true), "rearming clears the latch");
     }
 
     #[test]

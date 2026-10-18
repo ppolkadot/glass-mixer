@@ -12,7 +12,10 @@ reported as a failed binding (saved but not active, with the reason) while
 every other binding stays active; "Retry failed shortcuts" reconfigures and
 retries only the ones that are not active. Drop unregisters all shortcuts and
 waits up to 2 seconds for the thread before detaching it, before the audio
-engine stops. The thread has no timer.
+engine stops. The thread has no timer. Tests exercise the worker's message
+handling and shutdown through a synthetic registration seam, so posted-message
+pressure is checked without owning a global chord; real `RegisterHotKey`
+conflict handling and real `SendInput` delivery stay in ignored desktop tests.
 
 `audio/preferences.rs` normalizes stable app identities. Pins persist only
 identity/name/icon hints; a missing app becomes a disabled UI placeholder with
@@ -29,6 +32,11 @@ a nondefault initial state (anything other than `100%` and unmuted), and never
 repeats for the same process instance. Tracking by `(AppKey, pid, created)`
 avoids PID reuse and handles multi-instance launches or older processes that
 open audio late independently; no polling or startup-wide restore occurs.
+Live markers are never evicted: after 1,024 un-reclaimed instances the tracker
+latches saturated and skips unseen instances, and the latch stays set until the
+rules are re-armed or Glass Mixer restarts, even if confirmed exits later free
+slots. Instances skipped while saturated were never recorded, so clearing the
+latch automatically could requalify an untracked running process.
 
 ## Additional endpoints and sound properties
 
@@ -90,7 +98,7 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Icons | `IAudioSessionControl::GetIconPath` → AppsFolder shell item (packaged apps) → `IShellItemImageFactory` on the exe → generic tile |
 | Sleep/resume | `PowerRegisterSuspendResumeNotification` |
 | Glass and fallback | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`), with a transparent GL surface; if GL startup fails, retry eframe/wgpu with an opaque surface on Direct3D 12 or Vulkan only (wgpu's OpenGL backend is excluded; see "Renderer fallback" below) |
-| Tray | `tray-icon` (Shell_NotifyIcon) with a `muda` menu |
+| Tray | `tray-icon` (Shell_NotifyIcon) with a `muda` menu; its default `libappindicator` (Linux GTK) feature is disabled, keeping the GTK/glib 0.18 family out of `Cargo.lock` |
 | Launch at login | `HKCU\...\CurrentVersion\Run` (plus `StartupApproved` for the Task Manager state) |
 
 ## Key design decisions
@@ -141,6 +149,12 @@ unregisters it: `Engine`, `Endpoint`, `SessionSet`, `Session`,
 the UI thread gets no frames, so CPU use is 0 ms over 10 s. While visible,
 it re-checks Windows theme and transparency every 2 s, and polls meters
 only while audio is playing.
+
+**Toast lifetime follows visibility.** An in-window notice's countdown runs
+only while the window is shown. Hiding the window freezes the remaining time,
+and a warning queued while hidden starts (or resumes) counting down when the
+window is next shown. This keeps a long hidden idle from expiring a warning
+before it can be displayed, without a hidden timer, poll or repaint loop.
 
 **Starting hidden.** eframe always shows its window after the first frame.
 To start in the tray without a flash, the window is DWM-cloaked at creation,

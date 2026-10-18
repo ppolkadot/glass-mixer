@@ -43,7 +43,44 @@ enum View {
 struct Toast {
     level: NoticeLevel,
     text: String,
-    until: Instant,
+    expiry: ToastExpiry,
+}
+
+/// Visible display time for a toast. The countdown runs only while the window
+/// is shown: a hidden pass freezes the remaining time, and a toast created
+/// while hidden (or during `ui`) starts counting when it is first displayed.
+/// Nothing here schedules a repaint, so a hidden window stays idle.
+struct ToastExpiry {
+    /// Visible time left before the toast disappears.
+    remaining: Duration,
+    /// When the toast should disappear; `None` while the countdown is paused.
+    due: Option<Instant>,
+}
+
+impl ToastExpiry {
+    fn new(visible_for: Duration) -> Self {
+        Self { remaining: visible_for, due: None }
+    }
+
+    /// Tracks a visibility change. Idempotent while the countdown is already
+    /// running, so repeated passes neither extend nor shorten the toast.
+    fn tick(&mut self, shown: bool, now: Instant) {
+        if shown {
+            if self.due.is_none() {
+                self.due = Some(now + self.remaining);
+            }
+        } else if let Some(due) = self.due.take() {
+            self.remaining = due.saturating_duration_since(now);
+        }
+    }
+
+    fn due(&self) -> Option<Instant> {
+        self.due
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        self.due.is_some_and(|due| due <= now)
+    }
 }
 
 /// Records which renderer and graphics adapter eframe chose, so the log shows
@@ -171,7 +208,7 @@ impl MixerApp {
                     toasts.push(Toast {
                         level: NoticeLevel::Error,
                         text: "The tray icon couldn't be created, so closing the window will exit.".into(),
-                        until: Instant::now() + Duration::from_secs(10),
+                        expiry: ToastExpiry::new(Duration::from_secs(10)),
                     });
                     None
                 }
@@ -369,7 +406,7 @@ impl MixerApp {
             NoticeLevel::Error => 9,
         };
         self.toasts.retain(|t| t.text != text);
-        self.toasts.push(Toast { level, text, until: Instant::now() + Duration::from_secs(secs) });
+        self.toasts.push(Toast { level, text, expiry: ToastExpiry::new(Duration::from_secs(secs)) });
         while self.toasts.len() > 3 {
             self.toasts.remove(0);
         }
@@ -436,8 +473,14 @@ impl MixerApp {
 
     fn draw_toasts(&mut self, ui: &mut egui::Ui) {
         let now = Instant::now();
-        self.toasts.retain(|t| t.until > now);
-        if let Some(next) = self.toasts.iter().map(|t| t.until).min() {
+        // This pass only runs while the window is visible, so any toast that
+        // has not started counting down yet (for example one queued during
+        // `ui`) starts now and gets its full visible time.
+        for toast in &mut self.toasts {
+            toast.expiry.tick(true, now);
+        }
+        self.toasts.retain(|t| !t.expiry.expired(now));
+        if let Some(next) = self.toasts.iter().filter_map(|t| t.expiry.due()).min() {
             ui.ctx().request_repaint_after(next - now);
         }
         if self.toasts.is_empty() {
@@ -605,6 +648,16 @@ impl eframe::App for MixerApp {
             }
         }
 
+        // Toasts count down only while the window is shown: a hidden pass
+        // freezes the remaining time instead of extending or expiring it, so a
+        // warning queued while hidden is displayed for its full duration when
+        // the window is revealed after any idle interval. No hidden timer or
+        // repaint is scheduled.
+        let toast_now = Instant::now();
+        for toast in &mut self.toasts {
+            toast.expiry.tick(shown, toast_now);
+        }
+
         if shown {
             if self.prefs_checked.elapsed() >= PREFS_INTERVAL {
                 self.prefs_checked = Instant::now();
@@ -617,13 +670,6 @@ impl eframe::App for MixerApp {
             // Pick up Windows theme/transparency changes while visible; idle cost is one
             // registry read every two seconds, and nothing at all while hidden.
             ctx.request_repaint_after(PREFS_INTERVAL);
-        } else {
-            let min_until = Instant::now() + Duration::from_secs(7);
-            for toast in &mut self.toasts {
-                if toast.until < min_until {
-                    toast.until = min_until;
-                }
-            }
         }
         self.track_window(ctx, shown);
         self.refresh_look(ctx);
@@ -753,6 +799,51 @@ impl Drop for MixerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_toast_time_is_frozen_and_restarts_when_first_shown() {
+        let created = Instant::now();
+
+        // Queued while hidden with no logic pass in between: the full duration
+        // starts at the reveal, however long the idle interval was.
+        let mut queued_while_hidden = ToastExpiry::new(Duration::from_secs(7));
+        queued_while_hidden.tick(true, created + Duration::from_secs(3600));
+        assert!(
+            !queued_while_hidden.expired(created + Duration::from_secs(3600 + 6)),
+            "a warning queued while hidden must survive a long idle and be displayable on reveal"
+        );
+        assert!(queued_while_hidden.expired(created + Duration::from_secs(3600 + 8)));
+
+        // Already counting down when hidden: the remaining time is preserved
+        // across a long hidden interval with no callbacks and resumes on reveal.
+        let mut frozen = ToastExpiry::new(Duration::from_secs(7));
+        frozen.tick(true, created);
+        frozen.tick(false, created + Duration::from_secs(3));
+        frozen.tick(true, created + Duration::from_secs(3600));
+        assert!(!frozen.expired(created + Duration::from_secs(3600 + 3)), "7s minus 3s shown = 4s left");
+        assert!(frozen.expired(created + Duration::from_secs(3600 + 5)));
+    }
+
+    #[test]
+    fn repeated_visible_passes_do_not_extend_a_toast() {
+        let created = Instant::now();
+        let mut expiry = ToastExpiry::new(Duration::from_secs(4));
+        expiry.tick(true, created);
+        expiry.tick(true, created + Duration::from_secs(2));
+        assert!(!expiry.expired(created + Duration::from_millis(3900)));
+        assert!(expiry.expired(created + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn a_toast_expired_while_visible_stays_gone_across_hide_and_reveal() {
+        let created = Instant::now();
+        let mut expiry = ToastExpiry::new(Duration::from_secs(4));
+        expiry.tick(true, created);
+        assert!(expiry.expired(created + Duration::from_secs(4)));
+        expiry.tick(false, created + Duration::from_secs(5));
+        expiry.tick(true, created + Duration::from_secs(100));
+        assert!(expiry.expired(created + Duration::from_secs(100)));
+    }
 
     #[test]
     fn rejected_backdrop_stays_rejected_until_appearance_or_build_changes() {

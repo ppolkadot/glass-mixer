@@ -65,10 +65,43 @@ public static class GlassUiaKey {
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
     public static bool SendTab(IntPtr hWnd) {
         if (!PostMessageW(hWnd, 0x0100, new IntPtr(0x09), new IntPtr(0x000F0001))) return false;
         if (!PostMessageW(hWnd, 0x0101, new IntPtr(0x09), unchecked((IntPtr)0xC00F0001))) return false;
         return true;
+    }
+    // The live Tab traversal needs the window to be the foreground window:
+    // egui coalesces posted Tab presses into fewer focus moves when the window
+    // repaints at reduced rates while it is inactive, and UI Automation only
+    // reports HasKeyboardFocus on the active window. Another app (for example
+    // a game client) may hold the foreground lock, so attach to its thread
+    // first. Windows only performs the activation here, on request.
+    public static bool ForceForeground(IntPtr hWnd) {
+        IntPtr foreground = GetForegroundWindow();
+        if (foreground == hWnd) return true;
+        uint pid;
+        uint foregroundThread = GetWindowThreadProcessId(foreground, out pid);
+        uint thisThread = GetCurrentThreadId();
+        bool attached = AttachThreadInput(thisThread, foregroundThread, true);
+        ShowWindow(hWnd, 5 /* SW_SHOW */);
+        BringWindowToTop(hWnd);
+        bool raised = SetForegroundWindow(hWnd);
+        if (attached) { AttachThreadInput(thisThread, foregroundThread, false); }
+        return raised && GetForegroundWindow() == hWnd;
     }
     public static bool GetClientScreenBounds(IntPtr hWnd, out int left, out int top, out int right, out int bottom) {
         left = top = right = bottom = 0;
@@ -118,6 +151,12 @@ if (-not [GlassUiaKey]::GetClientScreenBounds($hwnd, [ref]$clientLeft, [ref]$cli
 }
 $openFolder = $settingsElements | Where-Object { $_.Current.Name -eq 'Open settings folder' } | Select-Object -First 1
 if (-not $openFolder) { throw "Settings view did not expose 'Open settings folder'." }
+# The window must be foreground for the posted Tabs to move focus at the
+# normal frame rate and for UI Automation to report keyboard focus.
+if (-not [GlassUiaKey]::ForceForeground($hwnd)) {
+    throw 'Could not bring the Glass Mixer window to the foreground for the live Tab traversal.'
+}
+Start-Sleep -Milliseconds 250
 # Ensure focus starts at the top of Settings and confirm the target starts below the client viewport.
 $backToMixer = $settingsElements | Where-Object { $_.Current.Name -eq 'Back to mixer (Esc)' } | Select-Object -First 1
 if ($backToMixer -and $openFolder.Current.BoundingRectangle.Bottom -le $clientBottom) {
