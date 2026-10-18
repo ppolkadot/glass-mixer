@@ -1,5 +1,23 @@
 # Testing
 
+## 0.3.0 release-candidate verification (2026-10-18)
+
+The 0.3.0 version/resource update is prepared on `experiments`. Fresh local
+checks on this candidate passed: `cargo fmt --check`, PowerShell syntax,
+`git diff --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+and `cargo test --locked` (90 library tests, 3 binary tests and 1 source
+encoding test passed; 3 desktop-shortcut and 8 hardware-audio tests ignored).
+`scripts/verify-ui.ps1` passed with OpenGL and wgpu; `scripts/hotkey-smoke.ps1`
+passed in normal and minimized startup modes. `scripts/package.ps1` with Inno
+Setup 6.7.3 produced both packages. The executable and installer report
+product version `0.3.0`; the portable archive contains the executable and
+README. Package hashes are in [`docs/releases/0.3.0.md`](releases/0.3.0.md).
+
+- [ ] Hosted Windows CI for the exact 0.3.0 commit.
+- Not run for this release candidate: live audio mutations, installer upgrade
+  from 0.1.0, physical keyboard injection, Narrator, Windows 10, and varied
+  hardware. Earlier beta results remain below.
+
 ## Final review corrections (2026-10-18, branch `fix/beta2-review-corrections` on `e47b328`)
 
 This pass reviewed the pushed beta.2 commit `e47b328` and applied the final

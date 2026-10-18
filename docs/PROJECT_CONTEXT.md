@@ -4,18 +4,18 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-18, on review branch `fix/beta2-review-corrections`
-based on `experiments` (version `0.2.0-beta.2`, not yet merged or published).
-The v0.1.0 release record remains below; the v0.2.0 beta changes and their
-verification are in [CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
+Last updated: 2026-10-18, on `experiments` (version `0.3.0`, prepared for
+final review and not yet merged or published). The v0.1.0 release record
+remains below; prior beta changes and their verification are in
+[CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
 - Release: https://github.com/ppolkadot/glass-mixer/releases/tag/v0.1.0
 
 Related documents:
 
-- [CHANGELOG.md](../CHANGELOG.md): release notes for 0.2.0-beta.2, including
-  known limitations, upgrade/downgrade notes and what remains unverified.
+- [CHANGELOG.md](../CHANGELOG.md): 0.3.0 release candidate notes and the
+  complete 0.2.0-beta.2 history, including limitations and upgrade guidance.
 - [README.md](../README.md): user-facing features, install, build,
   limitations and troubleshooting.
 - [ARCHITECTURE.md](ARCHITECTURE.md): design and the Windows API strategy,
@@ -43,21 +43,20 @@ Status:
 
 - **v0.1.0 is functional and released.** The core requirements are
   implemented and checked on one Windows 11 machine.
-- **0.2.0-beta.2 is packaged locally on `experiments`** (independent device
-  controls, sound-property readouts, opt-in global shortcuts, pins, presets,
-  tray notifications and the renderer fallback). Commit `107a305` passed
-  hosted GitHub Actions CI (`windows-latest`, run `#38919273079`), the
-  reviewed commit `e47b328` passed run `#39094235224`, and the final review
-  corrections were verified locally on one Windows 11 machine on top of it.
-  A fresh hosted CI run is required after those corrections are pushed. It is
-  not merged or published on GitHub.
+- **0.3.0 is packaged locally on `experiments`** and carries forward the
+  0.2.0 beta features (independent device controls, sound-property readouts,
+  opt-in global shortcuts, pins, presets, tray notifications and renderer
+  fallback) plus the final review corrections. The beta baseline commits
+  `107a305` and `e47b328` passed hosted Windows CI runs `#38919273079` and
+  `#39094235224`; the review correction commit requires its own hosted run.
+  This release candidate is not merged or published on GitHub.
 - On both versions, Windows 10, microphones, switching between several
   outputs, hot-plug and sleep/resume have **not** been tested (no suitable
   hardware or OS was available). Section 10 lists the remaining gaps and
   section 11 the risks.
 
-The table below records the published v0.1.0 build. The 0.2.0-beta.2
-release exe is about 15.8 MB after adding wgpu (8,442,880 bytes for the
+The table below records the published v0.1.0 build. The 0.3.0 release
+executable is about 15.8 MB after adding wgpu (8,442,880 bytes for the
 glow-only v0.1.0 exe); exact numbers are in [CHANGELOG.md](../CHANGELOG.md).
 
 | Item | Value |
