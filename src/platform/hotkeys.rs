@@ -94,6 +94,24 @@ impl HotkeyService {
 
     /// Like `start`, with the audio sink supplied by the caller.
     pub fn start_with(sink: impl Fn(Command) + Send + 'static, context: egui::Context) -> Result<Self, String> {
+        Self::start_inner(sink, context, Registration::new)
+    }
+
+    /// Starts a service whose bindings resolve without calling
+    /// `RegisterHotKey`, so tests can exercise the worker's message handling
+    /// and shutdown without depending on which chords Windows (or another
+    /// process) currently owns. Real registration stays covered by the
+    /// ignored desktop tests.
+    #[cfg(test)]
+    fn start_synthetic(sink: impl Fn(Command) + Send + 'static, context: egui::Context) -> Result<Self, String> {
+        Self::start_inner(sink, context, synthetic_registration)
+    }
+
+    fn start_inner(
+        sink: impl Fn(Command) + Send + 'static,
+        context: egui::Context,
+        register: Registrar,
+    ) -> Result<Self, String> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (events_tx, events) = crossbeam_channel::unbounded();
         let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
@@ -112,7 +130,7 @@ impl HotkeyService {
                 if ready_tx.send(thread_id).is_err() {
                     return;
                 }
-                run(rx, sink, events_tx, &context, &worker_status);
+                run(rx, sink, events_tx, &context, &worker_status, register);
             })
             .map_err(|error| format!("Could not start global shortcuts: {error}"))?;
         match ready_rx.recv() {
@@ -188,23 +206,47 @@ struct Registration {
     id: i32,
     binding: HotkeyBinding,
     chord: Chord,
+    /// Synthetic test registrations answer `WM_HOTKEY` messages but were never
+    /// passed to `RegisterHotKey`, so they must not be unregistered on drop.
+    #[cfg(test)]
+    synthetic: bool,
 }
+
+/// Turns one valid binding into a registration. Production passes
+/// [`Registration::new`]; tests substitute a synthetic implementation so the
+/// worker's message handling can be exercised without owning a global chord.
+type Registrar = fn(i32, HotkeyBinding, Chord) -> Result<Registration, String>;
 
 impl Registration {
     /// Returns the reason when Windows rejects the chord.
     fn new(id: i32, binding: HotkeyBinding, chord: Chord) -> Result<Self, String> {
         unsafe { RegisterHotKey(None, id, HOT_KEY_MODIFIERS(chord.modifiers) | MOD_NOREPEAT, chord.key) }
             .map_err(|error| format!("Windows could not register this shortcut ({error}). It may be reserved or used by another app; choose another chord or release it in that app, then use Retry."))?;
-        Ok(Self { id, binding, chord })
+        Ok(Self {
+            id,
+            binding,
+            chord,
+            #[cfg(test)]
+            synthetic: false,
+        })
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if self.synthetic {
+            return;
+        }
         if let Err(error) = unsafe { UnregisterHotKey(None, self.id) } {
             log::warn!("could not unregister shortcut {}: {error}", self.binding.chord);
         }
     }
+}
+
+#[cfg(test)]
+fn synthetic_registration(id: i32, binding: HotkeyBinding, chord: Chord) -> Result<Registration, String> {
+    Ok(Registration { id, binding, chord, synthetic: true })
 }
 
 /// What a pressed shortcut asks for.
@@ -226,10 +268,17 @@ impl Registrations {
         self.active.iter().map(|registration| registration.binding.clone()).collect()
     }
 
-    /// Makes the active set match `bindings` as closely as Windows allows.
-    /// Invalid, duplicate and rejected bindings are returned; every other
-    /// binding is registered (or stays registered) regardless.
+    /// Test entry point: like the worker, it registers each accepted binding
+    /// with Windows.
+    #[cfg(test)]
     fn configure(&mut self, bindings: &[HotkeyBinding], step: u8) -> Vec<FailedBinding> {
+        self.configure_with(bindings, step, Registration::new)
+    }
+
+    /// Makes the active set match `bindings` as closely as the registration
+    /// step allows. Invalid, duplicate and rejected bindings are returned;
+    /// every other binding is registered (or stays registered) regardless.
+    fn configure_with(&mut self, bindings: &[HotkeyBinding], step: u8, register: Registrar) -> Vec<FailedBinding> {
         let Validated { valid, rejected } = validate_bindings(bindings);
         let mut failed = rejected;
         // Release chords nobody wants any more. Chords that are still wanted keep
@@ -247,7 +296,7 @@ impl Registrations {
                     break;
                 }
             }
-            match Registration::new(self.next_id, binding.clone(), chord) {
+            match register(self.next_id, binding.clone(), chord) {
                 Ok(registration) => self.active.push(registration),
                 Err(reason) => failed.push(FailedBinding { action: binding.action, chord: binding.chord, reason }),
             }
@@ -283,6 +332,7 @@ fn run(
     events: Sender<HotkeyEvent>,
     context: &egui::Context,
     status: &Mutex<SharedStatus>,
+    register: Registrar,
 ) {
     let mut registrations = Registrations::default();
     let mut message = MSG::default();
@@ -301,7 +351,7 @@ fn run(
             match rx.try_recv() {
                 Ok(Request::Shutdown) | Err(crossbeam_channel::TryRecvError::Disconnected) => break 'messages,
                 Ok(Request::Configure { bindings, step, revision }) => {
-                    let failed = registrations.configure(&bindings, step);
+                    let failed = registrations.configure_with(&bindings, step, register);
                     if failed.is_empty() {
                         log::info!("registered {} global shortcuts", registrations.active.len());
                     } else {
@@ -738,7 +788,7 @@ mod tests {
     fn registrations_for(action: HotkeyAction, chord: &str, step: u8) -> Registrations {
         let parsed = parse_chord(chord).unwrap();
         Registrations {
-            active: vec![Registration { id: 7, binding: binding(action, chord), chord: parsed }],
+            active: vec![Registration { id: 7, binding: binding(action, chord), chord: parsed, synthetic: true }],
             next_id: 7,
             step,
         }
@@ -797,6 +847,7 @@ mod tests {
                 events_tx,
                 &ctx,
                 &worker_status,
+                Registration::new,
             );
         });
         let thread_id = ready_rx.recv().unwrap();
@@ -1084,18 +1135,24 @@ mod tests {
 
     #[test]
     fn shutdown_completes_under_posted_hotkey_message_pressure() {
-        let mut service = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        // Synthetic registrations resolve the posted `WM_HOTKEY` messages
+        // without registering a global chord, so this deterministic pressure
+        // check runs in every `cargo test` and does not depend on which chords
+        // Windows or another process currently owns. Real global registration
+        // and real `SendInput` delivery stay in the ignored desktop tests.
+        let mut service = HotkeyService::start_synthetic(|_| {}, egui::Context::default()).unwrap();
         service.configure(&[binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23")], 5).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while service.status().pending {
             assert!(Instant::now() < deadline, "hotkey worker did not finish configuring");
             std::thread::sleep(Duration::from_millis(10));
         }
-        if service.status().active.is_empty() {
-            // If another process owns Ctrl+Alt+F23, clean up without false failure.
-            service.shutdown();
-            return;
-        }
+        assert_eq!(
+            service.status().active.len(),
+            1,
+            "the synthetic binding must be active without Windows registration: {:?}",
+            service.status()
+        );
         let thread_id = service.thread_id;
         let took = exercise_shutdown_under_pressure(&mut service, Duration::from_millis(60), move || {
             let _ = unsafe { PostThreadMessageW(thread_id, WM_HOTKEY, WPARAM(1), LPARAM((0x86 << 16) | 3)) };

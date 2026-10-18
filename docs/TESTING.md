@@ -1,15 +1,58 @@
 # Testing
 
-## Second beta packaging (2026-10-18)
+## Final review corrections (2026-10-18, branch `fix/beta2-review-corrections` on `e47b328`)
+
+This pass reviewed the pushed beta.2 commit `e47b328` and applied the final
+corrections: the Linux-only glib advisory is removed from `Cargo.lock`, hidden
+in-window warnings keep their remaining display time, the posted-message
+shortcut pressure test no longer depends on a global chord, the process
+tracker's saturation latch is documented and regression-tested, and the UI
+Automation check brings the window to the foreground before its live Tab
+traversal. `docs/releases/0.2.0-beta.2.md` carries the SHA-256 values of the
+rebuilt local packages.
+
+- `cargo fmt --check`, PowerShell syntax parsing, and `git diff --check`: passed.
+- `cargo test --locked`: 90 library tests passed, 3 ignored (up from 86: the
+  new toast-lifetime and tracker-latch tests); 3 binary tests and 1
+  source-encoding test passed; 8 hardware integration tests ignored (7 audio,
+  1 devices).
+- `cargo clippy --locked --all-targets -- -D warnings`: passed.
+- `cargo build --release --locked` and `scripts/package.ps1` with Inno Setup
+  6.7.3: passed; rebuilt both beta.2 artifacts in `dist/`. Windows version
+  resources in the release executable and installer report `0.2.0-beta.2`; the
+  portable archive contains the executable and README.
+- Dependency check: `cargo tree --locked --target all -i glib` reports no
+  matching package after the manifest change (`tray-icon` without its default
+  `libappindicator` feature), and the lockfile diff only removes the GTK 0.18
+  family. The Windows target tree never contained glib.
+- Native UI Automation (`scripts/verify-ui.ps1` under OpenGL and
+  `scripts/verify-ui.ps1 -Renderer wgpu`): passed, including the live `Tab`
+  traversal. Before the script fix, the traversal failed whenever another
+  application held the foreground: egui coalesces rapid posted Tabs while the
+  window repaints at reduced rates when inactive, and UI Automation only
+  reports `HasKeyboardFocus` on the active window. `ui-automation.ps1` now
+  attaches to the foreground thread and activates the mixer window first,
+  failing with a clear message if activation is refused. Repeated runs passed
+  on both renderers.
+- Isolated lifecycle (`scripts/lifecycle.ps1`) and both global-shortcut smoke
+  modes (`scripts/hotkey-smoke.ps1` and `-Minimized`): passed. These cover tray
+  creation and close-to-tray, second-instance rejection, settings/geometry
+  save, hidden startup, clean exit, and real `Ctrl+Alt+F23` registration with
+  desktop key injection after the registration seam change.
+- Not run: hosted CI for these corrections (a push is required), live audio
+  changes, physical keyboard injection, Narrator, installer upgrade from
+  0.1.0, and Windows 10. See the manual checklist below.
+
+## Second beta packaging (2026-10-18, commit `e47b328`)
 
 The 0.2.0-beta.2 source includes the follow-up review fixes below and releases
 the shortcut injector's error mutex before joining its worker on failure.
-The local installer and portable archive are produced by `scripts/package.ps1`.
-Hosted CI for this commit is pending a push to `experiments`. Live audio changes,
-physical keyboard injection, Narrator, and installer upgrade from 0.1.0 remain
-unverified.
+Hosted GitHub Actions CI run `#39094235224` (`windows-latest`) passed for the
+pushed commit `e47b328`. The final review corrections on top of it are recorded
+in the section above. Live audio changes, physical keyboard injection,
+Narrator, and installer upgrade from 0.1.0 remain unverified.
 
-Fresh checks on `experiments` for beta.2:
+Fresh checks on `experiments` for beta.2 (at `e47b328`):
 
 - `cargo fmt --check`, PowerShell syntax parsing, and `git diff --check`: passed.
 - `cargo test --locked`: 86 library tests passed, 3 ignored; 3 binary and 1
@@ -20,8 +63,9 @@ Fresh checks on `experiments` for beta.2:
 - Windows version resources in the release executable and installer report
   `0.2.0-beta.2`; the portable archive contains the executable and README.
 - The full native UI Automation checks for both renderers passed during the
-  previous review of the same feature source. They were not rerun after the
-  version change and shortcut test-helper correction.
+  previous review of the same feature source. They were not rerun for this
+  commit alone; they were rerun on the corrected branch above, where the live
+  Tab traversal was made foreground-independent.
 
 ## Follow-up merge-review verification (2026-10-17, audit worktree on `107a305`)
 
@@ -61,16 +105,20 @@ here require a fresh hosted CI run once committed and pushed.
     validated by parsing as `Settings` with `s.version == expected_version`
     (supporting both schema `1..4` and leniently recovered version `0`). Failed
     backups retain the source `version` in memory, surface a startup warning
-    through `MixerApp::toast` (reaching hidden-startup tray notifications and
-    extending toast expiry on hidden callbacks), and refuse to overwrite
-    `settings.json` until backup succeeds on a subsequent save.
+    through `MixerApp::toast` (reaching hidden-startup tray notifications; the
+    final review corrections later replaced the hidden-deadline extension with
+    a remaining-time countdown that is frozen while hidden), and refuse to
+    overwrite `settings.json` until backup succeeds on a subsequent save.
   - **Per-process start-rule tracking (`R2`, `F1`, `src/audio/preferences.rs`,
     `src/audio/engine.rs`):** `StartTracker` tracks `ProcessInstance { key, pid,
     created }` across multi-instance launches and delayed audio session creation,
     reclaims confirmed exited PIDs (`forget_exited_pid`) and same-PID creation-time
     replacements, and latches `saturated = true` at `MAX_TRACKED_PROCESSES`
     (`1024`) so live markers are never evicted and running processes cannot
-    re-qualify after `1024` newer processes appear.
+    re-qualify after `1024` newer processes appear. The latch stays set until
+    rearming or restart even when confirmed exits later free slots (instances
+    skipped while saturated were never recorded, so clearing it could requalify
+    an untracked running process); a regression test covers this.
   - **Headless settled AccessKit tree & keyboard focus scrolling (`R3`, `R4`, `R5`,
     `src/ui/test_support.rs`, `src/ui/mixer.rs`, `src/ui/presets.rs`,
     `src/ui/settings_view.rs`):** `UiHarness` inspects only reachable nodes from
@@ -85,8 +133,10 @@ here require a fresh hosted CI run once committed and pushed.
     retained validated binding when duplicate same-action entries exist (both
     valid-first/duplicate-second and invalid-first/valid-second).
     `shutdown_completes_under_posted_hotkey_message_pressure` exercises
-    `PostThreadMessageW(WM_HOTKEY)` pressure during shutdown in normal `cargo
-    test` runs when its global test chord is available; `try_inject_ctrl_alt_f21_with` rejects `0` or partial
+    `PostThreadMessageW(WM_HOTKEY)` pressure during shutdown in every `cargo
+    test` run through a synthetic registration seam (final review corrections
+    above), so it no longer depends on owning a global test chord;
+    `try_inject_ctrl_alt_f21_with` rejects `0` or partial
     `SendInput` counts (`InjectionError::BlockedZero` / `Partial`), sends a
     best-effort `KEYEVENTF_KEYUP` release batch on partial injection without
     falling back to `PostThreadMessageW`, and is unit-tested alongside RAII

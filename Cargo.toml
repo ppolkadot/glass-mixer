@@ -20,7 +20,10 @@ path = "src/lib.rs"
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu"] }
 egui = "0.36"
 raw-window-handle = "0.6"
-tray-icon = "0.26"
+# The default `libappindicator` feature pulls GTK 0.18 on Linux, which locks
+# glib 0.18.5 (RUSTSEC-2024-0429). Glass Mixer is Windows-only, so keep the
+# Win32 tray backend and leave that dependency family out of the lockfile.
+tray-icon = { version = "0.26", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"

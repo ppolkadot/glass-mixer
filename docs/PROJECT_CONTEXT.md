@@ -4,10 +4,10 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-18, on branch `experiments` (version `0.2.0-beta.2`,
-not yet merged or published). The v0.1.0 release record remains below; the
-v0.2.0 beta changes and their verification are in
-[CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
+Last updated: 2026-10-18, on review branch `fix/beta2-review-corrections`
+based on `experiments` (version `0.2.0-beta.2`, not yet merged or published).
+The v0.1.0 release record remains below; the v0.2.0 beta changes and their
+verification are in [CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
 - Release: https://github.com/ppolkadot/glass-mixer/releases/tag/v0.1.0
@@ -46,10 +46,11 @@ Status:
 - **0.2.0-beta.2 is packaged locally on `experiments`** (independent device
   controls, sound-property readouts, opt-in global shortcuts, pins, presets,
   tray notifications and the renderer fallback). Commit `107a305` passed
-  hosted GitHub Actions CI (`windows-latest`, run `#38919273079`), and the
-  subsequent review fixes passed local checks on one Windows 11 machine.
-  A fresh hosted CI run is required after this beta is pushed. It is not
-  merged or published on GitHub.
+  hosted GitHub Actions CI (`windows-latest`, run `#38919273079`), the
+  reviewed commit `e47b328` passed run `#39094235224`, and the final review
+  corrections were verified locally on one Windows 11 machine on top of it.
+  A fresh hosted CI run is required after those corrections are pushed. It is
+  not merged or published on GitHub.
 - On both versions, Windows 10, microphones, switching between several
   outputs, hot-plug and sleep/resume have **not** been tested (no suitable
   hardware or OS was available). Section 10 lists the remaining gaps and
@@ -386,7 +387,10 @@ Dependencies, as locked in `Cargo.lock`:
   (theme, transparency, animations, high contrast). Reduced motion sets
   egui's animation time to 0.
 - **Notices** are toasts above the bottom edge: info 4 s, warning 7 s,
-  error 9 s, at most three. Click one to dismiss it.
+  error 9 s, at most three. Click one to dismiss it. Their countdown runs only
+  while the window is shown: hiding freezes the remaining time, and a warning
+  queued while hidden starts (or resumes) counting down when the window is
+  next shown, with no hidden timer.
 
 ### 5.6 Accessibility
 
@@ -512,7 +516,7 @@ Windows change ─► callback ─► Msg::*Changed ─► engine re-reads ─�
 | File | Lines | Responsibility |
 | --- | --- | --- |
 | `src/main.rs` | ~221 | Logging, panic hook, single-instance check, settings load, monitor-aware restore, GL-to-wgpu fallback |
-| `src/app.rs` | ~702 | `MixerApp`: lifecycle, tray, hotkeys, views, backdrop status, settings debounce, toasts, shutdown |
+| `src/app.rs` | ~899 | `MixerApp`: lifecycle, tray, hotkeys, views, backdrop status, settings debounce, toasts, shutdown |
 | `src/settings.rs` | ~436 | Lenient versioned settings, pins/presets/hotkeys, atomic save, isolated debug profile, tests |
 | `src/icon_art.rs` | ~187 | Procedural app icon (SDF, 4×4 supersampled) and ICO encoder. Shared with `build.rs`. |
 | `build.rs` | ~72 | Generates `app.ico` and the `.rc`; embeds the icon, manifest (PerMonitorV2, asInvoker, UTF-8, Common Controls 6) and VERSIONINFO |
@@ -548,7 +552,7 @@ Windows change ─► callback ─► Msg::*Changed ─► engine re-reads ─�
 ### Important constants
 
 Additional modules: `audio/properties.rs` (~278 lines), `audio/preferences.rs`
-(~208), `platform/hotkeys.rs` (~549), `ui/presets.rs` (~92), the read-only
+(~512), `platform/hotkeys.rs` (~1302), `ui/presets.rs` (~92), the read-only
 `examples/sound_properties_probe.rs` (~87), and the self-restoring
 `tests/devices_integration.rs` (~130). Phase 4 adds test scripts under
 `scripts/`, its README, and `.github/workflows/ci.yml`. The audit added
@@ -641,6 +645,15 @@ error.
 20. **Pinned state is metadata, preset state is an explicit volume exception.**
     Offline pins cannot assert Windows values. The once-per-process rule refuses
     known post-start changes and never reapplies to an existing process.
+21. **The Win32 build keeps the Linux GTK stack out of the lockfile.**
+    `tray-icon` is built without its default `libappindicator` feature, so
+    the GTK 0.18 family and glib 0.18.5 (RUSTSEC-2024-0429) are not in
+    `Cargo.lock` at all. That feature only exists for Linux tray integration;
+    the Windows tray and menu code is unaffected.
+22. **Toast lifetime follows window visibility.** A toast's display time is
+    frozen while the window is hidden and starts (or resumes) when it is
+    shown, so a warning queued during a hidden idle is still displayed in
+    full, without a hidden timer or repaint loop.
 
 ---
 
@@ -761,8 +774,9 @@ clippy with warnings denied, the full test suite (including headless layout
 and accessibility tests), the release build, repeated isolated start/exit
 runs with both renderers, shortcut smoke and exit-stress tests, and UI
 Automation and screenshot checks of every view. Exact commands, run counts and
-results are in `TESTING.md`. No hosted CI run, hardware audio test, installer
-upgrade or Windows 10 test has been done for the beta.
+results are in `TESTING.md`. At that point no hosted CI run, hardware audio
+test, installer upgrade or Windows 10 test had been done for the beta; later
+runs are recorded below.
 
 ### Follow-up review verification (2026-10-17, uncommitted worktree on `107a305`)
 
@@ -775,6 +789,23 @@ source-encoding test), the release build, and live UI Automation (`verify-ui.ps1
 under OpenGL and forced `wgpu`, including strict off-screen-to-visible `Tab`
 traversal in Settings). Exact commands and results are in `TESTING.md`; a fresh
 hosted CI run is required once the working tree changes are committed and pushed.
+
+### Final review corrections verification (2026-10-18, branch `fix/beta2-review-corrections` on `e47b328`)
+
+The reviewed commit `e47b328` passed hosted GitHub Actions CI (`windows-latest`,
+run `#39094235224`). The final corrections on top of it were verified locally on
+the section 4 machine: formatting, PowerShell parser checks, clippy with warnings
+denied, the expanded test suite (90 library tests passed with 3 ignored, 3 binary
+tests, 1 source-encoding test), the release build, `scripts/package.ps1` with
+Inno Setup 6.7.3, live UI Automation under OpenGL and forced `wgpu`
+(`ui-automation.ps1` now activates the window before its live `Tab` traversal,
+which had failed whenever another application held the foreground), and the
+isolated lifecycle and global-shortcut smoke scripts (tray creation and
+close-to-tray, second-instance rejection, hidden start, clean exit, and real
+`Ctrl+Alt+F23` registration with synthetic desktop key injection). The glib
+advisory was confirmed gone from the lockfile with `cargo tree`. Exact commands,
+counts and the rebuilt package hashes are in `TESTING.md` and
+`docs/releases/0.2.0-beta.2.md`; a fresh hosted CI run is required after push.
 
 ---
 
@@ -841,8 +872,13 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
    are still at `100%` and unmuted with no prior user or external intervention
    recorded for that process. Windows keeps per-app levels between launches,
    so an app whose level Windows restores below `100%` or muted will not
-   qualify (explained in the Presets UI). Not verified on live multi-app
-   hardware sessions.
+   qualify (explained in the Presets UI). The tracker never evicts live
+   markers; after 1,024 un-reclaimed instances it latches saturated and skips
+   unseen instances until the rules are re-armed or Glass Mixer restarts, even
+   if confirmed exits later free slots. Instances skipped while saturated were
+   never recorded, so clearing the latch automatically could requalify an
+   untracked running process. Not verified on live multi-app hardware
+   sessions.
 4. **Acrylic goes solid when the window loses focus.** This is Windows'
    own behaviour for `DWMSBT_TRANSIENTWINDOW`, but users may read it as
    glass "turning off".
@@ -948,8 +984,9 @@ Usage and optional signing are in `scripts/README.md`.
 ### Suggested next steps, in priority order
 
 0. Keep hosted CI green for `experiments` on push or pull request before
-   merging (commit `107a305` passed run `#38919273079` on `windows-latest`;
-   re-run after pushing subsequent changes).
+   merging (commits `107a305` and `e47b328` passed the hosted runs
+   `#38919273079` and `#39094235224` on `windows-latest`; re-run after pushing
+   the review corrections).
 1. Validate the expanded UI and device lifecycle on additional hardware.
 2. Run the manual checklist on Windows 10 and on a machine with a
    microphone and two outputs.
