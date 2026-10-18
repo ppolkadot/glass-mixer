@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 (2026-10-18, branch `experiments`)
+
+First stable release of the 0.3 series, carrying forward the 0.2.0 beta
+features and review corrections. This release includes the fixes for live
+preset-process tracking at capacity, hidden warning expiry, deterministic
+shortcut pressure coverage, accessibility verification, and the Rust `glib`
+iterator unsoundness advisory by removing the unused Linux GTK tray dependency
+from the Windows-only build graph.
+
+### Release packages
+
+- Portable: `glass-mixer-0.3.0-portable.zip` (executable and README).
+- Installer: `glass-mixer-0.3.0-setup.exe` (per-user Inno Setup installer).
+- Both packages are unsigned unless a signing certificate is configured.
+
+### Verification status
+
+The packages are built and verified locally on Windows. The correction commit
+still needs hosted Windows CI and a final merge review before publication on
+the GitHub Releases page.
+
 ## 0.2.0-beta.2 (2026-10-18, branch `experiments`; review corrections on `fix/beta2-review-corrections`)
 
 The second beta of the 0.2.0 feature release. It includes the follow-up review
