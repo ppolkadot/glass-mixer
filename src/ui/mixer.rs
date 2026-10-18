@@ -299,10 +299,11 @@ fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow,
     });
     if details {
         ui.push_id((&ep.id, "properties"), |ui| {
-            egui::CollapsingHeader::new("Balance and sound properties").show(ui, |ui| {
+            let resp = egui::CollapsingHeader::new("Balance and sound properties").show(ui, |ui| {
                 endpoint_balance(ui, st, cx, ep);
                 sound_properties(ui, cx, ep);
             });
+            widgets::scroll_on_focus(resp.header_response);
         });
     }
 }
@@ -341,19 +342,19 @@ fn sound_properties(ui: &mut Ui, cx: &MixerCtx, ep: &EndpointState) {
         ui.label("Sound properties are not available yet.");
     }
     ui.label("Changing formats may briefly interrupt playing audio. Supported choices and reliable controls are available in Windows.");
-    if ui.button("Open Windows sound settings").clicked() {
+    if widgets::scroll_on_focus(ui.button("Open Windows sound settings")).clicked() {
         cx.audio.send(Command::OpenSoundSettings);
     }
     ui.label("Mono audio: live state/control unavailable. Use Windows Accessibility audio settings.");
-    if ui.button("Open mono audio settings").clicked() {
+    if widgets::scroll_on_focus(ui.button("Open mono audio settings")).clicked() {
         cx.audio.send(Command::OpenMonoSettings);
     }
 }
 
 fn endpoint_balance(ui: &mut Ui, st: &mut MixerState, cx: &MixerCtx, ep: &EndpointState) {
-    ui.horizontal(|ui| {
-        ui.label("Balance");
-        if let Some(balance) = ep.balance {
+    if let Some(balance) = ep.balance {
+        ui.horizontal(|ui| {
+            ui.label("Balance");
             ui.label("L");
             let target = Target::Balance(Ctl::Device(ep.id.clone()));
             let mut b = st.value(&target, balance);
@@ -373,17 +374,17 @@ fn endpoint_balance(ui: &mut Ui, st: &mut MixerState, cx: &MixerCtx, ep: &Endpoi
             response.on_hover_text(
                 "Left/right balance. Double-click to center. Arrow keys adjust; Home/End choose a side.",
             );
-        } else {
-            ui.label("Not available — this device is not stereo");
-        }
-    });
+        });
+    } else {
+        ui.add(egui::Label::new("Balance: Not available — this device is not stereo").wrap());
+    }
 }
 
 pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
     st.expire(ui.ctx());
     ui.horizontal(|ui| {
         ui.heading("Devices");
-        if ui.button("Refresh").clicked() {
+        if widgets::scroll_on_focus(ui.button("Refresh")).clicked() {
             cx.audio.send(Command::LoadDevices);
         }
     });
@@ -401,9 +402,10 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
                         ui.label(RichText::new(crate::audio::device_label(d, devices)).strong()).on_hover_text(&d.id);
                         if d.is_default {
                             ui.label("Default device");
-                        } else if ui
-                            .add_enabled(cx.snap.can_switch_default, egui::Button::new("Make default"))
-                            .clicked()
+                        } else if widgets::scroll_on_focus(
+                            ui.add_enabled(cx.snap.can_switch_default, egui::Button::new("Make default")),
+                        )
+                        .clicked()
                         {
                             cx.audio.send(Command::SetDefaultDevice { flow, id: d.id.clone() });
                         }
@@ -520,7 +522,7 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                 });
             });
             ui.horizontal_wrapped(|ui| {
-                let unpin = ui.button("Unpin");
+                let unpin = widgets::scroll_on_focus(ui.button("Unpin"));
                 // The visible text is short so the row fits; the accessible name says which app.
                 widgets::set_name(ui, &unpin, &format!("Unpin {}", app.name));
                 if unpin.on_hover_text(format!("Unpin {}", app.name)).clicked() {
@@ -670,7 +672,7 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
     let indent = look.m.icon + 12.0;
     if let Some(pin) = crate::audio::preferences::PinnedApp::from_app(app) {
         let mut pinned = cx.settings.pinned_apps.iter().any(|p| p.key == pin.key);
-        if ui.checkbox(&mut pinned, format!("Pin {name}")).changed() {
+        if widgets::scroll_on_focus(ui.checkbox(&mut pinned, format!("Pin {name}"))).changed() {
             if pinned {
                 cx.settings.pinned_apps.push(pin);
             } else {
@@ -745,7 +747,7 @@ mod layout_tests {
     use crate::audio::preferences::PinnedApp;
     use crate::audio::{DeviceInfo, DeviceState, EndpointState};
     use crate::settings::{Density, MIN_WIDTH};
-    use crate::ui::test_support::{Frame, Harness, past_right_edge, unnamed};
+    use crate::ui::test_support::{Frame, Harness, is_interactive, past_right_edge, unnamed};
 
     const LONG_DEVICE: &str = "HDMI-1 (NVIDIA High Definition Audio)";
     const LONG_MIC: &str = "Microphone (USB Audio Device With A Long Name)";
@@ -941,5 +943,417 @@ mod layout_tests {
             assert!(names.contains(&expected), "missing '{expected}' in {names:?}");
         }
         assert_fits("sound properties", width, &frame);
+    }
+
+    #[test]
+    fn expanded_devices_view_with_mono_stereo_and_error_states_fits_and_operates() {
+        use crate::audio::properties::DeviceProperties;
+
+        for density in [Density::Comfortable, Density::Compact] {
+            let harness = Harness::new(density);
+            let look = harness.look;
+            let width = MIN_WIDTH - 2.0 * look.m.pad;
+            let height = 440.0;
+            let mut snap = snapshot();
+            snap.outputs = vec![
+                DeviceInfo { id: "out-stereo".into(), name: LONG_DEVICE.into(), is_default: true },
+                DeviceInfo { id: "out-mono".into(), name: "Mono Speaker Dock".into(), is_default: false },
+                DeviceInfo { id: "out-err".into(), name: "Disconnected Optical Output".into(), is_default: false },
+            ];
+            snap.inputs = vec![
+                DeviceInfo { id: "in-mono".into(), name: LONG_MIC.into(), is_default: true },
+                DeviceInfo { id: "in-stereo".into(), name: "Studio Stereo Line In".into(), is_default: false },
+            ];
+            snap.device_states = vec![
+                DeviceState {
+                    flow: Flow::Output,
+                    info: snap.outputs[0].clone(),
+                    state: Ok(EndpointState {
+                        id: "out-stereo".into(),
+                        name: LONG_DEVICE.into(),
+                        volume: 0.8,
+                        muted: false,
+                        balance: Some(0.4),
+                    }),
+                },
+                DeviceState {
+                    flow: Flow::Output,
+                    info: snap.outputs[1].clone(),
+                    state: Ok(EndpointState {
+                        id: "out-mono".into(),
+                        name: "Mono Speaker Dock".into(),
+                        volume: 0.6,
+                        muted: false,
+                        balance: None,
+                    }),
+                },
+                DeviceState {
+                    flow: Flow::Output,
+                    info: snap.outputs[2].clone(),
+                    state: Err("Device unavailable: 0x88890004".into()),
+                },
+                DeviceState {
+                    flow: Flow::Input,
+                    info: snap.inputs[0].clone(),
+                    state: Ok(EndpointState {
+                        id: "in-mono".into(),
+                        name: LONG_MIC.into(),
+                        volume: 0.5,
+                        muted: false,
+                        balance: None,
+                    }),
+                },
+                DeviceState {
+                    flow: Flow::Input,
+                    info: snap.inputs[1].clone(),
+                    state: Ok(EndpointState {
+                        id: "in-stereo".into(),
+                        name: "Studio Stereo Line In".into(),
+                        volume: 0.7,
+                        muted: false,
+                        balance: Some(-0.25),
+                    }),
+                },
+            ];
+            snap.properties.insert(
+                "out-mono".into(),
+                DeviceProperties {
+                    default_format: Err("Exclusive mode active".into()),
+                    mix_format: Err("Mix format unavailable".into()),
+                    enhancements: Err("Property unavailable".into()),
+                    spatial: Err("Spatial audio state unavailable on this endpoint.".into()),
+                },
+            );
+
+            let (audio, meters) = (AudioHandle::detached(), Meters::default());
+            let (mut settings, mut icons, mut state) =
+                (Settings::default(), IconService::detached(), MixerState::default());
+
+            // Expand all 4 "Balance and sound properties" collapsing sections inside the cards via Tab + Space.
+            let _ = harness.run(width, height, |ui| {
+                let mut cx = MixerCtx {
+                    audio: &audio,
+                    snap: &snap,
+                    meters: &meters,
+                    look: &look,
+                    settings: &mut settings,
+                    icons: &mut icons,
+                };
+                show_devices(ui, &mut state, &mut cx);
+            });
+            let mut opened = 0;
+            for _ in 0..40 {
+                let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::NONE, |ui| {
+                    let mut cx = MixerCtx {
+                        audio: &audio,
+                        snap: &snap,
+                        meters: &meters,
+                        look: &look,
+                        settings: &mut settings,
+                        icons: &mut icons,
+                    };
+                    show_devices(ui, &mut state, &mut cx);
+                });
+                if frame.widgets.iter().any(|w| w.focused && w.name == "Balance and sound properties") {
+                    let _ = harness.send_key(width, height, Key::Space, egui::Modifiers::NONE, |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        show_devices(ui, &mut state, &mut cx);
+                    });
+                    opened += 1;
+                    if opened == 4 {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(opened, 4, "all 4 Balance and sound properties headers must be reachable and expandable");
+
+            let frame = harness.run(width, height, |ui| {
+                let mut cx = MixerCtx {
+                    audio: &audio,
+                    snap: &snap,
+                    meters: &meters,
+                    look: &look,
+                    settings: &mut settings,
+                    icons: &mut icons,
+                };
+                show_devices(ui, &mut state, &mut cx);
+            });
+            assert_fits(&format!("expanded devices view ({density:?})"), width, &frame);
+            assert!(unnamed(&frame.widgets).is_empty(), "unnamed controls: {:?}", unnamed(&frame.widgets));
+            let unavailable_count =
+                frame.widgets.iter().filter(|w| w.name == "Balance: Not available — this device is not stereo").count();
+            assert_eq!(unavailable_count, 2, "both mono output and mono input must expose unavailable balance text");
+            assert!(
+                frame.widgets.iter().any(|w| w.name.contains("Default format unavailable: Exclusive mode active")),
+                "error property text must be present"
+            );
+
+            // Shift+Tab back up until the top stereo balance slider is focused and inside the viewport,
+            // then double-click off-center so only double_clicked() recenters it to 0.0.
+            let mut bal_rect = None;
+            for _ in 0..24 {
+                let f = harness.send_key(width, height, Key::Tab, egui::Modifiers::SHIFT, |ui| {
+                    let mut cx = MixerCtx {
+                        audio: &audio,
+                        snap: &snap,
+                        meters: &meters,
+                        look: &look,
+                        settings: &mut settings,
+                        icons: &mut icons,
+                    };
+                    show_devices(ui, &mut state, &mut cx);
+                });
+                if let Some(w) = f.widgets.iter().find(|w| w.focused && w.name == format!("{LONG_DEVICE} balance")) {
+                    bal_rect = w.bounds;
+                    break;
+                }
+            }
+            let bal_rect = bal_rect.expect("stereo balance slider bounds in viewport");
+            let click_pos = pos2(bal_rect.left() + bal_rect.width() * 0.75, bal_rect.center().y);
+            for pressed in [true, false, true, false] {
+                let _ = harness.run_with_events(
+                    width,
+                    height,
+                    vec![
+                        egui::Event::PointerMoved(click_pos),
+                        egui::Event::PointerButton {
+                            pos: click_pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        show_devices(ui, &mut state, &mut cx);
+                    },
+                );
+            }
+            assert_eq!(
+                state.value(&Target::Balance(Ctl::Device("out-stereo".into())), 0.4),
+                0.0,
+                "double-clicking stereo balance slider must recenter it to 0.0"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_tab_shift_tab_and_slider_keys_keep_focus_visible_in_mixer_and_devices() {
+        for density in [Density::Comfortable, Density::Compact] {
+            for (window_width, height) in [(MIN_WIDTH, 440.0), (480.0, 720.0)] {
+                let harness = Harness::new(density);
+                let look = harness.look;
+                let width = window_width - 2.0 * look.m.pad;
+                let mut snap = device_snapshot();
+                snap.apps = (0..14)
+                    .map(|i| {
+                        let mut entry =
+                            app(AppKey::Exe(format!(r"c:\apps\app_{i}.exe")), &format!("Application Number {i}"));
+                        entry.balance = Some(0.0);
+                        entry
+                    })
+                    .collect();
+                let (audio, meters) = (AudioHandle::detached(), Meters::default());
+                let (mut settings, mut icons, mut state) =
+                    (Settings::default(), IconService::detached(), MixerState::default());
+                settings.pinned_apps.push(offline_pin());
+                state.expanded.insert(AppKey::Exe(r"c:\apps\app_6.exe".into()));
+
+                let _ = harness.run(width, height, |ui| {
+                    let mut cx = MixerCtx {
+                        audio: &audio,
+                        snap: &snap,
+                        meters: &meters,
+                        look: &look,
+                        settings: &mut settings,
+                        icons: &mut icons,
+                    };
+                    let _ = show(ui, &mut state, &mut cx);
+                });
+
+                // Tab forward through the offline pin and all live app rows to the last live app at the bottom.
+                let mut reached_unpin = false;
+                let mut reached_last_live_app = false;
+                for _ in 0..80 {
+                    let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::NONE, |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        let _ = show(ui, &mut state, &mut cx);
+                    });
+                    let focused = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role));
+                    if let Some(widget) = focused {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "Unpin Gone App With A Rather Long Display Name" {
+                            reached_unpin = true;
+                        }
+                        if widget.name == "Application Number 13 volume" {
+                            reached_last_live_app = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(reached_unpin, "Tab traversal in Mixer must reach the offline pin control");
+                assert!(reached_last_live_app, "Tab traversal in Mixer must reach the bottom live app row");
+
+                // Shift+Tab backward all the way back to the first app volume slider.
+                let mut reached_first_app = false;
+                for _ in 0..80 {
+                    let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::SHIFT, |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        let _ = show(ui, &mut state, &mut cx);
+                    });
+                    let focused = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role));
+                    if let Some(widget) = focused {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "Shift+Tab focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "Application Number 0 volume" {
+                            reached_first_app = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(reached_first_app, "Shift+Tab traversal must return to the top app volume slider");
+
+                // Exercise slider keyboard keys (Home, ArrowRight, PageUp, End, ArrowLeft, PageDown)
+                // while Application Number 0 volume slider is focused.
+                let target = Target::Volume(Ctl::App(AppKey::Exe(r"c:\apps\app_0.exe".into())));
+                let mut key_step = |k: Key| -> f32 {
+                    let _ = harness.send_key(width, height, k, egui::Modifiers::NONE, |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        let _ = show(ui, &mut state, &mut cx);
+                    });
+                    state.value(&target, 1.0)
+                };
+                assert!((key_step(Key::Home) - 0.0).abs() < 0.005);
+                assert!((key_step(Key::ArrowRight) - 0.01).abs() < 0.005);
+                assert!((key_step(Key::PageUp) - 0.11).abs() < 0.005);
+                assert!((key_step(Key::End) - 1.0).abs() < 0.005);
+                assert!((key_step(Key::ArrowLeft) - 0.99).abs() < 0.005);
+                assert!((key_step(Key::PageDown) - 0.89).abs() < 0.005);
+
+                // Exercise Tab, Space (on CollapsingHeader), and Shift+Tab inside show_devices.
+                let dev_harness = Harness::new(density);
+                let dev_look = dev_harness.look;
+                let mut dev_state = MixerState::default();
+                let _ = dev_harness.run(width, height, |ui| {
+                    let mut cx = MixerCtx {
+                        audio: &audio,
+                        snap: &snap,
+                        meters: &meters,
+                        look: &dev_look,
+                        settings: &mut settings,
+                        icons: &mut icons,
+                    };
+                    show_devices(ui, &mut dev_state, &mut cx);
+                });
+                let mut reached_mono_settings = false;
+                for _ in 0..24 {
+                    let frame = dev_harness.send_key(width, height, Key::Tab, egui::Modifiers::NONE, |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &dev_look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        show_devices(ui, &mut dev_state, &mut cx);
+                    });
+                    if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "Devices focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "Balance and sound properties" {
+                            let _ = dev_harness.send_key(width, height, Key::Space, egui::Modifiers::NONE, |ui| {
+                                let mut cx = MixerCtx {
+                                    audio: &audio,
+                                    snap: &snap,
+                                    meters: &meters,
+                                    look: &dev_look,
+                                    settings: &mut settings,
+                                    icons: &mut icons,
+                                };
+                                show_devices(ui, &mut dev_state, &mut cx);
+                            });
+                        }
+                        if widget.name == "Open mono audio settings" {
+                            reached_mono_settings = true;
+                        }
+                    }
+                }
+                assert!(reached_mono_settings, "Tab + Space in Devices must reach Open mono audio settings");
+                for _ in 0..16 {
+                    let frame = dev_harness.send_key(width, height, Key::Tab, egui::Modifiers::SHIFT, |ui| {
+                        let mut cx = MixerCtx {
+                            audio: &audio,
+                            snap: &snap,
+                            meters: &meters,
+                            look: &dev_look,
+                            settings: &mut settings,
+                            icons: &mut icons,
+                        };
+                        show_devices(ui, &mut dev_state, &mut cx);
+                    });
+                    if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role))
+                        && let Some(b) = widget.bounds
+                    {
+                        assert!(
+                            b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                            "Devices Shift+Tab focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                            widget.name
+                        );
+                    }
+                }
+            }
+        }
     }
 }

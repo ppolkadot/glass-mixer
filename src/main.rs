@@ -28,10 +28,7 @@ fn main() -> ExitCode {
     let dir = SettingsStore::default_dir().unwrap_or_else(|| PathBuf::from("."));
     let store = SettingsStore::new(&dir);
     let outcome = store.load();
-    let load_error = match &outcome {
-        LoadOutcome::Recovered { error, .. } => Some(error.clone()),
-        _ => None,
-    };
+    let load_error = outcome.warning().map(str::to_owned);
     if let LoadOutcome::FirstRun(_) = outcome {
         log::info!("first run: using default settings");
     }
@@ -59,9 +56,8 @@ fn main() -> ExitCode {
         None => viewport.with_inner_size([DEFAULT_WIDTH, DEFAULT_HEIGHT]),
     };
     let start = StartOptions { store, settings, load_error, hidden, restored_position, force_opaque: false };
-    let result = if dev_profile_active()
-        && std::env::var("GLASS_MIXER_DEV_RENDERER").is_ok_and(|value| value.eq_ignore_ascii_case("wgpu"))
-    {
+    let dev_renderer = std::env::var("GLASS_MIXER_DEV_RENDERER").ok();
+    let result = if wants_wgpu_fallback(&args, dev_profile_active(), dev_renderer.as_deref()) {
         run_with_renderer(eframe::Renderer::Wgpu, viewport, start)
     } else {
         run_with_renderer(eframe::Renderer::Glow, viewport.clone(), start.clone()).or_else(|gl_error| {
@@ -87,6 +83,11 @@ fn dev_profile_active() -> bool {
         && std::env::var_os("GLASS_MIXER_DEV_PROFILE").is_some_and(|dir| std::path::Path::new(&dir).is_absolute())
 }
 
+fn wants_wgpu_fallback(args: &[String], dev_profile: bool, dev_renderer: Option<&str>) -> bool {
+    args.iter().skip(1).any(|arg| arg.eq_ignore_ascii_case("--renderer=wgpu"))
+        || (dev_profile && dev_renderer.is_some_and(|value| value.eq_ignore_ascii_case("wgpu")))
+}
+
 fn run_with_renderer(
     renderer: eframe::Renderer,
     viewport: egui::ViewportBuilder,
@@ -107,24 +108,36 @@ fn run_with_renderer(
 
 /// The wgpu fallback uses Direct3D 12 or Vulkan, never wgpu's OpenGL backend.
 ///
-/// The fallback only runs after OpenGL has failed, so wgpu's GL backend cannot
-/// help. It also caused an intermittent exit deadlock: its instance owns a
-/// "wgpu-hal WGL Instance Thread" that loads the vendor OpenGL driver. When that
-/// thread exits during teardown, the driver's `DllMain` (holding the loader lock)
-/// waits for a driver thread that needs a `dwmapi` lock, which the main thread
-/// holds while destroying the window and waiting for the loader lock. Observed in
-/// thread stacks of a hung process with the NVIDIA 341.92 driver. `WGPU_BACKEND`
-/// still overrides this for diagnostics.
+/// The fallback only runs after OpenGL has failed (or when `--renderer=wgpu` is
+/// requested), so wgpu's GL backend cannot help. It also caused an intermittent
+/// exit deadlock: its instance owns a "wgpu-hal WGL Instance Thread" that loads
+/// the vendor OpenGL driver. When that thread exits during teardown, the driver's
+/// `DllMain` (holding the loader lock) waits for a driver thread that needs a
+/// `dwmapi` lock, which the main thread holds while destroying the window and
+/// waiting for the loader lock. Observed in thread stacks of a hung process with
+/// the NVIDIA 341.92 driver. `WGPU_BACKEND` may only re-enable GL inside a debug
+/// dev profile for diagnostics.
 fn fallback_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
     let mut setup = WgpuSetupCreateNew::without_display_handle();
-    setup.instance_descriptor.backends = fallback_backends(wgpu::Backends::from_env());
+    setup.instance_descriptor.backends = fallback_backends(wgpu::Backends::from_env(), dev_profile_active());
     WgpuConfiguration { wgpu_setup: WgpuSetup::CreateNew(setup), ..Default::default() }
 }
 
-fn fallback_backends(from_env: Option<eframe::egui_wgpu::wgpu::Backends>) -> eframe::egui_wgpu::wgpu::Backends {
+fn fallback_backends(
+    from_env: Option<eframe::egui_wgpu::wgpu::Backends>,
+    allow_gl_override: bool,
+) -> eframe::egui_wgpu::wgpu::Backends {
     use eframe::egui_wgpu::wgpu::Backends;
-    from_env.unwrap_or(Backends::DX12 | Backends::VULKAN)
+    let default = Backends::DX12 | Backends::VULKAN;
+    match from_env {
+        Some(backends) if allow_gl_override => backends,
+        Some(backends) => {
+            let safe = backends - Backends::GL;
+            if safe.is_empty() { default } else { safe }
+        }
+        None => default,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -235,20 +248,44 @@ mod tests {
     #[test]
     fn wgpu_fallback_never_enables_the_opengl_backend_by_default() {
         use eframe::egui_wgpu::wgpu::Backends;
-        let backends = fallback_backends(None);
+        let backends = fallback_backends(None, false);
         assert!(!backends.contains(Backends::GL), "wgpu's GL backend caused the exit deadlock (F-22)");
         assert!(backends.contains(Backends::DX12) && backends.contains(Backends::VULKAN));
-        assert_eq!(fallback_backends(Some(Backends::GL)), Backends::GL, "WGPU_BACKEND still overrides for diagnostics");
+        assert_eq!(
+            fallback_backends(Some(Backends::GL), false),
+            Backends::DX12 | Backends::VULKAN,
+            "ambient WGPU_BACKEND=gl outside a dev profile must not re-enable the deadlocking GL backend"
+        );
+        assert_eq!(
+            fallback_backends(Some(Backends::GL | Backends::DX12), false),
+            Backends::DX12,
+            "ambient WGPU_BACKEND strips GL outside a dev profile"
+        );
+        assert_eq!(
+            fallback_backends(Some(Backends::GL), true),
+            Backends::GL,
+            "WGPU_BACKEND still overrides in a dev profile for diagnostics"
+        );
         let options = fallback_wgpu_options();
         match options.wgpu_setup {
             eframe::egui_wgpu::WgpuSetup::CreateNew(setup) => {
-                // The real environment may set WGPU_BACKEND; without it, GL must be absent.
-                if std::env::var_os("WGPU_BACKEND").is_none() {
+                if !dev_profile_active() || std::env::var_os("WGPU_BACKEND").is_none() {
                     assert!(!setup.instance_descriptor.backends.contains(Backends::GL));
                 }
             }
             other => panic!("unexpected wgpu setup {other:?}"),
         }
+    }
+
+    #[test]
+    fn renderer_flag_or_dev_env_selects_the_wgpu_fallback() {
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(!wants_wgpu_fallback(&args(&["glass-mixer.exe"]), false, None));
+        assert!(!wants_wgpu_fallback(&args(&["glass-mixer.exe"]), false, Some("wgpu")));
+        assert!(wants_wgpu_fallback(&args(&["glass-mixer.exe"]), true, Some("wgpu")));
+        assert!(wants_wgpu_fallback(&args(&["glass-mixer.exe", "--renderer=wgpu"]), false, None));
+        assert!(wants_wgpu_fallback(&args(&["glass-mixer.exe", "--RENDERER=WGPU"]), false, None));
+        assert!(!wants_wgpu_fallback(&args(&["glass-mixer.exe", "--renderer=glow"]), false, None));
     }
 
     #[test]

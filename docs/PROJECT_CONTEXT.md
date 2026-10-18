@@ -4,8 +4,8 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-16, on branch `experiments` (version `0.2.0-beta.1`,
-not yet merged or released). The v0.1.0 release record remains below; the
+Last updated: 2026-10-18, on branch `experiments` (version `0.2.0-beta.2`,
+not yet merged or published). The v0.1.0 release record remains below; the
 v0.2.0 beta changes and their verification are in
 [CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
@@ -14,7 +14,7 @@ v0.2.0 beta changes and their verification are in
 
 Related documents:
 
-- [CHANGELOG.md](../CHANGELOG.md): release notes for 0.2.0-beta.1, including
+- [CHANGELOG.md](../CHANGELOG.md): release notes for 0.2.0-beta.2, including
   known limitations, upgrade/downgrade notes and what remains unverified.
 - [README.md](../README.md): user-facing features, install, build,
   limitations and troubleshooting.
@@ -43,17 +43,19 @@ Status:
 
 - **v0.1.0 is functional and released.** The core requirements are
   implemented and checked on one Windows 11 machine.
-- **0.2.0-beta.1 is in development on `experiments`** (independent device
+- **0.2.0-beta.2 is packaged locally on `experiments`** (independent device
   controls, sound-property readouts, opt-in global shortcuts, pins, presets,
-  tray notifications and the renderer fallback). It has passed local checks
-  on one Windows 11 machine but has not had a hosted CI run, is not merged,
-  and is not released.
+  tray notifications and the renderer fallback). Commit `107a305` passed
+  hosted GitHub Actions CI (`windows-latest`, run `#38919273079`), and the
+  subsequent review fixes passed local checks on one Windows 11 machine.
+  A fresh hosted CI run is required after this beta is pushed. It is not
+  merged or published on GitHub.
 - On both versions, Windows 10, microphones, switching between several
   outputs, hot-plug and sleep/resume have **not** been tested (no suitable
   hardware or OS was available). Section 10 lists the remaining gaps and
   section 11 the risks.
 
-The table below records the published v0.1.0 build. The 0.2.0-beta.1
+The table below records the published v0.1.0 build. The 0.2.0-beta.2
 release exe is about 15.8 MB after adding wgpu (8,442,880 bytes for the
 glow-only v0.1.0 exe); exact numbers are in [CHANGELOG.md](../CHANGELOG.md).
 
@@ -466,9 +468,12 @@ version-1 file lacks `window_position_physical`; its coordinates are treated
 as egui logical points. An ambiguous legacy position is not restored.
 
 **Migration and downgrade.** When a file with a version below 4 is loaded,
-its original text is first copied to `settings.v<N>.backup.json` (never
-overwritten afterwards). The migrated file is written in version 4 on the
-next save. Older releases cannot read version 4 safely: 0.1.0 reads the file,
+its original text is first copied atomically to `settings.v<N>.backup.json`
+(and never overwritten once a valid backup file for that version exists). If
+the backup cannot be written or validated during `load()`, the in-memory
+settings remain unpromoted so `save()` refuses to overwrite `settings.json`
+with version 4 until a valid backup succeeds. Older releases cannot read
+version 4 safely: 0.1.0 reads the file,
 but on its next save it writes version 1 again, dropping pins, presets,
 shortcuts and the shortcut volume step, and it treats the saved window
 position as logical points. This was reproduced with the `main` build. To
@@ -759,6 +764,18 @@ Automation and screenshot checks of every view. Exact commands, run counts and
 results are in `TESTING.md`. No hosted CI run, hardware audio test, installer
 upgrade or Windows 10 test has been done for the beta.
 
+### Follow-up review verification (2026-10-17, uncommitted worktree on `107a305`)
+
+Commit `107a305` passed hosted GitHub Actions CI (`windows-latest`, run
+`#38919273079`). Subsequent follow-up review fixes in the uncommitted working
+tree (`R1`–`R9` and `F1`–`F6`) were verified locally on the section 4 machine:
+formatting, PowerShell parser checks, clippy with warnings denied, the expanded
+test suite (86 library tests passed with 3 ignored, 3 binary tests, 1
+source-encoding test), the release build, and live UI Automation (`verify-ui.ps1`
+under OpenGL and forced `wgpu`, including strict off-screen-to-visible `Tab`
+traversal in Settings). Exact commands and results are in `TESTING.md`; a fresh
+hosted CI run is required once the working tree changes are committed and pushed.
+
 ---
 
 ## 10. Gaps against the specification
@@ -781,7 +798,7 @@ service restart were not run. Full categories are in `TESTING.md`.
 | Windows 10 testing (§13, §14 Phase 5) | Not done (no machine available). The fallback paths are written but unverified. |
 | Integration tests for tray, startup, appearance, sleep, device switching (§13 items 6–9, 12–13) | Some lifecycle and UI Automation checks are in `scripts/`; the remaining hardware and OS matrix stays manual. |
 | Mic tests (§13 item 7) | Three input endpoints accepted volume changes; real recording, mute and hot-plug remain unverified. |
-| Accessible names (§11) | Every interactive control has a name (checked by headless tests and `scripts/ui-automation.ps1`); toggle descriptions are exposed to AccessKit. Narrator speech and real Tab traversal are unverified. |
+| Accessible names (§11) | Every interactive control has a name (checked by headless tests and `scripts/ui-automation.ps1`); toggle descriptions are exposed through UIA `FullDescription`; keyboard `Tab`/`Shift+Tab` focus scrolling is verified in headless tests across all four views and via live UIA `Tab` traversal in Settings. Narrator speech and high-contrast keyboard traversal remain unverified. |
 | Code signing | Optional packaging hook added. No certificate is configured, so current builds remain unsigned. |
 
 ---
@@ -799,10 +816,13 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
    to a multi-session app sets every session to the same value.
    Intentional, but surprising if an app deliberately runs different
    streams at different volumes.
-2a. **Keyboard focus is not scrolled into view.** egui does not scroll a
-   newly focused control into view, so a control reached with Tab inside a
-   scroll area can stay off-screen. Programmatic (UI Automation) focus was
-   observed not to scroll; real Tab traversal was not tested.
+2a. **Programmatic UIA `SetFocus()` does not scroll by itself.** Keyboard
+   `Tab`/`Shift+Tab` focus movement scrolls newly focused controls into view
+   via `widgets::scroll_on_focus` across Mixer, Devices, Presets, and
+   Settings (verified headlessly in all four views and via live `Tab`
+   traversal in Settings), but calling UI Automation `.SetFocus()` directly on
+   an off-screen element without keyboard navigation does not scroll egui's
+   `ScrollArea`.
 2b. **Downgrading to 0.1.0 drops 0.2.0 settings** (pins, presets,
    shortcuts). See "Migration and downgrade" in section 6.
 
@@ -815,10 +835,14 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
    the test machine it runs on the WARP software adapter because the GPU has
    no Direct3D 12 or Vulkan driver. A machine without OpenGL has not been
    available.
-3a. **Automatic preset rules may rarely fire.** A rule applies only when a
-   newly launched process's sessions start at 100% and unmuted with no
-   observed change. Windows keeps per-app levels between launches, so an app
-   whose level was ever changed may never qualify. Not verified on hardware.
+3a. **Automatic preset rules require initial default session levels.** A rule
+   applies at most once per newly observed process instance
+   (`(AppKey, pid, created)`), and only when all of that process's sessions
+   are still at `100%` and unmuted with no prior user or external intervention
+   recorded for that process. Windows keeps per-app levels between launches,
+   so an app whose level Windows restores below `100%` or muted will not
+   qualify (explained in the Presets UI). Not verified on live multi-app
+   hardware sessions.
 4. **Acrylic goes solid when the window loses focus.** This is Windows'
    own behaviour for `DWMSBT_TRANSIENTWINDOW`, but users may read it as
    glass "turning off".
@@ -837,9 +861,10 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
 10. **Meters are approximate.** Peaks are pre-mute and may be pre-volume
     depending on the stream. The meter line is clipped to the slider value
     and hidden while muted.
-11. **PID reuse.** The process cache is keyed by PID and pruned when no
-    session uses it. A reused PID inside that window could briefly show
-    the wrong exe identity. This is very unlikely.
+11. **PID reuse.** `ProcessWatch` holds a Windows process handle while watching
+    a PID (so the OS does not reuse a watched PID before the handle closes), and
+    `SessionSet::sync` and `StartTracker` also defensively prune exited PIDs
+    and compare `(pid, created)` timestamps before reusing a PID entry.
 12. **Elevated or protected processes:** limited process access may
     fail, giving `AppKey::Pid`, no icon, and a "Process N" name unless the
     session supplies a name.
@@ -906,7 +931,7 @@ The branch now includes these scripts under `scripts/`:
 | Script | What it does | Built on |
 | --- | --- | --- |
 | `lifecycle.ps1` | Isolated debug launch, second instance, close-to-tray, `--minimized`, CPU/memory sample, saved settings and timed clean exit | `EnumWindows` + `PostMessage(WM_CLOSE)` |
-| `ui-automation.ps1` | Read-only check of view-selector order, a single Settings route and accessible names; optional self-restoring System sounds actions | `System.Windows.Automation` |
+| `ui-automation.ps1` | Read-only check of view-selector order, a single Settings route, Settings toggle `FullDescription` descriptions, accessible names, and live Settings `Tab` traversal scrolling off-screen controls into view; optional self-restoring System sounds actions | `System.Windows.Automation` |
 | `capture-window.ps1` | Captures only the selected app window | `PrintWindow(PW_RENDERFULLCONTENT)` |
 | `hotkey-smoke.ps1` | Isolated show/hide global shortcut delivery, including while hidden | `RegisterHotKey` exercised through synthetic Ctrl+Alt+F23 |
 
@@ -922,8 +947,9 @@ Usage and optional signing are in `scripts/README.md`.
 
 ### Suggested next steps, in priority order
 
-0. Get a green hosted CI run for `experiments` (push or pull request) before
-   merging; until then the workflow has only been validated locally.
+0. Keep hosted CI green for `experiments` on push or pull request before
+   merging (commit `107a305` passed run `#38919273079` on `windows-latest`;
+   re-run after pushing subsequent changes).
 1. Validate the expanded UI and device lifecycle on additional hardware.
 2. Run the manual checklist on Windows 10 and on a machine with a
    microphone and two outputs.

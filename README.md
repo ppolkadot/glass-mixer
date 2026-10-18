@@ -22,9 +22,14 @@ network access.
   output volume up/down and showing the mixer. No chord is assigned by default.
 - **Pins and presets:** pin apps by executable or package identity; an offline
   pin says "Not running" and exposes no volume. Presets save app volumes and
-  mutes only when you press Save, and apply only when you press Apply or enable
-  a visible once-per-new-process rule. Automatic rules skip already-running
-  processes and observed user changes.
+  mutes only when you press Save, and apply only when you press Apply now or
+  enable a visible once-per-new-process rule. Automatic rules track each
+  running process instance (`(AppKey, pid, created)`), apply once to a newly
+  launched process after the rule is enabled, and only apply when that
+  process's initial audio session is still at default `100 %` and unmuted so a
+  non-default initial or Windows-restored session level is not silently
+  overwritten (use `Apply now` to override a remembered or already-adjusted
+  level). Already-running processes and observed user changes are skipped.
 - **Per-app mixer:** independent volume, mute and balance for every app
   with a Windows audio session.
   - Each row shows the app's own icon, its name, and whether it is
@@ -54,7 +59,8 @@ network access.
   - Comfortable or compact density.
   - A 480×720 starting window and a Settings action to return to that size.
 - **Accessibility:**
-  - Full keyboard navigation with a visible focus ring.
+  - Full keyboard navigation with a visible focus ring and automatic scrolling
+    of newly focused controls inside scrollable views.
   - Sliders: arrow keys (1 %), Shift+arrows or Page Up/Down (larger
     steps), Home/End, and the mouse wheel.
   - Screen-reader support through UI Automation. Every control has a
@@ -83,13 +89,20 @@ Settings are stored in `%APPDATA%\GlassMixer\settings.json`. The log is
 `%LOCALAPPDATA%\GlassMixer\glass-mixer.log`.
 
 **Upgrading from 0.1.0:** the first time 0.2.0 reads an older settings file,
-it keeps an untouched copy as `settings.v1.backup.json` in the same folder.
+it writes and verifies an untouched copy as `settings.v1.backup.json` in the
+same folder before promoting `settings.json` to the new schema. If that backup
+cannot be created or verified (for example, because the backup path is
+obstructed or unwritable), Glass Mixer warns, runs with the migrated settings
+in memory so ordinary audio controls remain available, and refuses to overwrite
+the original `settings.json` until the backup succeeds on a later save.
 **Going back to 0.1.0:** 0.1.0 cannot keep 0.2.0's pins, presets and global
 shortcuts; on its next save it drops them and rewrites the file in the old
 format. To return cleanly, exit Glass Mixer and rename
 `settings.v1.backup.json` to `settings.json` before starting 0.1.0.
 
-Command line: `glass-mixer.exe --minimized` starts with only the tray icon.
+Command line: `glass-mixer.exe --minimized` starts with only the tray icon;
+`glass-mixer.exe --renderer=wgpu` forces the opaque Direct3D 12 / Vulkan
+fallback renderer.
 
 ## Build from source
 
@@ -144,7 +157,7 @@ engine sees and watches for changes for 30 seconds. It changes nothing.
   - Windows 11 21H2 gets Mica only.
   - Windows 10 uses a matching solid background.
   - Glass also turns off automatically when Windows transparency effects
-    or high contrast are on.
+    are off or high contrast is on.
 - **Notifications** appear in the app while it is visible; while hidden,
   warnings and errors use tray notifications subject to Windows quiet policy.
 

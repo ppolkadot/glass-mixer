@@ -32,6 +32,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --check
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $errors = $null
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors) { throw "Syntax error in $($_.Name): $errors" }
+          }
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       # Hardware, desktop-input and global-shortcut tests are #[ignore]d and do

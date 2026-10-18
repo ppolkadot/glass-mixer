@@ -297,10 +297,10 @@ fn run(
             }
             break;
         }
-        for request in rx.try_iter() {
-            match request {
-                Request::Shutdown => break 'messages,
-                Request::Configure { bindings, step, revision } => {
+        loop {
+            match rx.try_recv() {
+                Ok(Request::Shutdown) | Err(crossbeam_channel::TryRecvError::Disconnected) => break 'messages,
+                Ok(Request::Configure { bindings, step, revision }) => {
                     let failed = registrations.configure(&bindings, step);
                     if failed.is_empty() {
                         log::info!("registered {} global shortcuts", registrations.active.len());
@@ -319,6 +319,7 @@ fn run(
                     }
                     context.request_repaint();
                 }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
             }
         }
         if message.message == WM_HOTKEY {
@@ -484,6 +485,25 @@ pub struct HotkeyEditor {
     error: Option<String>,
 }
 
+fn primary_chord_for_action(
+    action: HotkeyAction,
+    bindings: &[HotkeyBinding],
+    validated: &Validated,
+    status: &HotkeyStatus,
+) -> Option<String> {
+    if let Some(active) = status
+        .active
+        .iter()
+        .find(|b| b.action == action && bindings.iter().any(|raw| raw.action == action && raw.chord == b.chord))
+    {
+        return Some(active.chord.clone());
+    }
+    if let Some((valid, _)) = validated.valid.iter().find(|(b, _)| b.action == action) {
+        return Some(valid.chord.clone());
+    }
+    bindings.iter().find(|b| b.action == action).map(|b| b.chord.clone())
+}
+
 impl HotkeyEditor {
     pub fn show(
         &mut self,
@@ -492,48 +512,84 @@ impl HotkeyEditor {
         step: &mut u8,
         service: &HotkeyService,
     ) {
+        let status = service.status();
+        if self.show_with_status(ui, bindings, step, &status)
+            && let Err(error) = service.configure(bindings, *step)
+        {
+            self.error = Some(error);
+        }
+    }
+
+    pub fn show_with_status(
+        &mut self,
+        ui: &mut egui::Ui,
+        bindings: &mut Vec<HotkeyBinding>,
+        step: &mut u8,
+        status: &HotkeyStatus,
+    ) -> bool {
+        let validated = validate_bindings(bindings);
         if !self.initialized {
-            for binding in bindings.iter() {
-                self.drafts.insert(binding.action, binding.chord.clone());
+            for action in HotkeyAction::ALL {
+                if let Some(chord) = primary_chord_for_action(action, bindings, &validated, status) {
+                    self.drafts.entry(action).or_insert(chord);
+                }
             }
             self.initialized = true;
         }
-        let status = service.status();
+        let mut retry_clicked = false;
         ui.label("No shortcuts are assigned by default. Type a chord such as Ctrl+Alt+M, then Bind. Windows may reject keys used by another app.");
         ui.horizontal(|ui| {
             let label = ui.label("Volume step");
-            ui.add(egui::DragValue::new(step).range(1..=20).suffix("%"))
+            crate::ui::widgets::scroll_on_focus(ui.add(egui::DragValue::new(step).range(1..=20).suffix("%")))
                 .labelled_by(label.id)
                 .on_hover_text("Output volume change for each volume shortcut, 1 to 20 percent");
         });
         for action in HotkeyAction::ALL {
             ui.push_id(action, |ui| {
-                let current = bindings
-                    .iter()
-                    .find(|b| b.action == action)
-                    .map(|b| b.chord.clone())
-                    .unwrap_or_else(|| "Off".into());
+                let current =
+                    primary_chord_for_action(action, bindings, &validated, status).unwrap_or_else(|| "Off".into());
                 let label = ui.label(format!("{} — {current}", action.label()));
                 if current != "Off" {
-                    let state = if let Some(failure) = status.failed.iter().find(|f| f.action == action) {
+                    let is_active = status.active.iter().any(|b| b.action == action && b.chord == current);
+                    let mut consumed_primary_failure = false;
+                    let state = if is_active {
+                        "Active".to_owned()
+                    } else if let Some(failure) =
+                        status.failed.iter().find(|f| f.action == action && f.chord == current)
+                    {
+                        consumed_primary_failure = true;
                         format!("Not active: {}", failure.reason)
                     } else if status.pending {
                         "Registering…".to_owned()
-                    } else if status.active.iter().any(|b| b.action == action) {
-                        "Active".to_owned()
                     } else {
                         "Not active".to_owned()
                     };
                     ui.add(egui::Label::new(egui::RichText::new(state).small()).wrap());
+                    let mut skipped_primary = false;
+                    for extra in status.failed.iter().filter(|f| f.action == action) {
+                        if consumed_primary_failure && !skipped_primary && extra.chord == current {
+                            skipped_primary = true;
+                            continue;
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("Ignored duplicate ({}): {}", extra.chord, extra.reason))
+                                    .small(),
+                            )
+                            .wrap(),
+                        );
+                    }
                 }
                 ui.horizontal(|ui| {
                     let draft = self.drafts.entry(action).or_default();
-                    ui.add(egui::TextEdit::singleline(draft).hint_text("Ctrl+Alt+M").desired_width(140.0))
-                        .labelled_by(label.id)
-                        .on_hover_text(format!("Shortcut for {}", action.label()));
+                    crate::ui::widgets::scroll_on_focus(
+                        ui.add(egui::TextEdit::singleline(draft).hint_text("Ctrl+Alt+M").desired_width(140.0)),
+                    )
+                    .labelled_by(label.id)
+                    .on_hover_text(format!("Shortcut for {}", action.label()));
                     // Short visible text keeps the row inside the card; the accessible
                     // name still says which action the button is for.
-                    let bind = ui.button("Bind");
+                    let bind = crate::ui::widgets::scroll_on_focus(ui.button("Bind"));
                     crate::ui::widgets::set_name(ui, &bind, &format!("Bind {}", action.label()));
                     if bind.on_hover_text(format!("Bind {}", action.label())).clicked() {
                         let mut proposed = bindings.clone();
@@ -549,7 +605,9 @@ impl HotkeyEditor {
                             Some(failure) => self.error = Some(failure.message()),
                         }
                     }
-                    let clear = ui.add_enabled(current != "Off", egui::Button::new("Clear"));
+                    let clear = crate::ui::widgets::scroll_on_focus(
+                        ui.add_enabled(current != "Off", egui::Button::new("Clear")),
+                    );
                     crate::ui::widgets::set_name(ui, &clear, &format!("Clear {}", action.label()));
                     if clear.on_hover_text(format!("Clear {}", action.label())).clicked() {
                         bindings.retain(|b| b.action != action);
@@ -571,21 +629,22 @@ impl HotkeyEditor {
         if !status.failed.is_empty() {
             ui.add(
                 egui::Label::new(format!(
-                    "{} shortcut(s) could not be registered. The others are active. Release the chord in the other app or choose another, then retry.",
+                    "{} shortcut entry(ies) are not active. Valid non-conflicting shortcuts remain active. If another app held a key, release it and click Retry failed shortcuts; use Bind or Clear to fix invalid or duplicate entries.",
                     status.failed.len()
                 ))
                 .wrap(),
             );
-            if ui
-                .add_enabled(!status.pending, egui::Button::new("Retry failed shortcuts"))
-                .on_hover_text("Try to register every shortcut that is not active")
-                .clicked()
-                && let Err(error) = service.configure(bindings, *step)
+            if crate::ui::widgets::scroll_on_focus(
+                ui.add_enabled(!status.pending, egui::Button::new("Retry failed shortcuts")),
+            )
+            .on_hover_text("Try to register every shortcut that is not active")
+            .clicked()
             {
-                self.error = Some(error);
+                retry_clicked = true;
             }
         }
         ui.label(format!("{} active shortcut(s)", status.active.len()));
+        retry_clicked
     }
 }
 
@@ -717,6 +776,47 @@ mod tests {
     }
 
     #[test]
+    fn worker_exits_and_ignores_stale_hotkey_when_request_channel_disconnects() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (events_tx, events_rx) = crossbeam_channel::unbounded();
+        let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+        let status = Arc::new(Mutex::new(SharedStatus::default()));
+        let worker_status = status.clone();
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sink_called = called.clone();
+        let ctx = egui::Context::default();
+        let thread = std::thread::spawn(move || {
+            let mut message = MSG::default();
+            unsafe {
+                let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+            }
+            ready_tx.send(unsafe { GetCurrentThreadId() }).unwrap();
+            run(
+                rx,
+                move |_| sink_called.store(true, std::sync::atomic::Ordering::SeqCst),
+                events_tx,
+                &ctx,
+                &worker_status,
+            );
+        });
+        let thread_id = ready_rx.recv().unwrap();
+        // Drop the sender without sending Request::Shutdown, then post a wakeup/hotkey message.
+        drop(tx);
+        let chord = parse_chord("Ctrl+Alt+Up").unwrap();
+        unsafe {
+            PostThreadMessageW(thread_id, WM_HOTKEY, WPARAM(1), LPARAM(lparam(chord))).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(thread.is_finished(), "worker stayed alive after request channel disconnected");
+        thread.join().unwrap();
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst), "stale hotkey invoked sink after disconnect");
+        assert!(events_rx.try_recv().is_err(), "stale hotkey queued window event after disconnect");
+    }
+
+    #[test]
     #[ignore = "registers real Windows global shortcuts; unregisters before returning"]
     fn registration_reports_conflicts_and_releases_key() {
         let requested = [binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F23")];
@@ -757,10 +857,18 @@ mod tests {
         assert_eq!(ours.bindings().len(), 2);
     }
 
-    /// Presses and releases Ctrl+Alt+F21 through the real input queue.
-    fn press_ctrl_alt_f21() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum InjectionError {
+        BlockedZero,
+        Partial { sent: u32, expected: u32 },
+        NotDelivered,
+    }
+
+    fn try_inject_ctrl_alt_f21_with(
+        mut send_batch: impl FnMut(&[windows::Win32::UI::Input::KeyboardAndMouse::INPUT]) -> u32,
+    ) -> Result<(), InjectionError> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
         };
         let key = |vk: u16, up: bool| INPUT {
             r#type: INPUT_KEYBOARD,
@@ -776,7 +884,340 @@ mod tests {
         };
         let inputs =
             [key(0x11, false), key(0x12, false), key(0x84, false), key(0x84, true), key(0x12, true), key(0x11, true)];
-        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        let expected = inputs.len() as u32;
+        let sent = send_batch(&inputs);
+        if sent == 0 {
+            return Err(InjectionError::BlockedZero);
+        }
+        if sent != expected {
+            // Release any depressed keys if a batch was only partially injected.
+            let releases = [key(0x84, true), key(0x12, true), key(0x11, true)];
+            let _ = send_batch(&releases);
+            return Err(InjectionError::Partial { sent, expected });
+        }
+        Ok(())
+    }
+
+    /// Presses and releases Ctrl+Alt+F21 through the real Windows input queue.
+    /// Never falls back to synthetic `PostThreadMessageW`: if UIPI or desktop state
+    /// blocks `SendInput`, an error is returned so the caller cannot report real
+    /// keyboard delivery when none occurred.
+    fn try_press_ctrl_alt_f21() -> Result<(), InjectionError> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, SendInput};
+        try_inject_ctrl_alt_f21_with(|batch| unsafe { SendInput(batch, std::mem::size_of::<INPUT>() as i32) })
+    }
+
+    struct InjectorGuard {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl InjectorGuard {
+        fn spawn(mut inject: impl FnMut() + Send + 'static) -> Self {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let handle = std::thread::spawn(move || {
+                while !thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    inject();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+            Self { stop, handle: Some(handle) }
+        }
+
+        fn stop_and_join(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    impl Drop for InjectorGuard {
+        fn drop(&mut self) {
+            self.stop_and_join();
+        }
+    }
+
+    fn exercise_shutdown_under_pressure(
+        service: &mut HotkeyService,
+        wait_window: Duration,
+        inject: impl FnMut() + Send + 'static,
+    ) -> Duration {
+        let mut guard = InjectorGuard::spawn(inject);
+        std::thread::sleep(wait_window);
+        assert!(!service.take_events().is_empty(), "the injected chord never reached the service");
+        let started = Instant::now();
+        service.shutdown();
+        let took = started.elapsed();
+        guard.stop_and_join();
+        took
+    }
+
+    fn exercise_real_input_shutdown_under_pressure(
+        service: &mut HotkeyService,
+        wait_window: Duration,
+        mut inject: impl FnMut() -> Result<(), InjectionError> + Send + 'static,
+    ) -> Result<Duration, InjectionError> {
+        let first_err: Arc<Mutex<Option<InjectionError>>> = Arc::new(Mutex::new(None));
+        let err_slot = first_err.clone();
+        let ok_batches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ok_slot = ok_batches.clone();
+        let mut guard = InjectorGuard::spawn(move || match inject() {
+            Ok(()) => {
+                ok_slot.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(e) => {
+                let mut slot = err_slot.lock();
+                if slot.is_none() {
+                    *slot = Some(e);
+                }
+            }
+        });
+        std::thread::sleep(wait_window);
+        // Drop the error mutex before joining: the injector may still need it
+        // to publish another failed batch while shutdown is in progress.
+        let recorded_error = first_err.lock().clone();
+        if let Some(err) = recorded_error {
+            guard.stop_and_join();
+            service.shutdown();
+            return Err(err);
+        }
+        if ok_batches.load(std::sync::atomic::Ordering::SeqCst) == 0 || service.take_events().is_empty() {
+            guard.stop_and_join();
+            service.shutdown();
+            return Err(InjectionError::NotDelivered);
+        }
+        let started = Instant::now();
+        service.shutdown();
+        let took = started.elapsed();
+        guard.stop_and_join();
+        if let Some(err) = first_err.lock().clone() {
+            return Err(err);
+        }
+        Ok(took)
+    }
+
+    #[test]
+    fn injector_guard_stops_and_joins_when_assertion_fails_during_pressure_test() {
+        let mut service = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let alive_in_thread = alive.clone();
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticks_in_thread = ticks.clone();
+
+        struct ThreadLivenessOnExit(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for ThreadLivenessOnExit {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let liveness = Some(ThreadLivenessOnExit(alive_in_thread.clone()));
+            exercise_shutdown_under_pressure(&mut service, Duration::from_millis(25), move || {
+                if liveness.is_some() {
+                    alive_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                let _keep = &liveness;
+                ticks_in_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }));
+        assert!(outcome.is_err(), "no-delivery path must fail the assertion as expected");
+        assert!(ticks.load(std::sync::atomic::Ordering::SeqCst) > 0, "injector must have run before panic");
+        assert!(
+            !alive.load(std::sync::atomic::Ordering::SeqCst),
+            "InjectorGuard Drop must stop and join the injector thread during stack unwinding"
+        );
+        let ticks_after_unwind = ticks.load(std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst),
+            ticks_after_unwind,
+            "injector thread must not continue ticking after unwind"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn real_input_pressure_rejects_zero_and_partial_injection_and_cleans_up_injector() {
+        // 1. Force zero injection through the seam: must report BlockedZero, never claim
+        // real-delivery success, and stop/join the injector thread via InjectorGuard.
+        let mut service_zero = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        let zero_ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let zero_ticks_in_thread = zero_ticks.clone();
+        let res_zero =
+            exercise_real_input_shutdown_under_pressure(&mut service_zero, Duration::from_millis(25), move || {
+                zero_ticks_in_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                try_inject_ctrl_alt_f21_with(|_| 0)
+            });
+        assert_eq!(res_zero, Err(InjectionError::BlockedZero));
+        let stopped_zero = zero_ticks.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(stopped_zero > 0);
+        std::thread::sleep(Duration::from_millis(15));
+        assert_eq!(zero_ticks.load(std::sync::atomic::Ordering::SeqCst), stopped_zero);
+
+        // 2. Force partial injection (2 of 6 events): must issue key-up release cleanup,
+        // report Partial { sent: 2, expected: 6 }, and stop/join the injector thread.
+        let mut service_partial = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        let release_batches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release_batches_in_thread = release_batches.clone();
+        let res_partial =
+            exercise_real_input_shutdown_under_pressure(&mut service_partial, Duration::from_millis(25), move || {
+                let mut call = 0usize;
+                let releases = release_batches_in_thread.clone();
+                try_inject_ctrl_alt_f21_with(|batch| {
+                    call += 1;
+                    if call == 1 {
+                        assert_eq!(batch.len(), 6);
+                        2
+                    } else {
+                        assert_eq!(batch.len(), 3, "partial injection must release F21, Alt, and Ctrl");
+                        releases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        3
+                    }
+                })
+            });
+        assert_eq!(res_partial, Err(InjectionError::Partial { sent: 2, expected: 6 }));
+        assert!(release_batches.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn shutdown_completes_under_posted_hotkey_message_pressure() {
+        let mut service = HotkeyService::start_with(|_| {}, egui::Context::default()).unwrap();
+        service.configure(&[binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23")], 5).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.status().pending {
+            assert!(Instant::now() < deadline, "hotkey worker did not finish configuring");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if service.status().active.is_empty() {
+            // If another process owns Ctrl+Alt+F23, clean up without false failure.
+            service.shutdown();
+            return;
+        }
+        let thread_id = service.thread_id;
+        let took = exercise_shutdown_under_pressure(&mut service, Duration::from_millis(60), move || {
+            let _ = unsafe { PostThreadMessageW(thread_id, WM_HOTKEY, WPARAM(1), LPARAM((0x86 << 16) | 3)) };
+        });
+        assert!(took < Duration::from_millis(1500), "shutdown took {took:?} under posted WM_HOTKEY pressure");
+    }
+
+    #[test]
+    fn editor_presentation_handles_active_invalid_conflicting_duplicate_pending_and_cleared_states() {
+        use crate::settings::Density;
+        use crate::ui::test_support::Harness;
+
+        let harness = Harness::new(Density::Comfortable);
+        let mut editor = HotkeyEditor::default();
+        // Hand-edited settings with:
+        // - valid-first + duplicate-second for VolumeUp (Ctrl+Alt+F23 then Ctrl+Alt+F22),
+        // - invalid-first + valid-second for ToggleWindow (garbage then Ctrl+F1),
+        // - invalid VolumeDown (Ctrl+Alt+nonsense),
+        // - conflicting ToggleOutputMute (Ctrl+Alt+M).
+        let mut bindings = vec![
+            binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F23"),
+            binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F22"),
+            binding(HotkeyAction::ToggleWindow, "garbage"),
+            binding(HotkeyAction::ToggleWindow, "Ctrl+F1"),
+            binding(HotkeyAction::VolumeDown, "Ctrl+Alt+nonsense"),
+            binding(HotkeyAction::ToggleOutputMute, "Ctrl+Alt+M"),
+        ];
+        let mut step = 5_u8;
+        let checked = validate_bindings(&bindings);
+        let mut failed = checked.rejected;
+        failed.push(FailedBinding {
+            action: HotkeyAction::ToggleOutputMute,
+            chord: "Ctrl+Alt+M".into(),
+            reason: "Windows could not register this shortcut; another app may already use it.".into(),
+        });
+        let status = HotkeyStatus {
+            active: vec![
+                binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F23"),
+                binding(HotkeyAction::ToggleWindow, "Ctrl+F1"),
+            ],
+            failed,
+            pending: false,
+            errors: Vec::new(),
+        };
+
+        let frame = harness.run(360.0, 720.0, |ui| {
+            let _ = editor.show_with_status(ui, &mut bindings, &mut step, &status);
+        });
+        let labels: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        // Valid-first duplicate binding (Ctrl+Alt+F23) is shown as header AND draft AND Active.
+        assert!(labels.contains(&"Volume up — Ctrl+Alt+F23"), "primary duplicate must be shown: {labels:?}");
+        assert!(
+            labels.iter().filter(|&&l| l == "Active").count() == 2,
+            "both active bindings (valid-first VolumeUp and invalid-first ToggleWindow) must show Active: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with("Ignored duplicate (Ctrl+Alt+F22):")),
+            "rejected duplicate for the same action must be reported separately: {labels:?}"
+        );
+        // Invalid-first + valid-second (ToggleWindow: garbage then Ctrl+F1) selects Ctrl+F1 as
+        // primary and reports garbage as an ignored duplicate entry.
+        assert!(
+            labels.contains(&"Show / hide mixer — Ctrl+F1"),
+            "retained valid/active binding must be selected even when preceded by an invalid entry: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with("Ignored duplicate (garbage):")),
+            "rejected invalid first entry must still be displayed alongside the active second entry: {labels:?}"
+        );
+        let vol_up_input = frame
+            .widgets
+            .iter()
+            .find(|w| w.role == egui::accesskit::Role::TextInput && w.name == "Volume up — Ctrl+Alt+F23")
+            .expect("Volume up text input");
+        assert_eq!(
+            vol_up_input.value.as_deref(),
+            Some("Ctrl+Alt+F23"),
+            "draft input must initialize with the first (active) binding, not the ignored duplicate"
+        );
+        let toggle_win_input = frame
+            .widgets
+            .iter()
+            .find(|w| w.role == egui::accesskit::Role::TextInput && w.name == "Show / hide mixer — Ctrl+F1")
+            .expect("Show / hide mixer text input");
+        assert_eq!(
+            toggle_win_input.value.as_deref(),
+            Some("Ctrl+F1"),
+            "draft input for invalid-first duplicate must initialize with the retained valid/active binding"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Not active: Use a letter, digit")),
+            "invalid binding reason must be shown: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Not active: Windows could not register this shortcut")),
+            "conflicting binding reason must be shown: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("use Bind or Clear to fix invalid or duplicate entries")),
+            "summary banner must distinguish retryable conflicts from invalid/duplicate entries: {labels:?}"
+        );
+
+        // Pending state shows Registering… and disables Retry.
+        let pending_status =
+            HotkeyStatus { active: Vec::new(), failed: status.failed.clone(), pending: true, errors: Vec::new() };
+        let pending_frame = harness.run(360.0, 720.0, |ui| {
+            let _ = editor.show_with_status(ui, &mut bindings, &mut step, &pending_status);
+        });
+        assert!(pending_frame.widgets.iter().any(|w| w.name == "Registering shortcuts with Windows…"));
+        let retry_btn =
+            pending_frame.widgets.iter().find(|w| w.name == "Retry failed shortcuts").expect("Retry button");
+        assert!(retry_btn.disabled, "Retry button must be disabled while registration is pending");
+
+        // Cleared state disables Clear buttons and shows Off.
+        bindings.clear();
+        let cleared_status = HotkeyStatus::default();
+        let cleared_frame = harness.run(360.0, 720.0, |ui| {
+            let _ = editor.show_with_status(ui, &mut bindings, &mut step, &cleared_status);
+        });
+        let clear_vol_up =
+            cleared_frame.widgets.iter().find(|w| w.name == "Clear Volume up").expect("Clear Volume up button");
+        assert!(clear_vol_up.disabled, "Clear button must be disabled when action is Off");
     }
 
     #[test]
@@ -789,23 +1230,16 @@ mod tests {
             assert!(Instant::now() < deadline, "Ctrl+Alt+F21 could not be registered: {:?}", service.status());
             std::thread::sleep(Duration::from_millis(10));
         }
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let injector = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    press_ctrl_alt_f21();
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            })
-        };
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!service.take_events().is_empty(), "the injected chord never reached the service");
-        let started = Instant::now();
-        service.shutdown();
-        let took = started.elapsed();
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        injector.join().unwrap();
+        let took = exercise_real_input_shutdown_under_pressure(
+            &mut service,
+            Duration::from_millis(300),
+            try_press_ctrl_alt_f21,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "real desktop SendInput injection unavailable or incomplete ({err:?}); run from an unlocked, non-elevated foreground desktop session"
+            )
+        });
         assert!(took < Duration::from_millis(1500), "shutdown took {took:?} under key pressure");
     }
 }

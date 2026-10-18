@@ -19,7 +19,7 @@ Write-Host "Glass Mixer $version"
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 }
-cargo build --release
+cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 # Optional certificate-store signing. Set GLASS_MIXER_SIGN_CERT_SHA1 to the

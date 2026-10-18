@@ -35,7 +35,9 @@ pub fn show(
     ui.label("Save real app volumes and mutes here explicitly. Device volumes and app balance are not included.");
     ui.horizontal(|ui| {
         let label = ui.label("Preset name");
-        ui.text_edit_singleline(&mut editor.name).labelled_by(label.id).on_hover_text("Name for a new preset");
+        crate::ui::widgets::scroll_on_focus(ui.text_edit_singleline(&mut editor.name))
+            .labelled_by(label.id)
+            .on_hover_text("Name for a new preset");
     });
     let blocked = if editor.name.trim().is_empty() {
         Some("Enter a preset name to save.")
@@ -46,7 +48,9 @@ pub fn show(
     } else {
         None
     };
-    let save = ui.add_enabled(blocked.is_none(), egui::Button::new("Save current app volumes"));
+    let save = crate::ui::widgets::scroll_on_focus(
+        ui.add_enabled(blocked.is_none(), egui::Button::new("Save current app volumes")),
+    );
     if let Some(reason) = blocked {
         ui.add(egui::Label::new(egui::RichText::new(reason).small()).wrap());
     }
@@ -61,7 +65,7 @@ pub fn show(
             editor.name.clear();
         }
     }
-    ui.label("Automatic rules are off by default. They only apply once to a newly launched process after enabling the rule. Already-running apps and observed user changes are skipped.");
+    ui.label("Automatic rules are off by default. They apply once to a newly launched process after enabling the rule, and only when its initial audio session is still at 100% and unmuted (so a non-default or Windows-restored level is not overwritten; use Apply now to override). Already-running apps and observed user changes are skipped.");
     let mut delete = None;
     let mut enable = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -69,15 +73,15 @@ pub fn show(
             ui.push_id(index, |ui| {
                 ui.separator();
                 ui.label(egui::RichText::new(&preset.name).strong());
-                ui.horizontal(|ui| {
-                    let apply = ui.button("Apply now");
+                ui.horizontal_wrapped(|ui| {
+                    let apply = crate::ui::widgets::scroll_on_focus(ui.button("Apply now"));
                     apply.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Apply {} now", preset.name))
                     });
                     if apply.clicked() {
                         audio.send(Command::ApplyPreset(preset.clone()));
                     }
-                    let remove = ui.button("Delete preset");
+                    let remove = crate::ui::widgets::scroll_on_focus(ui.button("Delete preset"));
                     remove.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -90,7 +94,8 @@ pub fn show(
                     }
                 });
                 let mut on = preset.apply_on_start;
-                let auto = ui.checkbox(&mut on, "Apply once when saved apps start");
+                let auto =
+                    crate::ui::widgets::scroll_on_focus(ui.checkbox(&mut on, "Apply once when saved apps start"));
                 auto.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::Checkbox,
@@ -107,18 +112,20 @@ pub fn show(
                     }
                 }
                 if preset.apply_on_start {
-                    ui.label("Automatic rule enabled — uncheck to stop applying on future starts.");
+                    ui.label("Automatic rule enabled — applies once to new launches starting at 100% and unmuted (use Apply now to override remembered levels). Uncheck to stop.");
                 }
-                egui::CollapsingHeader::new(format!("{} saved apps", preset.entries.len())).show(ui, |ui| {
-                    for entry in &preset.entries {
-                        ui.label(format!(
-                            "{}: {}%{}",
-                            entry.name,
-                            crate::audio::to_percent(entry.volume),
-                            if entry.muted { ", muted" } else { "" }
-                        ));
-                    }
-                });
+                let collapsed =
+                    egui::CollapsingHeader::new(format!("{} saved apps", preset.entries.len())).show(ui, |ui| {
+                        for entry in &preset.entries {
+                            ui.label(format!(
+                                "{}: {}%{}",
+                                entry.name,
+                                crate::audio::to_percent(entry.volume),
+                                if entry.muted { ", muted" } else { "" }
+                            ));
+                        }
+                    });
+                crate::ui::widgets::scroll_on_focus(collapsed.header_response);
             });
         }
     });
@@ -140,7 +147,7 @@ mod tests {
     use crate::audio::preferences::{PresetEntry, VolumePreset};
     use crate::audio::{AppKey, ServiceStatus};
     use crate::settings::{Density, MIN_WIDTH};
-    use crate::ui::test_support::{Harness, past_right_edge, unnamed};
+    use crate::ui::test_support::{Harness, is_interactive, past_right_edge, unnamed};
 
     fn render(snapshot: &AudioSnapshot) -> (f32, crate::ui::test_support::Frame) {
         let harness = Harness::new(Density::Comfortable);
@@ -166,6 +173,10 @@ mod tests {
         assert!(frame.content_right <= width + 0.5, "content reaches {}", frame.content_right);
         let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
         assert!(names.contains(&"Preset name"), "the name field must be named: {names:?}");
+        assert!(
+            frame.widgets.iter().any(|w| w.name.contains("100% and unmuted")),
+            "automatic rule restriction must be explained in the Presets UI"
+        );
     }
 
     fn preset(name: &str, apps: Vec<AppKey>, auto: bool) -> VolumePreset {
@@ -220,5 +231,81 @@ mod tests {
             "the reason is not shown: {:?}",
             frame.widgets.iter().map(|w| &w.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn keyboard_tab_shift_tab_and_space_keep_focus_visible_in_presets() {
+        for density in [Density::Comfortable, Density::Compact] {
+            for (window_width, height) in [(MIN_WIDTH, 440.0), (480.0, 720.0)] {
+                let harness = Harness::new(density);
+                let width = window_width - 2.0 * harness.look.m.pad;
+                let mut settings = Settings::default();
+                for i in 0..8 {
+                    settings.presets.push(VolumePreset {
+                        name: format!("Preset Number {i}"),
+                        apply_on_start: false,
+                        entries: vec![PresetEntry {
+                            key: AppKey::Exe(format!(r"c:\apps\p_{i}.exe")),
+                            name: format!("App {i}"),
+                            volume: 0.5,
+                            muted: false,
+                        }],
+                    });
+                }
+                let snapshot = AudioSnapshot { status: ServiceStatus::Ok, ..Default::default() };
+                let (mut editor, audio, mut errors) = (PresetEditor::default(), AudioHandle::detached(), Vec::new());
+
+                let _ = harness.run(width, height, |ui| {
+                    show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                });
+
+                let mut reached_last = false;
+                for _ in 0..40 {
+                    let frame = harness.send_key(width, height, egui::Key::Tab, egui::Modifiers::NONE, |ui| {
+                        show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                    });
+                    if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "Presets focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "Apply Preset Number 7 once when saved apps start" {
+                            // Toggle automatic rule with Space.
+                            let _ = harness.send_key(width, height, egui::Key::Space, egui::Modifiers::NONE, |ui| {
+                                show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                            });
+                            assert!(settings.presets[7].apply_on_start);
+                            reached_last = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(reached_last, "Tab traversal in Presets must reach the bottom preset");
+
+                let mut reached_first = false;
+                for _ in 0..40 {
+                    let frame = harness.send_key(width, height, egui::Key::Tab, egui::Modifiers::SHIFT, |ui| {
+                        show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                    });
+                    if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "Presets Shift+Tab focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "Apply Preset Number 0 now" {
+                            reached_first = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(reached_first, "Shift+Tab in Presets must return to the top preset");
+            }
+        }
     }
 }

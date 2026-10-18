@@ -174,46 +174,98 @@ impl VolumePreset {
     }
 }
 
+const MAX_TRACKED_PROCESSES: usize = 1024;
+
 /// Automatic rules are deliberately conservative: only a new process after
-/// arming, a first observation and no observed user volume/mute change qualify.
-pub fn may_apply_at_start(created: Option<u64>, armed: u64, last_seen: Option<u64>, untouched: bool) -> bool {
-    untouched && created.is_some_and(|t| t > armed && last_seen.is_none_or(|last| t > last))
+/// arming, a first observation of that process instance and no observed user
+/// volume/mute change qualify.
+pub fn may_apply_at_start(created: Option<u64>, armed: u64, already_seen: bool, untouched: bool) -> bool {
+    untouched && !already_seen && created.is_some_and(|t| t > armed)
 }
 
-/// Remembers which process instance of each app has already been considered, so an
-/// automatic rule applies at most once per new process.
+/// Identifies a single OS process instance of an application.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProcessInstance {
+    pub key: AppKey,
+    pub pid: u32,
+    pub created: u64,
+}
+
+/// Remembers which process instances have already been considered or adjusted,
+/// so an automatic rule applies at most once per new process without a newer
+/// sibling process suppressing an older one whose first audio session arrives later.
 #[derive(Debug, Default)]
 pub struct StartTracker {
     armed_at: u64,
-    last_started: std::collections::HashMap<AppKey, u64>,
+    seen: std::collections::HashSet<ProcessInstance>,
+    /// Latched when more than `MAX_TRACKED_PROCESSES` distinct un-reclaimed
+    /// process instances are observed without exit reclamation. Live markers are
+    /// never evicted; while saturated, unseen instances are conservatively skipped.
+    saturated: bool,
 }
 
 impl StartTracker {
     pub fn new(armed_at: u64) -> Self {
-        Self { armed_at, last_started: Default::default() }
+        Self { armed_at, seen: Default::default(), saturated: false }
     }
 
     /// Starts over: only processes created after `armed_at` qualify from now on.
     pub fn rearm(&mut self, armed_at: u64) {
         self.armed_at = armed_at;
-        self.last_started.clear();
+        self.seen.clear();
+        self.saturated = false;
     }
 
-    /// The user (or a preset) set this process's levels, so it never qualifies afterwards.
-    pub fn note_intervention(&mut self, key: &AppKey, created: u64) {
-        let last = self.last_started.entry(key.clone()).or_insert(created);
-        *last = (*last).max(created);
-    }
-
-    /// Whether the rule may apply to the process of `key` created at `created`.
-    /// Records the process as seen either way. Call in ascending `created` order
-    /// when several processes of one app appear at once.
-    pub fn observe(&mut self, key: &AppKey, created: u64, untouched: bool) -> bool {
-        let previous = self.last_started.get(key).copied();
-        if previous.is_none_or(|last| created > last) {
-            self.last_started.insert(key.clone(), created);
+    fn record(&mut self, instance: ProcessInstance) -> bool {
+        if instance.pid != 0 {
+            self.seen.retain(|existing| !(existing.pid == instance.pid && existing.created != instance.created));
         }
-        may_apply_at_start(Some(created), self.armed_at, previous, untouched)
+        if self.seen.contains(&instance) {
+            return true;
+        }
+        if self.saturated || self.seen.len() >= MAX_TRACKED_PROCESSES {
+            self.saturated = true;
+            return true;
+        }
+        self.seen.insert(instance);
+        false
+    }
+
+    /// Removes markers for a process that has exited, so retained state stays bounded.
+    pub fn forget_exited_pid(&mut self, pid: u32) {
+        if pid != 0 {
+            self.seen.retain(|existing| existing.pid != pid);
+        }
+    }
+
+    /// The user (or a preset) set this process instance's levels, so it never qualifies afterwards.
+    pub fn note_process_intervention(&mut self, key: &AppKey, pid: u32, created: u64) {
+        if created > self.armed_at {
+            self.record(ProcessInstance { key: key.clone(), pid, created });
+        }
+    }
+
+    /// Convenience wrapper for callers/tests without a distinct PID.
+    pub fn note_intervention(&mut self, key: &AppKey, created: u64) {
+        self.note_process_intervention(key, 0, created);
+    }
+
+    /// Whether the rule may apply to the process instance `(key, pid, created)`.
+    /// Records the process instance as seen if it started after arming.
+    pub fn observe_process(&mut self, key: &AppKey, pid: u32, created: u64, untouched: bool) -> bool {
+        if created <= self.armed_at {
+            if pid != 0 {
+                self.seen.retain(|existing| !(existing.pid == pid && existing.created != created));
+            }
+            return false;
+        }
+        let already_seen = self.record(ProcessInstance { key: key.clone(), pid, created });
+        may_apply_at_start(Some(created), self.armed_at, already_seen, untouched)
+    }
+
+    /// Convenience wrapper for callers/tests that identify a process by `(key, created)`.
+    pub fn observe(&mut self, key: &AppKey, created: u64, untouched: bool) -> bool {
+        self.observe_process(key, 0, created, untouched)
     }
 }
 
@@ -266,11 +318,11 @@ mod tests {
     }
     #[test]
     fn automatic_rules_never_reapply_to_existing_or_modified_processes() {
-        assert!(may_apply_at_start(Some(101), 100, None, true));
-        assert!(!may_apply_at_start(Some(99), 100, None, true));
-        assert!(!may_apply_at_start(Some(101), 100, Some(101), true));
-        assert!(!may_apply_at_start(Some(101), 100, None, false));
-        assert!(!may_apply_at_start(None, 100, None, true));
+        assert!(may_apply_at_start(Some(101), 100, false, true));
+        assert!(!may_apply_at_start(Some(99), 100, false, true));
+        assert!(!may_apply_at_start(Some(101), 100, true, true));
+        assert!(!may_apply_at_start(Some(101), 100, false, false));
+        assert!(!may_apply_at_start(None, 100, false, true));
     }
 
     fn exe(path: &str) -> AppKey {
@@ -281,59 +333,132 @@ mod tests {
     fn a_new_process_is_considered_exactly_once() {
         let mut tracker = StartTracker::new(100);
         let app = exe(r"c:\apps\player.exe");
-        assert!(tracker.observe(&app, 150, true), "first sighting of a process started after arming");
-        assert!(!tracker.observe(&app, 150, true), "the same process is never applied twice");
-        assert!(tracker.observe(&app, 200, true), "a later launch of the same app is a new process");
-        assert!(!tracker.observe(&app, 120, true), "an older process than one already seen is skipped");
+        assert!(tracker.observe_process(&app, 10, 150, true), "first sighting of a process started after arming");
+        assert!(
+            !tracker.observe_process(&app, 10, 150, true),
+            "the same process is never applied twice even if it opens another session"
+        );
+        assert!(tracker.observe_process(&app, 20, 200, true), "a later launch of the same app is a new process");
+        assert!(
+            tracker.observe_process(&app, 30, 120, true),
+            "an older process started after arming whose first audio session arrives later still qualifies"
+        );
+        assert!(!tracker.observe_process(&app, 30, 120, true), "and that older process is also considered only once");
     }
 
     #[test]
     fn processes_that_predate_arming_or_were_touched_never_qualify() {
         let mut tracker = StartTracker::new(100);
         let app = exe(r"c:\apps\player.exe");
-        assert!(!tracker.observe(&app, 90, true), "already running when the rule was armed");
-        assert!(!tracker.observe(&app, 160, false), "its levels were changed before the first look");
-        assert!(!tracker.observe(&app, 160, true), "and a touched process stays skipped");
+        assert!(!tracker.observe_process(&app, 10, 90, true), "already running when the rule was armed");
+        assert!(!tracker.observe_process(&app, 20, 160, false), "its levels were changed before the first look");
+        assert!(!tracker.observe_process(&app, 20, 160, true), "and a touched process stays skipped");
     }
 
     #[test]
     fn apps_are_tracked_independently() {
         let mut tracker = StartTracker::new(100);
         let (a, b) = (exe("a.exe"), AppKey::Package("pkg!app".into()));
-        assert!(tracker.observe(&a, 150, true));
-        assert!(tracker.observe(&b, 150, true), "another app with the same start time is not affected");
+        assert!(tracker.observe_process(&a, 10, 150, true));
+        assert!(tracker.observe_process(&b, 20, 150, true), "another app with the same start time is not affected");
     }
 
     #[test]
     fn an_intervention_blocks_the_rule_for_that_process_only() {
         let mut tracker = StartTracker::new(100);
         let app = exe("a.exe");
-        tracker.note_intervention(&app, 150);
-        assert!(!tracker.observe(&app, 150, true), "a preset or user change was already made to this process");
-        assert!(tracker.observe(&app, 160, true), "the next launch is a new process");
+        tracker.note_process_intervention(&app, 20, 160);
+        assert!(
+            !tracker.observe_process(&app, 20, 160, true),
+            "a preset or user change was already made to this process"
+        );
+        assert!(
+            tracker.observe_process(&app, 10, 150, true),
+            "an older sibling process that had not produced audio yet is not suppressed"
+        );
+        assert!(
+            tracker.observe_process(&app, 30, 160, true),
+            "a sibling process sharing the same timestamp with a different PID is not suppressed"
+        );
     }
 
     #[test]
     fn rearming_forgets_history_and_ignores_older_processes() {
         let mut tracker = StartTracker::new(100);
         let app = exe("a.exe");
-        assert!(tracker.observe(&app, 150, true));
+        assert!(tracker.observe_process(&app, 10, 150, true));
         tracker.rearm(300);
-        assert!(!tracker.observe(&app, 250, true), "started before the new arming time");
-        assert!(tracker.observe(&app, 350, true), "started after it, history cleared");
+        assert!(!tracker.observe_process(&app, 10, 250, true), "started before the new arming time");
+        assert!(tracker.observe_process(&app, 10, 350, true), "started after it, history cleared");
     }
 
     #[test]
-    fn launch_order_decides_which_new_process_is_seen_first() {
-        // The engine sorts same-pass processes oldest first. Judged in that order both qualify...
-        let mut ordered = StartTracker::new(100);
+    fn newer_and_older_processes_qualify_across_passes_and_handle_pid_reuse_and_equal_timestamps() {
         let app = exe("a.exe");
-        assert!(ordered.observe(&app, 150, true));
-        assert!(ordered.observe(&app, 160, true));
-        // ...but judging the newer one first would hide the older one, which is why order matters.
-        let mut reversed = StartTracker::new(100);
-        assert!(reversed.observe(&app, 160, true));
-        assert!(!reversed.observe(&app, 150, true));
+        // Newer-first across separate refreshes: B (160) produces audio before A (150).
+        let mut newer_first = StartTracker::new(100);
+        assert!(newer_first.observe_process(&app, 20, 160, true));
+        assert!(newer_first.observe_process(&app, 10, 150, true));
+        assert!(!newer_first.observe_process(&app, 20, 160, true));
+        assert!(!newer_first.observe_process(&app, 10, 150, true));
+
+        // Equal timestamps with different PIDs both qualify once.
+        let mut same_time = StartTracker::new(100);
+        assert!(same_time.observe_process(&app, 10, 150, true));
+        assert!(same_time.observe_process(&app, 20, 150, true));
+        assert!(!same_time.observe_process(&app, 10, 150, true));
+
+        // PID reuse: PID 10 at t=150 exits and OS reuses PID 10 at t=220.
+        assert!(same_time.observe_process(&app, 10, 220, true));
+        assert!(!same_time.observe_process(&app, 10, 220, true));
+
+        // Lifecycle eviction when a watched process exits.
+        same_time.forget_exited_pid(20);
+        assert!(!same_time.seen.iter().any(|i| i.pid == 20));
+    }
+
+    #[test]
+    fn exceeding_capacity_never_evicts_live_markers_or_re_qualifies_running_processes() {
+        let app = exe("a.exe");
+        let mut tracker = StartTracker::new(100);
+
+        // PID 1 starts at 101 with touched session (untouched = false).
+        assert!(!tracker.observe_process(&app, 1, 101, false));
+        // PID 2 is intervened on before audio observation.
+        tracker.note_process_intervention(&app, 2, 102);
+        // PID 3 qualifies on its initial session (e.g. applied or failed once).
+        assert!(tracker.observe_process(&app, 3, 103, true));
+
+        // Reclaiming confirmed exited processes before saturation keeps capacity open.
+        assert!(tracker.observe_process(&app, 5000, 104, true));
+        tracker.forget_exited_pid(5000);
+
+        // Observe 1,024 additional distinct live process instances without exit reclamation.
+        for offset in 0..(MAX_TRACKED_PROCESSES as u32) {
+            let pid = 10 + offset;
+            let created = 200 + u64::from(offset);
+            let _ = tracker.observe_process(&app, pid, created, true);
+        }
+
+        // Revisiting the oldest live processes (touched, intervened, or recreated session)
+        // must never re-qualify them.
+        assert!(
+            !tracker.observe_process(&app, 1, 101, true),
+            "oldest live touched process must remain ineligible after capacity saturation"
+        );
+        assert!(
+            !tracker.observe_process(&app, 2, 102, true),
+            "oldest live intervened process must remain ineligible after capacity saturation"
+        );
+        assert!(
+            !tracker.observe_process(&app, 3, 103, true),
+            "oldest live process with recreated session must remain ineligible after capacity saturation"
+        );
+        // While saturated, unseen processes are also conservatively skipped.
+        assert!(
+            !tracker.observe_process(&app, 9999, 9999, true),
+            "saturated tracker must conservatively refuse unseen processes rather than evicting live markers"
+        );
     }
 
     #[test]

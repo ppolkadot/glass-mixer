@@ -1,5 +1,99 @@
 # Testing
 
+## Second beta packaging (2026-10-18)
+
+The 0.2.0-beta.2 source includes the follow-up review fixes below and releases
+the shortcut injector's error mutex before joining its worker on failure.
+The local installer and portable archive are produced by `scripts/package.ps1`.
+Hosted CI for this commit is pending a push to `experiments`. Live audio changes,
+physical keyboard injection, Narrator, and installer upgrade from 0.1.0 remain
+unverified.
+
+Fresh checks on `experiments` for beta.2:
+
+- `cargo fmt --check`, PowerShell syntax parsing, and `git diff --check`: passed.
+- `cargo test --locked`: 86 library tests passed, 3 ignored; 3 binary and 1
+  source-encoding test passed; 8 hardware integration tests ignored.
+- `cargo clippy --locked --all-targets -- -D warnings`: passed.
+- `scripts/package.ps1`: passed with `cargo build --release --locked` and Inno
+  Setup 6.7.3; produced both beta.2 artifacts in `dist/`.
+- Windows version resources in the release executable and installer report
+  `0.2.0-beta.2`; the portable archive contains the executable and README.
+- The full native UI Automation checks for both renderers passed during the
+  previous review of the same feature source. They were not rerun after the
+  version change and shortcut test-helper correction.
+
+## Follow-up merge-review verification (2026-10-17, audit worktree on `107a305`)
+
+All checks in this section were run against the uncommitted worktree changes on
+top of commit `107a305` on branch `glass_mixer_audit` (`R1`–`R9` and follow-up
+findings `F1`–`F6`). Hosted GitHub Actions CI run `#38919273079` (`windows-latest`)
+validated committed `107a305` only; the uncommitted worktree changes recorded
+here require a fresh hosted CI run once committed and pushed.
+
+- **Automated checks on the uncommitted worktree:**
+  - `cargo fmt --check`: passed.
+  - PowerShell parser checks across `scripts/*.ps1`: passed.
+  - `cargo clippy --locked --all-targets -- -D warnings`: passed.
+  - `cargo test --locked`: **86 library tests passed** with 3 ignored; **3 binary
+    tests passed**; **1 source-encoding test passed**; 8 hardware audio tests
+    ignored.
+  - `cargo build --release --locked`: passed (version resource `0.2.0-beta.1`,
+    numeric `0.2.0.0`, supports `--renderer=wgpu` in release as well as debug
+    builds).
+  - `git diff --check`: passed.
+- **Native UI Automation checks (`scripts/verify-ui.ps1` and
+  `scripts/verify-ui.ps1 -Renderer wgpu`):** passed under both OpenGL and forced
+  `wgpu`. `scripts/ui-automation.ps1` now strictly requires the `Settings` and
+  `Mixer` navigation buttons to expose `InvokePattern` or `TogglePattern`
+  (throwing instead of skipping if absent; `egui`'s selectable tab buttons
+  expose `TogglePattern` via `accesskit_windows`), verifies Settings toggle
+  descriptions via `UIA_FullDescriptionPropertyId` (`30159`, where
+  `accesskit_windows` maps `Node::set_description`), verifies the client
+  viewport in screen coordinates via `GetClientRect` + `ClientToScreen`, asserts
+  that `Open settings folder` starts off-screen below the Settings viewport and
+  unfocused before `Tab` traversal, checks `PostMessageW` return values for
+  `WM_KEYDOWN`/`WM_KEYUP` (`VK_TAB`), and requires `Open settings folder` both
+  to gain keyboard focus and to scroll upward into the visible client bounds.
+- **Summary of `2026-10-17` review and follow-up coverage (`R1`–`R9`, `F1`–`F6`):**
+  - **Settings migration & backup (`R1`, `F5`, `src/settings.rs`, `src/app.rs`):**
+    `settings.v<N>.backup.json` is written via a `sync_all()`ed `.tmp` file and
+    validated by parsing as `Settings` with `s.version == expected_version`
+    (supporting both schema `1..4` and leniently recovered version `0`). Failed
+    backups retain the source `version` in memory, surface a startup warning
+    through `MixerApp::toast` (reaching hidden-startup tray notifications and
+    extending toast expiry on hidden callbacks), and refuse to overwrite
+    `settings.json` until backup succeeds on a subsequent save.
+  - **Per-process start-rule tracking (`R2`, `F1`, `src/audio/preferences.rs`,
+    `src/audio/engine.rs`):** `StartTracker` tracks `ProcessInstance { key, pid,
+    created }` across multi-instance launches and delayed audio session creation,
+    reclaims confirmed exited PIDs (`forget_exited_pid`) and same-PID creation-time
+    replacements, and latches `saturated = true` at `MAX_TRACKED_PROCESSES`
+    (`1024`) so live markers are never evicted and running processes cannot
+    re-qualify after `1024` newer processes appear.
+  - **Headless settled AccessKit tree & keyboard focus scrolling (`R3`, `R4`, `R5`,
+    `src/ui/test_support.rs`, `src/ui/mixer.rs`, `src/ui/presets.rs`,
+    `src/ui/settings_view.rs`):** `UiHarness` inspects only reachable nodes from
+    the final settled frame's `TreeUpdate`, keeps `TextInput` values separate
+    from accessible names, checks `Link` controls, and verifies `Tab`/`Shift+Tab`
+    focus visibility across `Mixer` (through offline pins and down to the bottom
+    live app row `"Application Number 13 volume"`), `Devices` (including expanded
+    mono/stereo/error states), `Presets`, and `Settings` at `360×440` and
+    `480×720` in both densities.
+  - **Shortcut editor & shutdown pressure (`R6`, `R7`, `F3`, `F4`,
+    `src/platform/hotkeys.rs`):** `primary_chord_for_action` selects the active or
+    retained validated binding when duplicate same-action entries exist (both
+    valid-first/duplicate-second and invalid-first/valid-second).
+    `shutdown_completes_under_posted_hotkey_message_pressure` exercises
+    `PostThreadMessageW(WM_HOTKEY)` pressure during shutdown in normal `cargo
+    test` runs when its global test chord is available; `try_inject_ctrl_alt_f21_with` rejects `0` or partial
+    `SendInput` counts (`InjectionError::BlockedZero` / `Partial`), sends a
+    best-effort `KEYEVENTF_KEYUP` release batch on partial injection without
+    falling back to `PostThreadMessageW`, and is unit-tested alongside RAII
+    `InjectorGuard` unwind cleanup. The `#[ignore]` test
+    `shutdown_completes_while_the_window_shortcut_is_being_pressed` strictly
+    requires real `SendInput` delivery into the desktop input queue.
+
 ## Fallback renderer exit deadlock (F-22) and 0.2.0-beta.1 checks (2026-10-16)
 
 All runs below used the isolated debug profile on the section 4 machine
@@ -97,7 +191,7 @@ be forced in debug builds), and installing over 0.1.0.
   control reached by keyboard inside a scroll area can stay off-screen (programmatic
   focus was observed not to scroll). Real Tab traversal and Narrator were not tested.
 - **Exit hang with the forced wgpu renderer:** found during this work and fixed
-  afterwards (F-22, see the section at the top of this file).
+  afterwards (F-22, see the section above).
 
 ## Shortcut registration and shutdown fixes (audit tasks T-01 and T-02)
 

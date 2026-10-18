@@ -223,6 +223,8 @@ fn lenient_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
 pub enum LoadOutcome {
     /// Settings were read successfully.
     Loaded(Settings),
+    /// Settings were migrated from an older version, but the untouched backup file could not be written.
+    MigratedWithWarning { settings: Settings, warning: String },
     /// No settings file exists yet (first launch).
     FirstRun(Settings),
     /// The file existed but could not be used; defaults are returned.
@@ -233,14 +235,22 @@ impl LoadOutcome {
     pub fn settings(&self) -> &Settings {
         match self {
             LoadOutcome::Loaded(s) | LoadOutcome::FirstRun(s) => s,
-            LoadOutcome::Recovered { settings, .. } => settings,
+            LoadOutcome::MigratedWithWarning { settings, .. } | LoadOutcome::Recovered { settings, .. } => settings,
+        }
+    }
+
+    pub fn warning(&self) -> Option<&str> {
+        match self {
+            LoadOutcome::MigratedWithWarning { warning, .. } => Some(warning),
+            LoadOutcome::Recovered { error, .. } => Some(error),
+            LoadOutcome::Loaded(_) | LoadOutcome::FirstRun(_) => None,
         }
     }
 
     pub fn into_settings(self) -> Settings {
         match self {
             LoadOutcome::Loaded(s) | LoadOutcome::FirstRun(s) => s,
-            LoadOutcome::Recovered { settings, .. } => settings,
+            LoadOutcome::MigratedWithWarning { settings, .. } | LoadOutcome::Recovered { settings, .. } => settings,
         }
     }
 }
@@ -248,11 +258,17 @@ impl LoadOutcome {
 #[derive(Clone, Debug)]
 pub struct SettingsStore {
     path: PathBuf,
+    #[cfg(test)]
+    fail_backup_commit: bool,
 }
 
 impl SettingsStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { path: dir.into().join("settings.json") }
+        Self {
+            path: dir.into().join("settings.json"),
+            #[cfg(test)]
+            fail_backup_commit: false,
+        }
     }
 
     /// `%APPDATA%\GlassMixer` (roaming, per user).
@@ -276,20 +292,66 @@ impl SettingsStore {
         self.path.with_file_name(format!("settings.v{version}.backup.json"))
     }
 
+    fn is_valid_backup_file(path: &Path, expected_version: u32) -> bool {
+        let Ok(meta) = fs::metadata(path) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            return false;
+        };
+        serde_json::from_str::<Settings>(&text).is_ok_and(|s| s.version == expected_version)
+    }
+
     /// Keeps the original text of an older-format file before this version
     /// rewrites it in the current format. Older releases cannot read the new
     /// fields and drop them when they save, so this copy is what a user restores
-    /// after going back to an older release. An existing backup is never
+    /// after going back to an older release. An existing valid backup is never
     /// overwritten: the first copy is the one that matches the old release.
-    fn back_up_before_migration(&self, version: u32, text: &str) {
+    fn back_up_before_migration(&self, version: u32, text: &str) -> io::Result<()> {
         let backup = self.migration_backup_path(version);
-        if backup.exists() {
-            return;
+        if let Ok(meta) = fs::metadata(&backup) {
+            if !meta.is_file() {
+                return Err(io::Error::other(format!(
+                    "backup path {} exists and is not a regular file",
+                    backup.display()
+                )));
+            }
+            if Self::is_valid_backup_file(&backup, version) {
+                return Ok(());
+            }
+            log::warn!(
+                "existing backup {} is incomplete or invalid for version {version}; replacing it",
+                backup.display()
+            );
         }
-        match fs::write(&backup, text) {
-            Ok(()) => log::info!("settings version {version} backed up to {} before migration", backup.display()),
-            Err(e) => log::warn!("couldn't back up version {version} settings before migration: {e}"),
+        if let Some(dir) = backup.parent() {
+            fs::create_dir_all(dir)?;
         }
+        let tmp = backup.with_extension("json.tmp");
+        let write_result = (|| -> io::Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            #[cfg(test)]
+            if self.fail_backup_commit {
+                let partial = &text.as_bytes()[..text.len().min(8)];
+                io::Write::write_all(&mut file, partial)?;
+                file.sync_all()?;
+                return Err(io::Error::other("simulated backup commit failure after partial write"));
+            }
+            io::Write::write_all(&mut file, text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, &backup)
+        })();
+        if let Err(err) = write_result {
+            let _ = fs::remove_file(&tmp);
+            log::warn!("couldn't back up version {version} settings before migration: {err}");
+            return Err(err);
+        }
+        log::info!("settings version {version} backed up to {} before migration", backup.display());
+        Ok(())
     }
 
     pub fn load(&self) -> LoadOutcome {
@@ -299,6 +361,7 @@ impl SettingsStore {
                 return LoadOutcome::FirstRun(Settings::default());
             }
             Err(e) => {
+                log::warn!("couldn't read settings {}: {e}; using defaults", self.path.display());
                 return LoadOutcome::Recovered {
                     settings: Settings::default(),
                     error: format!("Couldn't read settings ({e}). Using defaults."),
@@ -307,17 +370,34 @@ impl SettingsStore {
         };
         match serde_json::from_str::<Settings>(&text) {
             Ok(mut s) => {
-                if s.version < SETTINGS_VERSION {
-                    self.back_up_before_migration(s.version, &text);
-                }
                 s.window = s.window.and_then(WindowGeometry::sanitized);
-                s.version = s.version.max(SETTINGS_VERSION);
-                LoadOutcome::Loaded(s)
+                if s.version < SETTINGS_VERSION {
+                    let old_version = s.version;
+                    match self.back_up_before_migration(old_version, &text) {
+                        Ok(()) => {
+                            s.version = SETTINGS_VERSION;
+                            LoadOutcome::Loaded(s)
+                        }
+                        Err(e) => LoadOutcome::MigratedWithWarning {
+                            settings: s,
+                            warning: format!(
+                                "Preferences were loaded, but the backup copy ({}) could not be created ({e}). The original settings file will not be overwritten until the backup succeeds.",
+                                self.migration_backup_path(old_version).display()
+                            ),
+                        },
+                    }
+                } else {
+                    LoadOutcome::Loaded(s)
+                }
             }
             Err(e) => {
                 // Keep the unreadable file for inspection instead of silently overwriting it.
                 let backup = self.path.with_extension("json.bad");
                 let _ = fs::rename(&self.path, &backup);
+                log::warn!(
+                    "settings file was damaged ({e}); defaults restored and old file kept as {}",
+                    backup.display()
+                );
                 LoadOutcome::Recovered {
                     settings: Settings::default(),
                     error: format!(
@@ -329,15 +409,45 @@ impl SettingsStore {
         }
     }
 
-    /// Writes atomically: a temporary file is written and then renamed over the target.
+    /// Writes atomically: a temporary file is written, synced to disk, and renamed over the target.
+    /// If the existing file on disk uses an older schema version, a valid migration backup is required
+    /// before the original file can be replaced.
     pub fn save(&self, settings: &Settings) -> io::Result<()> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let json = serde_json::to_string_pretty(settings).map_err(io::Error::other)?;
+        if let Ok(existing_text) = fs::read_to_string(&self.path)
+            && let Ok(existing_settings) = serde_json::from_str::<Settings>(&existing_text)
+            && existing_settings.version < SETTINGS_VERSION
+        {
+            self.back_up_before_migration(existing_settings.version, &existing_text)?;
+        } else if settings.version < SETTINGS_VERSION
+            && !Self::is_valid_backup_file(&self.migration_backup_path(settings.version), settings.version)
+        {
+            return Err(io::Error::other(format!(
+                "refusing to overwrite settings before version {} backup ({}) is created",
+                settings.version,
+                self.migration_backup_path(settings.version).display()
+            )));
+        }
+        let mut to_save = settings.clone();
+        if to_save.version < SETTINGS_VERSION {
+            to_save.version = SETTINGS_VERSION;
+        }
+        let json = serde_json::to_string_pretty(&to_save).map_err(io::Error::other)?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        fs::rename(&tmp, &self.path)
+        let write_result = (|| -> io::Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            io::Write::write_all(&mut file, json.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, &self.path)
+        })();
+        if let Err(err) = write_result {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        Ok(())
     }
 }
 
@@ -472,7 +582,10 @@ mod tests {
             let dir = temp_dir(name);
             let store = SettingsStore::new(&dir);
             fs::write(store.path(), text).unwrap();
-            store.load();
+            let outcome = store.load();
+            assert!(outcome.warning().is_none());
+            let loaded = outcome.into_settings();
+            store.save(&loaded).unwrap();
             let backups: Vec<_> = fs::read_dir(&dir)
                 .unwrap()
                 .filter_map(|e| e.ok())
@@ -481,6 +594,66 @@ mod tests {
             assert!(backups.is_empty(), "{name}: unexpected backup {backups:?}");
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn backup_failure_prevents_overwriting_original_until_resolved() {
+        let dir = temp_dir("backup-fail");
+        let store = SettingsStore::new(&dir);
+        fs::write(store.path(), V1_FILE).unwrap();
+        let backup = store.migration_backup_path(1);
+        // 1. A directory at the backup path makes creating the backup file fail.
+        fs::create_dir_all(&backup).unwrap();
+        let outcome = store.load();
+        let warning = outcome.warning().expect("backup failure must surface a warning");
+        assert!(warning.contains("settings.v1.backup.json"), "unexpected warning: {warning}");
+        let loaded = outcome.into_settings();
+        assert_eq!(loaded.version, 1, "schema must not promote before backup is preserved");
+        assert_eq!((loaded.theme, loaded.accent, loaded.density), (ThemeMode::Dark, Accent::Coral, Density::Compact));
+
+        // Saving while the backup path is still obstructed must fail and leave the v1 source untouched.
+        assert!(store.save(&loaded).is_err(), "save must fail while backup is obstructed by a directory");
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), V1_FILE, "original v1 file must remain untouched");
+
+        // 2. Remove the directory obstruction, but simulate a partial write/commit failure.
+        fs::remove_dir_all(&backup).unwrap();
+        let failing_store = SettingsStore { fail_backup_commit: true, ..store.clone() };
+        assert!(failing_store.load().warning().is_some());
+        assert!(failing_store.save(&loaded).is_err(), "simulated partial backup commit failure must block save");
+        assert!(!backup.exists(), "failed partial backup commit must not leave a backup file");
+        assert!(!backup.with_extension("json.tmp").exists(), "temporary backup file must be cleaned up");
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), V1_FILE, "original v1 file must remain untouched");
+
+        // 3. An incomplete/corrupt existing regular file at the backup path is not accepted as a valid backup,
+        // and once writing is unobstructed, retry replaces it with a complete backup and completes migration.
+        fs::write(&backup, "{\"version\":1,").unwrap();
+        assert!(!SettingsStore::is_valid_backup_file(&backup, 1));
+        store.save(&loaded).expect("retry after obstruction removal should back up and save");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), V1_FILE, "complete backup must be created on retry");
+        assert!(fs::read_to_string(store.path()).unwrap().contains("\"version\": 4"));
+        let _ = fs::remove_dir_all(dir);
+
+        // 4. Leniently recovered version-0 file (e.g. malformed `"version": "bad"`) also blocks overwrite
+        // while `settings.v0.backup.json` is obstructed, and retries cleanly once the obstruction is removed.
+        let v0_dir = temp_dir("backup-v0-fail");
+        let v0_store = SettingsStore::new(&v0_dir);
+        let v0_text = r#"{"version":"bad","theme":"dark"}"#;
+        fs::write(v0_store.path(), v0_text).unwrap();
+        let v0_backup = v0_store.migration_backup_path(0);
+        fs::create_dir_all(&v0_backup).unwrap();
+        let v0_outcome = v0_store.load();
+        assert!(v0_outcome.warning().is_some(), "version-0 backup failure must warn");
+        let v0_loaded = v0_outcome.into_settings();
+        assert_eq!(v0_loaded.version, 0);
+        assert_eq!(v0_loaded.theme, ThemeMode::Dark);
+        assert!(v0_store.save(&v0_loaded).is_err(), "save must fail while settings.v0.backup.json is a directory");
+        assert_eq!(fs::read_to_string(v0_store.path()).unwrap(), v0_text, "source must remain untouched");
+        fs::remove_dir_all(&v0_backup).unwrap();
+        v0_store.save(&v0_loaded).expect("removing settings.v0.backup.json obstruction must let save retry");
+        assert_eq!(fs::read_to_string(&v0_backup).unwrap(), v0_text, "v0 backup must preserve original text");
+        assert!(SettingsStore::is_valid_backup_file(&v0_backup, 0));
+        assert!(fs::read_to_string(v0_store.path()).unwrap().contains("\"version\": 4"));
+        let _ = fs::remove_dir_all(v0_dir);
     }
 
     #[test]

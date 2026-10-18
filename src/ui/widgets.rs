@@ -54,7 +54,17 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
 }
 
+pub fn scroll_on_focus(response: Response) -> Response {
+    if response.gained_focus() {
+        response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+    }
+    response
+}
+
 pub fn focus_ring(ui: &Ui, rect: Rect, response: &Response, p: &Palette, radius: u8) {
+    if response.gained_focus() {
+        response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+    }
     if response.has_focus() {
         ui.painter().rect_stroke(
             rect.expand(2.0),

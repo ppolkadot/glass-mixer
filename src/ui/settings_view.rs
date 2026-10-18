@@ -8,7 +8,7 @@ use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode};
-use egui::{Align, Align2, CornerRadius, Key, Layout, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportCommand};
+use egui::{Align, Align2, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, ViewportCommand};
 use std::path::Path;
 
 pub enum Outcome {
@@ -113,7 +113,7 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
         );
     });
     toggle_row(ui, &look, &mut s.show_meters, "Level meters", Some("Show live audio levels under the sliders"));
-    if ui.button("Use recommended window size (480 × 720)").clicked() {
+    if widgets::scroll_on_focus(ui.button("Use recommended window size (480 × 720)")).clicked() {
         ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT)));
     }
 }
@@ -144,14 +144,7 @@ fn swatch(ui: &mut Ui, look: &Look, current: &mut Accent, accent: Accent) {
     } else if response.hovered() {
         painter.circle_stroke(rect.center(), size / 2.0 - 0.5, Stroke::new(1.5, look.p.text_muted));
     }
-    if response.has_focus() {
-        painter.rect_stroke(
-            rect.expand(2.0),
-            CornerRadius::same(14),
-            Stroke::new(2.0, look.p.focus),
-            StrokeKind::Outside,
-        );
-    }
+    widgets::focus_ring(ui, rect, &response, &look.p, 14);
     let label = accent.label();
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, format!("{label} accent"))
@@ -207,7 +200,10 @@ fn behavior(ui: &mut Ui, cx: &mut SettingsCtx) {
 fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
     let look = *cx.look;
     ui.horizontal(|ui| {
-        if ui.button("Refresh audio devices").on_hover_text("Reconnect to all devices and audio sessions").clicked() {
+        if widgets::scroll_on_focus(ui.button("Refresh audio devices"))
+            .on_hover_text("Reconnect to all devices and audio sessions")
+            .clicked()
+        {
             cx.icons.retry_failed();
             cx.audio.send(Command::Refresh);
         }
@@ -240,7 +236,7 @@ fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
         egui::Label::new(RichText::new(cx.settings_path.display().to_string()).small().color(look.p.text_muted)).wrap(),
     );
     if let Some(dir) = dir
-        && ui.button("Open settings folder").clicked()
+        && widgets::scroll_on_focus(ui.button("Open settings folder")).clicked()
     {
         let _ = std::fs::create_dir_all(&dir);
         if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
@@ -328,5 +324,196 @@ mod tests {
         assert!(glass.has_description, "the Glass effect toggle has no description for screen readers");
         let meters = frame.widgets.iter().find(|w| w.name == "Level meters").expect("Level meters toggle");
         assert!(meters.has_description);
+    }
+
+    #[test]
+    fn focused_offscreen_controls_scroll_into_the_settings_viewport() {
+        use crate::ui::test_support::is_interactive;
+
+        for density in [Density::Comfortable, Density::Compact] {
+            for (window_width, height) in [(MIN_WIDTH, 440.0), (480.0, 720.0)] {
+                let harness = Harness::new(density);
+                let look = harness.look;
+                let width = window_width - 2.0 * look.m.pad;
+                let mut service = HotkeyService::start_with(|_| {}, harness.ctx.clone()).unwrap();
+                let (audio, mut icons, mut editor) =
+                    (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+                let (mut settings, mut login, mut errors) = (Settings::default(), LoginState::Disabled, Vec::new());
+                let path = std::path::PathBuf::from(r"C:\Users\Someone\AppData\Roaming\GlassMixer\settings.json");
+
+                let initial = harness.run(width, height, |ui| {
+                    let mut cx = SettingsCtx {
+                        look: &look,
+                        settings: &mut settings,
+                        login: &mut login,
+                        glass: GlassStatus::TransparencyOff,
+                        support: Support::Full,
+                        can_switch_default: true,
+                        audio: &audio,
+                        icons: &mut icons,
+                        settings_path: &path,
+                        hotkeys: Some(&service),
+                        hotkey_editor: &mut editor,
+                        errors: &mut errors,
+                    };
+                    show(ui, &mut cx);
+                });
+                let initial_bottom = initial
+                    .widgets
+                    .iter()
+                    .find(|w| w.name == "Open settings folder")
+                    .and_then(|w| w.bounds)
+                    .expect("Open settings folder bounds")
+                    .max
+                    .y;
+                assert!(
+                    initial_bottom > height,
+                    "expected Open settings folder to start off-screen at {width}x{height} ({density:?}, y={initial_bottom})"
+                );
+
+                // Tab forward to Open settings folder; every focused control must stay inside the viewport.
+                let mut reached_open_folder = false;
+                for _ in 0..45 {
+                    let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::NONE, |ui| {
+                        let mut cx = SettingsCtx {
+                            look: &look,
+                            settings: &mut settings,
+                            login: &mut login,
+                            glass: GlassStatus::TransparencyOff,
+                            support: Support::Full,
+                            can_switch_default: true,
+                            audio: &audio,
+                            icons: &mut icons,
+                            settings_path: &path,
+                            hotkeys: Some(&service),
+                            hotkey_editor: &mut editor,
+                            errors: &mut errors,
+                        };
+                        show(ui, &mut cx);
+                    });
+                    if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "Settings focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "Open settings folder" {
+                            reached_open_folder = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(reached_open_folder, "Tab traversal in Settings must reach Open settings folder");
+
+                // While Open settings folder remains focused, scrolling the wheel upward must not be
+                // snapped back on subsequent frames because scroll_on_focus uses gained_focus().
+                let before_wheel = harness
+                    .run(width, height, |ui| {
+                        let mut cx = SettingsCtx {
+                            look: &look,
+                            settings: &mut settings,
+                            login: &mut login,
+                            glass: GlassStatus::TransparencyOff,
+                            support: Support::Full,
+                            can_switch_default: true,
+                            audio: &audio,
+                            icons: &mut icons,
+                            settings_path: &path,
+                            hotkeys: Some(&service),
+                            hotkey_editor: &mut editor,
+                            errors: &mut errors,
+                        };
+                        show(ui, &mut cx);
+                    })
+                    .widgets
+                    .into_iter()
+                    .find(|w| w.name == "Open settings folder")
+                    .and_then(|w| w.bounds)
+                    .unwrap()
+                    .min
+                    .y;
+                let after_wheel = harness
+                    .run_with_events(
+                        width,
+                        height,
+                        vec![
+                            egui::Event::PointerMoved(egui::pos2(width * 0.5, height * 0.5)),
+                            egui::Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: egui::vec2(0.0, 120.0),
+                                modifiers: egui::Modifiers::NONE,
+                                phase: egui::TouchPhase::Move,
+                            },
+                        ],
+                        |ui| {
+                            let mut cx = SettingsCtx {
+                                look: &look,
+                                settings: &mut settings,
+                                login: &mut login,
+                                glass: GlassStatus::TransparencyOff,
+                                support: Support::Full,
+                                can_switch_default: true,
+                                audio: &audio,
+                                icons: &mut icons,
+                                settings_path: &path,
+                                hotkeys: Some(&service),
+                                hotkey_editor: &mut editor,
+                                errors: &mut errors,
+                            };
+                            show(ui, &mut cx);
+                        },
+                    )
+                    .widgets
+                    .into_iter()
+                    .find(|w| w.name == "Open settings folder")
+                    .and_then(|w| w.bounds)
+                    .unwrap()
+                    .min
+                    .y;
+                assert!(
+                    after_wheel > before_wheel + 20.0,
+                    "manual wheel scroll while focused must not be fought by scroll_on_focus (before={before_wheel}, after={after_wheel})"
+                );
+
+                // Shift+Tab backward all the way to the top Theme control.
+                let mut reached_system_theme = false;
+                for _ in 0..45 {
+                    let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::SHIFT, |ui| {
+                        let mut cx = SettingsCtx {
+                            look: &look,
+                            settings: &mut settings,
+                            login: &mut login,
+                            glass: GlassStatus::TransparencyOff,
+                            support: Support::Full,
+                            can_switch_default: true,
+                            audio: &audio,
+                            icons: &mut icons,
+                            settings_path: &path,
+                            hotkeys: Some(&service),
+                            hotkey_editor: &mut editor,
+                            errors: &mut errors,
+                        };
+                        show(ui, &mut cx);
+                    });
+                    if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
+                        if let Some(b) = widget.bounds {
+                            assert!(
+                                b.min.y >= -1.0 && b.max.y <= height + 1.0,
+                                "Settings Shift+Tab focused control '{}' off-screen at {b:?} in {width}x{height} ({density:?})",
+                                widget.name
+                            );
+                        }
+                        if widget.name == "System" {
+                            reached_system_theme = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(reached_system_theme, "Shift+Tab in Settings must return to the top System theme button");
+                service.shutdown();
+            }
+        }
     }
 }
