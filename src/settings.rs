@@ -8,6 +8,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub const SETTINGS_VERSION: u32 = 4;
@@ -175,8 +179,7 @@ impl Default for Settings {
 }
 
 /// Deserializes a field, falling back to its default when the stored value is
-/// invalid (e.g. an accent name from a newer version), instead of discarding
-/// every other preference.
+/// invalid, so one bad value doesn't discard every other preference.
 fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -219,6 +222,33 @@ fn lenient_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     Ok(serde_json::from_value::<u8>(value).ok().filter(|v| (1..=20).contains(v)).unwrap_or(5))
 }
 
+/// Decodes a settings file: UTF-8 with or without a byte-order mark, or UTF-16
+/// with one, as Notepad and PowerShell write when the file is edited by hand.
+fn decode_text(bytes: &[u8]) -> Result<String, String> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        let (units, odd) = rest.as_chunks::<2>();
+        if !odd.is_empty() {
+            return Err("the UTF-16 text is truncated".to_owned());
+        }
+        String::from_utf16(&units.iter().map(|pair| unit(*pair)).collect::<Vec<_>>())
+            .map_err(|_| "the file is not valid UTF-16 text".to_owned())
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8(rest.to_vec()).map_err(|_| "the file is not valid UTF-8 text".to_owned())
+    } else if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        utf16(rest, u16::from_le_bytes)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        utf16(rest, u16::from_be_bytes)
+    } else {
+        String::from_utf8(bytes.to_vec()).map_err(|_| "the file is not UTF-8 or UTF-16 text".to_owned())
+    }
+}
+
+/// Decodes and parses a settings file.
+fn parse_settings(bytes: &[u8]) -> Result<Settings, String> {
+    serde_json::from_str::<Settings>(&decode_text(bytes)?).map_err(|e| e.to_string())
+}
+
 #[derive(Debug)]
 pub enum LoadOutcome {
     /// Settings were read successfully.
@@ -258,6 +288,9 @@ impl LoadOutcome {
 #[derive(Clone, Debug)]
 pub struct SettingsStore {
     path: PathBuf,
+    /// Shared by renderer/startup clones: fallback defaults must never replace
+    /// preferences that this store failed to read. A successful reload clears it.
+    load_failed: Arc<AtomicBool>,
     #[cfg(test)]
     fail_backup_commit: bool,
 }
@@ -266,6 +299,7 @@ impl SettingsStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             path: dir.into().join("settings.json"),
+            load_failed: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             fail_backup_commit: false,
         }
@@ -299,18 +333,16 @@ impl SettingsStore {
         if !meta.is_file() {
             return false;
         }
-        let Ok(text) = fs::read_to_string(path) else {
+        let Ok(bytes) = fs::read(path) else {
             return false;
         };
-        serde_json::from_str::<Settings>(&text).is_ok_and(|s| s.version == expected_version)
+        parse_settings(&bytes).is_ok_and(|s| s.version == expected_version)
     }
 
-    /// Keeps the original text of an older-format file before this version
-    /// rewrites it in the current format. Older releases cannot read the new
-    /// fields and drop them when they save, so this copy is what a user restores
-    /// after going back to an older release. An existing valid backup is never
-    /// overwritten: the first copy is the one that matches the old release.
-    fn back_up_before_migration(&self, version: u32, text: &str) -> io::Result<()> {
+    /// Copies an older-format file byte for byte before it is rewritten in the
+    /// current format, so it can be restored when going back to an older release.
+    /// An existing valid backup is never overwritten.
+    fn back_up_before_migration(&self, version: u32, original: &[u8]) -> io::Result<()> {
         let backup = self.migration_backup_path(version);
         if let Ok(meta) = fs::metadata(&backup) {
             if !meta.is_file() {
@@ -335,12 +367,12 @@ impl SettingsStore {
             let mut file = fs::File::create(&tmp)?;
             #[cfg(test)]
             if self.fail_backup_commit {
-                let partial = &text.as_bytes()[..text.len().min(8)];
+                let partial = &original[..original.len().min(8)];
                 io::Write::write_all(&mut file, partial)?;
                 file.sync_all()?;
                 return Err(io::Error::other("simulated backup commit failure after partial write"));
             }
-            io::Write::write_all(&mut file, text.as_bytes())?;
+            io::Write::write_all(&mut file, original)?;
             file.sync_all()?;
             drop(file);
             fs::rename(&tmp, &backup)
@@ -354,26 +386,57 @@ impl SettingsStore {
         Ok(())
     }
 
+    /// Preserve damaged input before replacing it, without removing the source.
+    fn back_up_damaged_file(&self, original: &[u8]) -> io::Result<()> {
+        let backup = self.path.with_extension("json.bad");
+        if fs::read(&backup).is_ok_and(|saved| saved == original) {
+            return Ok(());
+        }
+        let tmp = self.path.with_extension("json.bad.tmp");
+        let result = (|| -> io::Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            io::Write::write_all(&mut file, original)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, &backup)?;
+            if fs::read(&backup)? != original {
+                return Err(io::Error::other("the damaged settings backup did not match the original bytes"));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
+    }
+
     pub fn load(&self) -> LoadOutcome {
-        let text = match fs::read_to_string(&self.path) {
-            Ok(t) => t,
+        let bytes = match fs::read(&self.path) {
+            Ok(b) => {
+                self.load_failed.store(false, Ordering::Relaxed);
+                b
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.load_failed.store(false, Ordering::Relaxed);
                 return LoadOutcome::FirstRun(Settings::default());
             }
             Err(e) => {
+                self.load_failed.store(true, Ordering::Relaxed);
                 log::warn!("couldn't read settings {}: {e}; using defaults", self.path.display());
                 return LoadOutcome::Recovered {
                     settings: Settings::default(),
-                    error: format!("Couldn't read settings ({e}). Using defaults."),
+                    error: format!(
+                        "Couldn't read settings ({e}). Using defaults for this session. Saving is disabled until settings can be loaded successfully; restart Glass Mixer after resolving the problem."
+                    ),
                 };
             }
         };
-        match serde_json::from_str::<Settings>(&text) {
+        match parse_settings(&bytes) {
             Ok(mut s) => {
                 s.window = s.window.and_then(WindowGeometry::sanitized);
                 if s.version < SETTINGS_VERSION {
                     let old_version = s.version;
-                    match self.back_up_before_migration(old_version, &text) {
+                    match self.back_up_before_migration(old_version, &bytes) {
                         Ok(()) => {
                             s.version = SETTINGS_VERSION;
                             LoadOutcome::Loaded(s)
@@ -391,37 +454,53 @@ impl SettingsStore {
                 }
             }
             Err(e) => {
-                // Keep the unreadable file for inspection instead of silently overwriting it.
                 let backup = self.path.with_extension("json.bad");
-                let _ = fs::rename(&self.path, &backup);
-                log::warn!(
-                    "settings file was damaged ({e}); defaults restored and old file kept as {}",
-                    backup.display()
-                );
-                LoadOutcome::Recovered {
-                    settings: Settings::default(),
-                    error: format!(
-                        "Settings file was damaged ({e}); defaults restored. The old file was kept as {}.",
+                let preservation = match self.back_up_damaged_file(&bytes) {
+                    Ok(()) => format!("The old file was kept as {}.", backup.display()),
+                    Err(error) => format!(
+                        "The backup copy ({}) could not be created ({error}). The original file is unchanged and will not be overwritten until the backup succeeds.",
                         backup.display()
                     ),
-                }
+                };
+                let error = format!("Settings file was damaged ({e}); using defaults. {preservation}");
+                log::warn!("{error}");
+                LoadOutcome::Recovered { settings: Settings::default(), error }
             }
         }
     }
 
-    /// Writes atomically: a temporary file is written, synced to disk, and renamed over the target.
-    /// If the existing file on disk uses an older schema version, a valid migration backup is required
-    /// before the original file can be replaced.
+    /// Writes atomically through a synced temporary file. An older-format file is
+    /// only replaced once its migration backup exists.
     pub fn save(&self, settings: &Settings) -> io::Result<()> {
+        if self.load_failed.load(Ordering::Relaxed) {
+            return Err(io::Error::other(
+                "refusing to replace settings after a failed load; reload them successfully before saving",
+            ));
+        }
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
-        if let Ok(existing_text) = fs::read_to_string(&self.path)
-            && let Ok(existing_settings) = serde_json::from_str::<Settings>(&existing_text)
-            && existing_settings.version < SETTINGS_VERSION
-        {
-            self.back_up_before_migration(existing_settings.version, &existing_text)?;
-        } else if settings.version < SETTINGS_VERSION
+        let existing = match fs::read(&self.path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            // Locked or access denied: replacing it could destroy preferences that were never loaded.
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("the existing settings file couldn't be read, so it was not replaced ({e})"),
+                ));
+            }
+        };
+        if let Some(existing_bytes) = &existing {
+            match parse_settings(existing_bytes) {
+                Ok(existing_settings) if existing_settings.version < SETTINGS_VERSION => {
+                    self.back_up_before_migration(existing_settings.version, existing_bytes)?;
+                }
+                Ok(_) => {}
+                Err(_) => self.back_up_damaged_file(existing_bytes)?,
+            }
+        }
+        if settings.version < SETTINGS_VERSION
             && !Self::is_valid_backup_file(&self.migration_backup_path(settings.version), settings.version)
         {
             return Err(io::Error::other(format!(
@@ -717,6 +796,145 @@ mod tests {
         assert_eq!(outcome.settings(), &Settings::default());
         assert!(dir.join("settings.json.bad").exists());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn utf16(text: &str, little_endian: bool) -> Vec<u8> {
+        let mut bytes = if little_endian { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+        for unit in text.encode_utf16() {
+            bytes.extend(if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() });
+        }
+        bytes
+    }
+
+    #[test]
+    fn hand_edited_files_with_a_byte_order_mark_or_utf16_load_normally() {
+        let text = r#"{"version":4,"theme":"dark","accent":"teal","show_meters":false}"#;
+        let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+        utf8_bom.extend_from_slice(text.as_bytes());
+        for (name, bytes) in [("utf8-bom", utf8_bom), ("utf16le", utf16(text, true)), ("utf16be", utf16(text, false))] {
+            let dir = temp_dir(name);
+            let store = SettingsStore::new(&dir);
+            fs::write(store.path(), &bytes).unwrap();
+            let outcome = store.load();
+            assert!(matches!(outcome, LoadOutcome::Loaded(_)), "{name}: {outcome:?}");
+            let s = outcome.into_settings();
+            assert_eq!((s.theme, s.accent, s.show_meters), (ThemeMode::Dark, Accent::Teal, false), "{name}");
+            assert!(!dir.join("settings.json.bad").exists(), "{name}: a valid file must not be set aside");
+            // The next save rewrites it as plain UTF-8 that still loads.
+            store.save(&s).unwrap();
+            assert!(fs::read_to_string(store.path()).unwrap().starts_with('{'), "{name}");
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn undecodable_bytes_are_kept_aside_like_damaged_json() {
+        let dir = temp_dir("bad-encoding");
+        let store = SettingsStore::new(&dir);
+        let garbage = [0x7B, 0xC3, 0x28, 0xFF, 0x7D];
+        fs::write(store.path(), garbage).unwrap();
+        let outcome = store.load();
+        assert!(matches!(outcome, LoadOutcome::Recovered { .. }), "{outcome:?}");
+        assert_eq!(fs::read(dir.join("settings.json.bad")).unwrap(), garbage, "the original bytes are kept");
+        let truncated_utf16 = [0xFF, 0xFE, 0x7B];
+        fs::write(store.path(), truncated_utf16).unwrap();
+        assert!(matches!(store.load(), LoadOutcome::Recovered { .. }));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_migration_backup_keeps_the_exact_bytes_of_a_bom_file() {
+        let dir = temp_dir("migrate-bom");
+        let store = SettingsStore::new(&dir);
+        let mut original = vec![0xEF, 0xBB, 0xBF];
+        original.extend_from_slice(V1_FILE.as_bytes());
+        fs::write(store.path(), &original).unwrap();
+        let loaded = store.load().into_settings();
+        assert_eq!((loaded.version, loaded.accent), (SETTINGS_VERSION, Accent::Coral));
+        let backup = store.migration_backup_path(1);
+        assert_eq!(fs::read(&backup).unwrap(), original, "the backup is byte-for-byte the original");
+        assert!(SettingsStore::is_valid_backup_file(&backup, 1), "a BOM backup is still recognised as valid");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_existing_file_that_cannot_be_read_is_never_replaced() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_DELETE: u32 = 0x4;
+        let dir = temp_dir("unreadable");
+        let store = SettingsStore::new(&dir);
+        let original = r#"{"version":4,"theme":"dark","accent":"pink"}"#;
+        fs::write(store.path(), original).unwrap();
+        // Held open without read sharing: reading fails, but a rename over it would succeed.
+        let lock = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_DELETE).open(store.path()).unwrap();
+        let outcome = store.load();
+        assert!(matches!(outcome, LoadOutcome::Recovered { .. }), "{outcome:?}");
+        assert!(store.save(&outcome.into_settings()).is_err(), "save must refuse to replace an unreadable file");
+        drop(lock);
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), original, "the unread original must survive");
+        assert!(!dir.join("settings.json.tmp").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_transient_load_failure_blocks_saves_until_a_successful_reload() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = temp_dir("transient-read-failure");
+        let store = SettingsStore::new(&dir);
+        let original = br#"{"version":4,"theme":"dark","accent":"pink","show_meters":false}"#;
+        fs::write(store.path(), original).unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(4).open(store.path()).unwrap();
+        let outcome = store.load();
+        assert!(matches!(outcome, LoadOutcome::Recovered { .. }));
+        let mut defaults = outcome.into_settings();
+        // Geometry changes can cause a save without any settings interaction.
+        defaults.window = Some(WindowGeometry { x: 40.0, y: 50.0, width: 480.0, height: 720.0 });
+        drop(lock);
+        assert!(store.clone().save(&defaults).is_err(), "a clone must retain failed-load protection after unlocking");
+        assert_eq!(fs::read(store.path()).unwrap(), original);
+        assert!(!dir.join("settings.json.tmp").exists());
+
+        let mut recovered = store.load().into_settings();
+        assert_eq!((recovered.theme, recovered.accent), (ThemeMode::Dark, Accent::Pink));
+        recovered.show_meters = true;
+        store.save(&recovered).expect("successful reload permits intentional changes");
+        assert!(store.load().settings().show_meters);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_damaged_file_backup_blocks_overwrite_and_retries_safely() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for locked in [false, true] {
+            let dir = temp_dir(if locked { "bad-backup-locked" } else { "bad-backup-directory" });
+            let store = SettingsStore::new(&dir);
+            let original = [0x7b, 0xc3, 0x28, 0xff, 0x7d];
+            fs::write(store.path(), original).unwrap();
+            let backup = dir.join("settings.json.bad");
+            let obstruction = if locked {
+                fs::write(&backup, b"previous damaged contents").unwrap();
+                Some(fs::OpenOptions::new().read(true).share_mode(0).open(&backup).unwrap())
+            } else {
+                fs::create_dir(&backup).unwrap();
+                None
+            };
+            let outcome = store.load();
+            let warning = outcome.warning().unwrap();
+            assert!(!warning.contains("old file was kept"), "must not claim a failed backup succeeded: {warning}");
+            let defaults = outcome.into_settings();
+            assert!(store.save(&defaults).is_err(), "save must refuse while backup is obstructed");
+            assert_eq!(fs::read(store.path()).unwrap(), original);
+            drop(obstruction);
+            if locked {
+                fs::remove_file(&backup).unwrap();
+            } else {
+                fs::remove_dir(&backup).unwrap();
+            }
+            store.save(&defaults).expect("retry preserves the original before saving defaults");
+            assert_eq!(fs::read(&backup).unwrap(), original);
+            assert!(matches!(store.load(), LoadOutcome::Loaded(_)));
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

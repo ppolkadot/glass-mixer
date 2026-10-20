@@ -19,15 +19,9 @@ pub mod glyph {
     pub const VOL3: char = '\u{E995}';
     pub const MIC: char = '\u{E720}';
     pub const MIC_OFF: char = '\u{EC54}';
-    pub const SETTINGS: char = '\u{E713}';
     pub const REFRESH: char = '\u{E72C}';
-    pub const SEARCH: char = '\u{E721}';
     pub const BACK: char = '\u{E72B}';
     pub const SPEAKER: char = '\u{E7F5}';
-    pub const CHEVRON_DOWN: char = '\u{E70D}';
-    pub const CHEVRON_UP: char = '\u{E70E}';
-    pub const CLOSE: char = '\u{E711}';
-    pub const INFO: char = '\u{E946}';
     pub const WARNING: char = '\u{E7BA}';
     pub const CHECK: char = '\u{E73E}';
 
@@ -191,7 +185,6 @@ impl<'a> Slider<'a> {
             response.mark_changed();
         }
 
-        // Paint.
         let painter = ui.painter();
         let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
         let fill = if self.muted { p.text_muted.gamma_multiply(0.6) } else { p.accent };

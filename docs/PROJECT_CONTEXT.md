@@ -4,18 +4,19 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-18, on `experiments` (version `0.3.0`, prepared for
-final review and not yet merged or published). The v0.1.0 release record
-remains below; prior beta changes and their verification are in
+Last updated: 2026-10-20 (version `0.4.0`, delivered through
+`experiments`). The v0.1.0 release record
+remains below; later changes and their verification are in
 [CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
-- Release: https://github.com/ppolkadot/glass-mixer/releases/tag/v0.1.0
+- Releases: https://github.com/ppolkadot/glass-mixer/releases
+- [0.4.0 release record](releases/0.4.0.md): downloads, checksums and verification.
 
 Related documents:
 
-- [CHANGELOG.md](../CHANGELOG.md): 0.3.0 release candidate notes and the
-  complete 0.2.0-beta.2 history, including limitations and upgrade guidance.
+- [CHANGELOG.md](../CHANGELOG.md): release notes for every version since
+  0.2.0, including limitations and upgrade guidance.
 - [README.md](../README.md): user-facing features, install, build,
   limitations and troubleshooting.
 - [ARCHITECTURE.md](ARCHITECTURE.md): design and the Windows API strategy,
@@ -43,19 +44,20 @@ Status:
 
 - **v0.1.0 is functional and released.** The core requirements are
   implemented and checked on one Windows 11 machine.
-- **0.3.0 is packaged locally on `experiments`** and carries forward the
-  0.2.0 beta features (independent device controls, sound-property readouts,
-  opt-in global shortcuts, pins, presets, tray notifications and renderer
-  fallback) plus the final review corrections. The beta baseline commits
-  `107a305` and `e47b328` passed hosted Windows CI runs `#38919273079` and
-  `#39094235224`; the review correction commit requires its own hosted run.
-  This release candidate is not merged or published on GitHub.
+- **0.3.0 is released** (GitHub release `v0.3.0`, commit `518cd33`, which
+  passed hosted Windows CI runs `#39106819443` and `#39107297354`). It carries
+  the 0.2.0 beta features: independent device controls, sound-property
+  readouts, opt-in global shortcuts, pins, presets, tray notifications and the
+  renderer fallback.
+- **0.4.0 contains the audit and final review corrections.** These cover
+  software-rendered meters, bounded shutdown, safe settings recovery and
+  per-installation exit handling (see [CHANGELOG.md](../CHANGELOG.md)).
 - On both versions, Windows 10, microphones, switching between several
   outputs, hot-plug and sleep/resume have **not** been tested (no suitable
   hardware or OS was available). Section 10 lists the remaining gaps and
   section 11 the risks.
 
-The table below records the published v0.1.0 build. The 0.3.0 release
+The table below records the published v0.1.0 build. Since 0.2.0 the release
 executable is about 15.8 MB after adding wgpu (8,442,880 bytes for the
 glow-only v0.1.0 exe); exact numbers are in [CHANGELOG.md](../CHANGELOG.md).
 
@@ -104,10 +106,6 @@ Follow-up requests in the same session:
    owner's choice and MIT-licensed by the owner's choice. It is public now.
 2. "Create a doc that summarizes everything about the project …, add it to
    the repo and commit it." That is this file.
-
-An earlier, unrelated task in the same session fixed malformed JSON (a
-trailing comma) in the user's Claude Code `~/.claude/settings.json`. It
-isn't part of the app.
 
 ---
 
@@ -560,7 +558,7 @@ widget's accessible name and bounds.
 
 | Constant | Value |
 | --- | --- |
-| Meter polling | 33 ms, only while the window is visible and meters are on |
+| Meter polling | 33 ms, only while the window is visible and meters are on; off with a software renderer |
 | UI value hold after a slider moves | 450 ms |
 | Engine rebuild backoff | 250 ms, doubling to 30 s |
 | Rebuild delay after resume | 1.5 s |
@@ -886,8 +884,11 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
    window isn't found, so the second launch exits silently.
 6. **Portable copies fight over launch at login.** `repair_path_if_enabled`
    re-points the Run key to whichever copy started last.
-7. **The uninstaller kills every running `glass-mixer.exe`**
-    (`taskkill /IM … /F`), including a separate portable copy.
+7. **Uninstall stops only the installed copy.** The uninstaller runs
+    `glass-mixer.exe --exit`, which asks the copy running from the install
+    folder to exit cleanly and terminates it only if it hasn't exited after
+    10 seconds. A portable copy elsewhere keeps running. (Before this, the
+    uninstaller ran `taskkill /IM glass-mixer.exe /F`.)
 8. **Device names can repeat.** Two devices with the same friendly name
     are indistinguishable in the drop-down.
 9. **Legacy positions can be ambiguous.** A version-1 logical position

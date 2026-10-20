@@ -49,3 +49,32 @@ jobs:
         run: cargo test --locked
       - name: Release build
         run: cargo build --release --locked
+      - name: Third-party notices
+        shell: pwsh
+        run: ./scripts/third-party-notices.ps1 -OutFile target/THIRD-PARTY-NOTICES.txt
+
+  # The oldest Rust that Cargo.toml's `rust-version` promises must still build it.
+  msrv:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+      - name: Check with Rust 1.95
+        run: cargo check --locked --all-targets
+
+  # RustSec advisories for everything in Cargo.lock. Fails on vulnerabilities;
+  # unmaintained or yanked crates are reported as warnings.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies
+        run: cargo audit

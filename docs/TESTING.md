@@ -1,5 +1,93 @@
 # Testing
 
+## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `41f656d`)
+
+The three review findings have focused regression coverage. New tests first
+failed against the unchanged implementation, then passed with the corrections:
+
+- A missing exit event or a listener removed during shutdown no longer bypasses
+  waiting on a running process. Process discovery also finds copies without a
+  main window, and an opened handle is checked against the executable path
+  before termination. A regression supplies a PID for another executable and
+  verifies that copy survives.
+- A failed settings load blocks saves across store clones even after a
+  temporary read lock is released, including a geometry-only save. Successfully
+  reloading the original preferences allows intentional changes to be saved.
+- Directory and sharing-lock obstructions at `settings.json.bad` produce an
+  accurate warning and prevent overwriting the original. Removing the
+  obstruction allows a retry that verifies the original bytes in the backup.
+
+Fresh local checks passed: formatting, Clippy with warnings denied, and
+`cargo test --locked` (112 library tests, 3 binary tests and 1 encoding test
+passed; 3 desktop-shortcut and 8 hardware tests ignored). The first full-suite
+run exposed interference between parallel test children sharing a filename;
+the fixtures now use separate names per test while retaining explicit
+same-name/different-folder cases. The full-suite rerun passed.
+
+A live isolated `--exit` smoke check passed for OpenGL and wgpu, both visible
+and `--minimized`: helper and app returned exit code 0 with normal shutdown
+markers, while a second copy in another folder kept running. Its separate
+helper then shut that copy down cleanly too. The independent correction review
+found no remaining merge-blocking issue.
+
+`scripts/package.ps1` passed: the optimized executable, portable ZIP and Inno
+Setup 6.7.3 installer were rebuilt. Both executables report product version
+`0.4.0`; the ZIP includes the README, LICENSE and third-party notices alongside
+the executable. PowerShell syntax and diff whitespace checks also passed.
+
+Local Rust checks used 1.99.1. Release publication is gated on hosted Windows
+checks, the Rust 1.95 minimum-version check, and dependency audit for the final
+source. The exact hosted runs are linked from the GitHub Release; the earlier
+run for `41f656d` covers only the audit baseline. Package hashes are in the
+[0.4.0 release record](releases/0.4.0.md).
+
+Not run in this correction pass: the installed upgrade/uninstall flow,
+Windows 10, and the hardware audio matrix. The live exit matrix checks process
+handling but does not replace an installed upgrade/uninstall test.
+
+## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
+
+Fixes for meters under software rendering, the unbounded icon-thread join, settings file
+encodings, unfiltered endpoint property notifications, and the
+hardening/compliance items (uninstaller `--exit`, license notices, full
+`explorer.exe` path, CI). Run on the machine in `PROJECT_CONTEXT.md` section 4
+(it now also has a headphone output and a microphone).
+
+- `cargo fmt --check`, PowerShell syntax parsing, and
+  `cargo clippy --locked --all-targets -- -D warnings`: passed.
+- `cargo test --locked`: 106 library tests passed (16 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 8 hardware tests ignored. New tests
+  cover pausing meters under software rendering, a stuck icon lookup (shutdown returns within the 2 s limit
+  and queued lookups are dropped), UTF-8 BOM / UTF-16 LE / UTF-16 BE settings,
+  undecodable bytes, byte-exact migration backups, refusal to replace a settings
+  file another program holds open without read sharing, the property filter,
+  per-path exit events, stale exit signals, termination of a copy that ignores
+  `--exit`, and the absolute `explorer.exe` path. Temporarily reverting each
+  fix made its tests fail.
+- `cargo +1.95 check --locked --all-targets`: passed. `cargo audit`: no
+  vulnerabilities; three unmaintained warnings for Linux-only `zbus` crates
+  that are not in the Windows build.
+- `scripts/lifecycle.ps1` with OpenGL and `-Renderer wgpu`: passed.
+- Live `--exit` against an isolated debug instance (visible, and hidden with
+  `--minimized`): the instance logged "exit requested by another process",
+  completed its normal shutdown with exit code 0 in about 1 s, and the
+  separately installed Glass Mixer kept running. With nothing running from
+  that path, `--exit` returned immediately with code 0.
+- `scripts/third-party-notices.ps1`: 170 crates, 125 distinct license texts,
+  including the egui font licenses. ISCC 6.7.3 compiled the installer with the
+  new files and `[UninstallRun]` entry. The installer and uninstaller were not
+  run, to avoid touching the installed copy.
+- CPU, release build, an isolated copy, a browser playing audio (per process).
+  With graphics acceleration, meters keep their full 30 Hz rate, so OpenGL is
+  unchanged (700–1,344 ms per 5 s on this machine's 2010-era GPU, with meters
+  on). With the wgpu fallback on WARP (software), meters on used
+  19,700–20,000 ms per 5 s (all four cores); with meters paused, the same build
+  measured 141–328 ms per 4 s. Hidden stays at 0 ms on both renderers.
+
+- Not run: the installed upgrade and uninstall flow, hot-plug of a device whose
+  name changes (covered by the property filter's name keys, not exercised
+  live), and Windows 10.
+
 ## 0.3.0 release-candidate verification (2026-10-18)
 
 The 0.3.0 version/resource update is prepared on `experiments`. Fresh local
@@ -13,7 +101,8 @@ Setup 6.7.3 produced both packages. The executable and installer report
 product version `0.3.0`; the portable archive contains the executable and
 README. Package hashes are in [`docs/releases/0.3.0.md`](releases/0.3.0.md).
 
-- [ ] Hosted Windows CI for the exact 0.3.0 commit.
+- [x] Hosted Windows CI for the exact 0.3.0 commit (`518cd33`): runs
+  `#39106819443` (`experiments`) and `#39107297354` (`main`) passed.
 - Not run for this release candidate: live audio mutations, installer upgrade
   from 0.1.0, physical keyboard injection, Narrator, Windows 10, and varied
   hardware. Earlier beta results remain below.

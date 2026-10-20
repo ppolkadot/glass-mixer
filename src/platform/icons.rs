@@ -19,8 +19,12 @@ use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::JoinHandle,
+    time::Duration,
 };
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
@@ -36,6 +40,10 @@ use windows::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx
 use windows::core::{HSTRING, Interface};
 
 pub type IconKey = (AppKey, u32);
+
+/// How long shutdown waits for the worker before detaching it. A Shell lookup
+/// can block for a long time, for example on an offline network share.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Default)]
 pub struct IconResult {
@@ -64,7 +72,10 @@ pub struct IconService {
     failed: HashSet<IconKey>,
     active: HashSet<AppKey>,
     pixel_size: Option<u32>,
-    thread: Option<JoinHandle<()>>,
+    /// The worker and a channel that closes when it has finished.
+    thread: Option<(JoinHandle<()>, Receiver<()>)>,
+    /// Tells the worker to drop queued lookups once shutdown has begun.
+    stop: Arc<AtomicBool>,
 }
 
 impl IconService {
@@ -79,16 +90,35 @@ impl IconService {
             active: HashSet::new(),
             pixel_size: None,
             thread: None,
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// `on_ready` is called from the worker thread whenever a result is available.
     pub fn start(on_ready: impl Fn() + Send + 'static) -> Self {
+        Self::start_with(on_ready, resolve)
+    }
+
+    /// Like `start`, with the lookup supplied by the caller.
+    fn start_with(
+        on_ready: impl Fn() + Send + 'static,
+        resolve: impl Fn(&Request) -> IconResult + Send + 'static,
+    ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded::<WorkerRequest>();
         let ready = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
         let thread = {
             let ready = ready.clone();
-            std::thread::Builder::new().name("icon-resolver".into()).spawn(move || worker(rx, ready, on_ready)).ok()
+            let stop = stop.clone();
+            std::thread::Builder::new()
+                .name("icon-resolver".into())
+                .spawn(move || {
+                    worker(rx, ready, on_ready, &stop, resolve);
+                    let _ = done_tx.send(());
+                })
+                .ok()
+                .map(|handle| (handle, done_rx))
         };
         Self {
             tx: Some(tx),
@@ -98,6 +128,7 @@ impl IconService {
             active: HashSet::new(),
             pixel_size: None,
             thread,
+            stop,
         }
     }
 
@@ -178,10 +209,23 @@ impl IconService {
         }
     }
 
+    /// Stops the worker, detaching it if it hasn't finished within `SHUTDOWN_WAIT`.
     pub fn shutdown(&mut self) {
-        self.tx = None; // closes the channel; the worker exits
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        self.stop.store(true, Ordering::Relaxed);
+        self.tx = None; // closes the channel; the worker exits after its current lookup
+        let Some((handle, done)) = self.thread.take() else {
+            return;
+        };
+        match done.recv_timeout(SHUTDOWN_WAIT) {
+            // `Disconnected` means the worker ended without signalling (it panicked).
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                if handle.join().is_err() {
+                    log::error!("icon thread panicked");
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                log::warn!("icon thread did not stop within {SHUTDOWN_WAIT:?}; detaching it");
+            }
         }
     }
 }
@@ -192,10 +236,20 @@ impl Drop for IconService {
     }
 }
 
-fn worker(rx: Receiver<WorkerRequest>, ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>, on_ready: impl Fn()) {
+fn worker(
+    rx: Receiver<WorkerRequest>,
+    ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>,
+    on_ready: impl Fn(),
+    stop: &AtomicBool,
+    resolve: impl Fn(&Request) -> IconResult,
+) {
     let _com = ComGuard::apartment();
     let mut cache: HashMap<IconKey, IconResult> = HashMap::new();
     for message in rx {
+        // Requests still queued at shutdown are dropped.
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let req = match message {
             WorkerRequest::Resolve(req) => req,
             WorkerRequest::InvalidateFailed(key) => {
@@ -383,6 +437,7 @@ mod tests {
             active: HashSet::new(),
             pixel_size: None,
             thread: None,
+            stop: Arc::new(AtomicBool::new(false)),
         };
         service.requested.insert(icon_key.clone());
         service.failed.insert(icon_key.clone());
@@ -408,6 +463,7 @@ mod tests {
             active: HashSet::new(),
             pixel_size: None,
             thread: None,
+            stop: Arc::new(AtomicBool::new(false)),
         };
         service.sync_live_apps([key.clone()]);
         service.sync_live_apps([]);
@@ -415,6 +471,61 @@ mod tests {
         service.requested.insert(icon_key.clone());
         service.prepare_pixel_size(42);
         assert!(!service.requested.contains(&icon_key));
+    }
+
+    fn app(exe: &str) -> AppEntry {
+        AppEntry {
+            key: AppKey::Exe(exe.into()),
+            name: exe.into(),
+            exe_path: Some(PathBuf::from(exe)),
+            aumid: None,
+            icon_resource: None,
+            volume: 1.0,
+            muted: false,
+            activity: crate::audio::Activity::Idle,
+            session_count: 1,
+            balance: None,
+        }
+    }
+
+    #[test]
+    fn idle_shutdown_is_prompt() {
+        let mut service = IconService::start_with(|| {}, |_| IconResult::default());
+        let started = std::time::Instant::now();
+        service.shutdown();
+        assert!(started.elapsed() < Duration::from_millis(500), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn shutdown_detaches_a_stuck_lookup_and_drops_queued_requests() {
+        use std::sync::atomic::AtomicUsize;
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(0);
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let counter = lookups.clone();
+        let mut service = IconService::start_with(
+            || {},
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = entered_tx.try_send(());
+                // Blocks like a Shell call on an offline network share.
+                let _ = release_rx.recv();
+                IconResult::default()
+            },
+        );
+        service.request(&app(r"\\offline\share\a.exe"), 28);
+        service.request(&app(r"\\offline\share\b.exe"), 28);
+        entered_rx.recv_timeout(Duration::from_secs(5)).expect("the first lookup should start");
+
+        let started = std::time::Instant::now();
+        service.shutdown();
+        let took = started.elapsed();
+        assert!(took < SHUTDOWN_WAIT + Duration::from_secs(1), "shutdown hung for {took:?}");
+
+        // Release the stuck lookup; the queued request must not run afterwards.
+        drop(release_tx);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(lookups.load(Ordering::SeqCst), 1, "a queued lookup ran after shutdown");
     }
 
     #[test]

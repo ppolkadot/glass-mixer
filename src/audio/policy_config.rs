@@ -1,11 +1,9 @@
 //! Default-device switching.
 //!
-//! Windows has no public API for changing the default audio endpoint. Like
-//! EarTrumpet, SoundSwitch and other mixers, we use the undocumented
-//! `IPolicyConfig` interface implemented by `CPolicyConfigClient`, which is what
-//! the Sound control panel itself uses. It has been stable since Windows 7, but
-//! is not guaranteed: if creating it fails, switching is reported as unavailable
-//! instead of failing silently.
+//! Windows has no public API for changing the default audio endpoint, so this
+//! uses the undocumented `IPolicyConfig` interface (`CPolicyConfigClient`) that
+//! the Sound control panel uses. If it can't be created, switching is reported
+//! as unavailable.
 #![allow(non_snake_case, clippy::upper_case_acronyms)]
 
 use std::ffi::c_void;
