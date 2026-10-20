@@ -1,5 +1,50 @@
 # Testing
 
+## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `41f656d`)
+
+The three review findings have focused regression coverage. New tests first
+failed against the unchanged implementation, then passed with the corrections:
+
+- A missing exit event or a listener removed during shutdown no longer bypasses
+  waiting on a running process. Process discovery also finds copies without a
+  main window, and an opened handle is checked against the executable path
+  before termination. A regression supplies a PID for another executable and
+  verifies that copy survives.
+- A failed settings load blocks saves across store clones even after a
+  temporary read lock is released, including a geometry-only save. Successfully
+  reloading the original preferences allows intentional changes to be saved.
+- Directory and sharing-lock obstructions at `settings.json.bad` produce an
+  accurate warning and prevent overwriting the original. Removing the
+  obstruction allows a retry that verifies the original bytes in the backup.
+
+Fresh local checks passed: formatting, Clippy with warnings denied, and
+`cargo test --locked` (112 library tests, 3 binary tests and 1 encoding test
+passed; 3 desktop-shortcut and 8 hardware tests ignored). The first full-suite
+run exposed interference between parallel test children sharing a filename;
+the fixtures now use separate names per test while retaining explicit
+same-name/different-folder cases. The full-suite rerun passed.
+
+A live isolated `--exit` smoke check passed for OpenGL and wgpu, both visible
+and `--minimized`: helper and app returned exit code 0 with normal shutdown
+markers, while a second copy in another folder kept running. Its separate
+helper then shut that copy down cleanly too. The independent correction review
+found no remaining merge-blocking issue.
+
+`scripts/package.ps1` passed: the optimized executable, portable ZIP and Inno
+Setup 6.7.3 installer were rebuilt. Both executables report product version
+`0.4.0`; the ZIP includes the README, LICENSE and third-party notices alongside
+the executable. PowerShell syntax and diff whitespace checks also passed.
+
+Local Rust checks used 1.99.1. Release publication is gated on hosted Windows
+checks, the Rust 1.95 minimum-version check, and dependency audit for the final
+source. The exact hosted runs are linked from the GitHub Release; the earlier
+run for `41f656d` covers only the audit baseline. Package hashes are in the
+[0.4.0 release record](releases/0.4.0.md).
+
+Not run in this correction pass: the installed upgrade/uninstall flow,
+Windows 10, and the hardware audio matrix. The live exit matrix checks process
+handling but does not replace an installed upgrade/uninstall test.
+
 ## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
 
 Fixes for meters under software rendering, the unbounded icon-thread join, settings file
