@@ -4,14 +4,14 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-10-20 (version `0.4.0`, prepared on
-`fix/audit-findings` and not yet published). The v0.1.0 release record
+Last updated: 2026-10-20 (version `0.4.0`, delivered through
+`experiments`). The v0.1.0 release record
 remains below; later changes and their verification are in
 [CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
-- Releases: https://github.com/ppolkadot/glass-mixer/releases (v0.1.0 and
-  v0.3.0 are published)
+- Releases: https://github.com/ppolkadot/glass-mixer/releases
+- [0.4.0 release record](releases/0.4.0.md): downloads, checksums and verification.
 
 Related documents:
 
@@ -49,8 +49,9 @@ Status:
   the 0.2.0 beta features: independent device controls, sound-property
   readouts, opt-in global shortcuts, pins, presets, tray notifications and the
   renderer fallback.
-- **0.4.0 is prepared and not yet published.** It contains the fixes from the
-  2026-10-20 audit (see [CHANGELOG.md](../CHANGELOG.md)).
+- **0.4.0 contains the audit and final review corrections.** These cover
+  software-rendered meters, bounded shutdown, safe settings recovery and
+  per-installation exit handling (see [CHANGELOG.md](../CHANGELOG.md)).
 - On both versions, Windows 10, microphones, switching between several
   outputs, hot-plug and sleep/resume have **not** been tested (no suitable
   hardware or OS was available). Section 10 lists the remaining gaps and

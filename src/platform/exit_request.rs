@@ -8,11 +8,13 @@
 use std::ffi::c_void;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::System::Threading::{
-    CreateEventW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    RegisterWaitForSingleObject, ResetEvent, SetEvent, TerminateProcess, UnregisterWaitEx, WT_EXECUTEONLYONCE,
-    WaitForSingleObject,
+    CreateEventW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, RegisterWaitForSingleObject, ResetEvent, SetEvent, TerminateProcess,
+    UnregisterWaitEx, WT_EXECUTEONLYONCE, WaitForSingleObject,
 };
 use windows::core::HSTRING;
 
@@ -117,7 +119,13 @@ pub enum ExitOutcome {
 /// Asks the copy running from this executable's path to exit and waits for it.
 pub fn request_exit_and_wait(wait: Duration) -> ExitOutcome {
     match std::env::current_exe() {
-        Ok(exe) => request_exit_for(&exe, wait, &super::window::instance_pids(&exe)),
+        Ok(exe) => match super::window::instance_pids(&exe) {
+            Ok(pids) => request_exit_for(&exe, wait, &pids),
+            Err(e) => {
+                log::error!("--exit: {e}");
+                ExitOutcome::StillRunning
+            }
+        },
         Err(e) => {
             log::warn!("--exit: couldn't determine the executable path: {e}");
             ExitOutcome::StillRunning
@@ -126,42 +134,66 @@ pub fn request_exit_and_wait(wait: Duration) -> ExitOutcome {
 }
 
 fn request_exit_for(exe: &Path, wait: Duration, pids: &[u32]) -> ExitOutcome {
-    let name = HSTRING::from(event_name(exe));
-    let Ok(event) = (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &name) }) else {
-        return ExitOutcome::NotRunning;
-    };
     // Open the processes before signalling, so a fast exit can't be missed.
-    let processes: Vec<HANDLE> = pids
-        .iter()
-        .filter_map(|&pid| unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid) }.ok())
-        .collect();
-    let signalled = unsafe { SetEvent(event) };
-    unsafe {
-        let _ = CloseHandle(event);
+    let mut processes = Vec::new();
+    let mut outcome = if pids.is_empty() { ExitOutcome::NotRunning } else { ExitOutcome::Exited };
+    for &pid in pids {
+        let rights = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+        let opened = unsafe { OpenProcess(rights | PROCESS_TERMINATE, false, pid) }
+            .or_else(|_| unsafe { OpenProcess(rights, false, pid) });
+        match opened {
+            Ok(handle) => match super::window::query_process_image_path(handle) {
+                Ok(image) if super::window::same_executable(&image, exe) => processes.push(handle),
+                result => {
+                    if let Err(e) = result {
+                        log::error!("--exit: couldn't verify process {pid}: {e}");
+                        outcome = ExitOutcome::StillRunning;
+                    }
+                    unsafe {
+                        let _ = CloseHandle(handle);
+                    }
+                }
+            },
+            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => {} // Already exited.
+            Err(e) => {
+                log::error!("--exit: couldn't open process {pid}: {e}");
+                outcome = ExitOutcome::StillRunning;
+            }
+        }
     }
-    if let Err(e) = signalled {
-        log::warn!("--exit: couldn't signal the running copy: {e}");
+    // A listener may already have been dropped while shutdown is still in
+    // progress. Its absence never bypasses waiting on the target processes.
+    let name = HSTRING::from(event_name(exe));
+    if let Ok(event) = unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &name) } {
+        if let Err(e) = unsafe { SetEvent(event) } {
+            log::warn!("--exit: couldn't signal the running copy: {e}");
+        }
+        unsafe {
+            let _ = CloseHandle(event);
+        }
     }
     let deadline = Instant::now() + wait;
-    let mut outcome = ExitOutcome::Exited;
     for process in processes {
         let left = deadline.saturating_duration_since(Instant::now());
-        let millis = u32::try_from(left.as_millis()).unwrap_or(u32::MAX);
-        if unsafe { WaitForSingleObject(process, millis) } != WAIT_OBJECT_0 {
-            log::warn!("--exit: a running copy did not exit within {wait:?}; terminating it");
-            let terminated = unsafe { TerminateProcess(process, 1) };
-            // Termination is asynchronous; the uninstaller deletes the file next.
-            unsafe {
-                let _ = WaitForSingleObject(process, 2000);
-            }
-            outcome = match terminated {
-                Ok(()) if outcome != ExitOutcome::StillRunning => ExitOutcome::Terminated,
-                Ok(()) => outcome,
-                Err(e) => {
-                    log::error!("--exit: couldn't terminate the running copy: {e}");
-                    ExitOutcome::StillRunning
+        let millis = left.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+        match unsafe { WaitForSingleObject(process, millis) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => {
+                log::warn!("--exit: a running copy did not exit within {wait:?}; terminating it");
+                let terminated = unsafe { TerminateProcess(process, 1) };
+                // Termination is asynchronous. Success requires confirmed exit,
+                // including when it raced a clean exit and TerminateProcess failed.
+                if unsafe { WaitForSingleObject(process, 2000) } != WAIT_OBJECT_0 {
+                    log::error!("--exit: process exit was not confirmed: {terminated:?}");
+                    outcome = ExitOutcome::StillRunning;
+                } else if terminated.is_ok() && outcome != ExitOutcome::StillRunning {
+                    outcome = ExitOutcome::Terminated;
                 }
-            };
+            }
+            other => {
+                log::error!("--exit: couldn't wait on target process: {other:?}");
+                outcome = ExitOutcome::StillRunning;
+            }
         }
         unsafe {
             let _ = CloseHandle(process);
@@ -174,6 +206,79 @@ fn request_exit_for(exe: &Path, wait: Duration, pids: &[u32]) -> ExitOutcome {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    struct TestChild {
+        child: std::process::Child,
+        exe: PathBuf,
+    }
+
+    impl TestChild {
+        fn new(label: &str) -> Self {
+            Self::with_name(label, &format!("glass-mixer-exit-{label}.exe"))
+        }
+
+        fn with_name(label: &str, filename: &str) -> Self {
+            use std::os::windows::process::CommandExt;
+            let dir = std::env::temp_dir().join(format!("glass-mixer-exit-{label}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let exe = dir.join(filename);
+            let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
+            std::fs::copy(cmd, &exe).unwrap();
+            let child = std::process::Command::new(&exe)
+                .args(["/C", "pause"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                .spawn()
+                .unwrap();
+            Self { child, exe }
+        }
+    }
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(self.exe.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_missing_event_does_not_skip_a_running_process() {
+        let mut target = TestChild::new("missing-event");
+        let outcome = request_exit_for(&target.exe, Duration::from_millis(50), &[target.child.id()]);
+        assert_eq!(outcome, ExitOutcome::Terminated);
+        assert!(target.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn dropping_the_listener_during_shutdown_does_not_skip_the_process() {
+        let mut target = TestChild::new("dropped-listener");
+        let listener = ExitListener::start_for(&target.exe, || {}).unwrap();
+        drop(listener);
+        let outcome = request_exit_for(&target.exe, Duration::from_millis(50), &[target.child.id()]);
+        assert_eq!(outcome, ExitOutcome::Terminated);
+        assert!(target.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_windowless_process_is_found_by_executable_path() {
+        let target = TestChild::new("windowless");
+        let other = TestChild::with_name("other-path", target.exe.file_name().unwrap().to_str().unwrap());
+        let pids = super::super::window::instance_pids(&target.exe).unwrap();
+        assert!(pids.contains(&target.child.id()), "a target without a window must be found");
+        assert!(!pids.contains(&other.child.id()), "a different executable path must not match");
+    }
+
+    #[test]
+    fn a_pid_now_belonging_to_a_different_executable_is_not_stopped() {
+        let target = TestChild::new("pid-path-target");
+        let mut other = TestChild::with_name("pid-path-other", target.exe.file_name().unwrap().to_str().unwrap());
+        let _listener = ExitListener::start_for(&target.exe, || {}).unwrap();
+        let outcome = request_exit_for(&target.exe, Duration::from_millis(50), &[other.child.id()]);
+        assert!(other.child.try_wait().unwrap().is_none(), "an unrelated executable path must never be terminated");
+        assert_ne!(outcome, ExitOutcome::Terminated);
+    }
 
     #[test]
     fn each_install_path_has_its_own_event() {
@@ -199,28 +304,21 @@ mod tests {
         let _listener = ExitListener::start_for(&mine, move || tx.send("mine").unwrap()).unwrap();
         let _other = ExitListener::start_for(&other, move || tx_other.send("other").unwrap()).unwrap();
 
-        assert_eq!(request_exit_for(&mine, Duration::from_millis(50), &[]), ExitOutcome::Exited);
+        assert_eq!(request_exit_for(&mine, Duration::from_millis(50), &[]), ExitOutcome::NotRunning);
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok("mine"));
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the other path must not be signalled");
     }
 
     #[test]
     fn a_copy_that_does_not_exit_in_time_is_terminated() {
-        let exe = PathBuf::from(format!(r"C:\stuck\{}\glass-mixer.exe", std::process::id()));
+        let mut target = TestChild::new("stuck");
         // A listener that ignores the request, like a copy whose UI thread hangs.
-        let _listener = ExitListener::start_for(&exe, || {}).unwrap();
-        let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
-        let mut child = std::process::Command::new(cmd)
-            .args(["/C", "pause"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let _listener = ExitListener::start_for(&target.exe, || {}).unwrap();
         let started = Instant::now();
-        let outcome = request_exit_for(&exe, Duration::from_millis(300), &[child.id()]);
+        let outcome = request_exit_for(&target.exe, Duration::from_millis(300), &[target.child.id()]);
         assert_eq!(outcome, ExitOutcome::Terminated);
         assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
-        assert!(child.try_wait().unwrap().is_some(), "the stuck process must be gone");
+        assert!(target.child.try_wait().unwrap().is_some(), "the stuck process must be gone");
     }
 
     #[test]
