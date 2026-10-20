@@ -91,7 +91,7 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Device volume, mute, balance | `IAudioEndpointVolume`, `IAudioEndpointVolumeCallback` |
 | Sessions | `IAudioSessionManager2`, `IAudioSessionNotification`, `IAudioSessionControl2`, `IAudioSessionEvents` |
 | Per-app volume, mute, balance | `ISimpleAudioVolume`, `IChannelAudioVolume` |
-| Peak meters | `IAudioMeterInformation` (polled at about 30 Hz, only while the window is visible) |
+| Peak meters | `IAudioMeterInformation` (polled at about 30 Hz, only while the window is visible; never with a software renderer, where each repaint is rasterized by the CPU) |
 | Default-device switching | Undocumented `IPolicyConfig` (`CPolicyConfigClient`) |
 | App identity | `QueryFullProcessImageNameW`, `GetApplicationUserModelId`, version-resource `FileDescription` |
 | Process exit | `RegisterWaitForSingleObject` on the process handle (no polling) |

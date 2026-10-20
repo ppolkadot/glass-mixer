@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Produces, in .\dist:
-    glass-mixer-<version>-portable.zip   always
+    glass-mixer-<version>-portable.zip   always (executable, README, LICENSE, THIRD-PARTY-NOTICES.txt)
     glass-mixer-<version>-setup.exe      when Inno Setup 6 (ISCC.exe) is installed
 
   Run from the repository root:  powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -42,6 +42,10 @@ function Sign-File([string]$Path) {
 }
 Sign-File (Join-Path $root 'target\release\glass-mixer.exe')
 
+# License texts of every crate compiled into the executable ship with both packages.
+$notices = Join-Path $root 'target\release\THIRD-PARTY-NOTICES.txt'
+& (Join-Path $PSScriptRoot 'third-party-notices.ps1') -OutFile $notices
+
 # The build script writes the generated icon to OUT_DIR; copy it where the installer expects it.
 $ico = Get-ChildItem target\release\build -Recurse -Filter app.ico | Sort-Object LastWriteTime | Select-Object -Last 1
 Copy-Item $ico.FullName target\release\app.ico -Force
@@ -52,7 +56,7 @@ $staging = Join-Path $distRoot "glass-mixer-$version"
 if (-not ([IO.Path]::GetFullPath($staging)).StartsWith($distRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staging path.' }
 Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $staging | Out-Null
-Copy-Item target\release\glass-mixer.exe, README.md $staging
+Copy-Item target\release\glass-mixer.exe, README.md, LICENSE, $notices $staging
 $zip = Join-Path dist "glass-mixer-$version-portable.zip"
 Remove-Item $zip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path "$staging\*" -DestinationPath $zip

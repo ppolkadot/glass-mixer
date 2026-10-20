@@ -3,6 +3,7 @@
 
 use crate::audio::{AudioHandle, NoticeLevel};
 use crate::platform::backdrop::{self, Applied, Support};
+use crate::platform::exit_request::ExitListener;
 use crate::platform::fonts;
 use crate::platform::hotkeys::{HotkeyEditor, HotkeyEvent, HotkeyService};
 use crate::platform::icons::IconService;
@@ -19,6 +20,12 @@ use std::time::{Duration, Instant};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 const PREFS_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Meters repaint the window on every change. A software renderer rasterizes
+/// each frame on the CPU, so at meter rates the controls themselves would lag.
+fn meters_wanted(shown: bool, show_meters: bool, software_renderer: bool) -> bool {
+    shown && show_meters && !software_renderer
+}
 
 #[derive(Clone)]
 pub struct StartOptions {
@@ -47,9 +54,7 @@ struct Toast {
 }
 
 /// Visible display time for a toast. The countdown runs only while the window
-/// is shown: a hidden pass freezes the remaining time, and a toast created
-/// while hidden (or during `ui`) starts counting when it is first displayed.
-/// Nothing here schedules a repaint, so a hidden window stays idle.
+/// is shown, so a toast queued while hidden is displayed in full later.
 struct ToastExpiry {
     /// Visible time left before the toast disappears.
     remaining: Duration,
@@ -62,8 +67,7 @@ impl ToastExpiry {
         Self { remaining: visible_for, due: None }
     }
 
-    /// Tracks a visibility change. Idempotent while the countdown is already
-    /// running, so repeated passes neither extend nor shorten the toast.
+    /// Tracks a visibility change; repeated calls with the same state have no effect.
     fn tick(&mut self, shown: bool, now: Instant) {
         if shown {
             if self.due.is_none() {
@@ -83,9 +87,9 @@ impl ToastExpiry {
     }
 }
 
-/// Records which renderer and graphics adapter eframe chose, so the log shows
-/// whether the OpenGL path or the wgpu fallback (and which backend) is in use.
-fn log_renderer(cc: &eframe::CreationContext<'_>) {
+/// Logs the renderer and graphics adapter in use. Returns whether frames are
+/// rendered in software (WARP, the "Microsoft Basic Render Driver").
+fn log_renderer(cc: &eframe::CreationContext<'_>) -> bool {
     if let Some(state) = &cc.wgpu_render_state {
         let info = state.adapter.get_info();
         log::info!(
@@ -100,8 +104,16 @@ fn log_renderer(cc: &eframe::CreationContext<'_>) {
             let a = adapter.get_info();
             log::debug!("available wgpu adapter: {:?} \"{}\" ({:?})", a.backend, a.name, a.device_type);
         }
-    } else if cc.gl.is_some() {
-        log::info!("renderer: OpenGL (glow)");
+        let software = info.device_type == eframe::egui_wgpu::wgpu::DeviceType::Cpu;
+        if software {
+            log::info!("software rendering: level meters are paused");
+        }
+        software
+    } else {
+        if cc.gl.is_some() {
+            log::info!("renderer: OpenGL (glow)");
+        }
+        false
     }
 }
 
@@ -157,6 +169,7 @@ pub struct MixerApp {
     hwnd: Option<Hwnd>,
     tray: Option<Tray>,
     tray_rx: Receiver<TrayAction>,
+    exit_listener: Option<ExitListener>,
     view: View,
     mixer: mixer::MixerState,
     login: LoginState,
@@ -169,13 +182,15 @@ pub struct MixerApp {
     /// Started with `--minimized`: hide once eframe has shown the (cloaked) window.
     pending_start_hide: bool,
     force_opaque: bool,
+    /// Frames are drawn by the CPU (no graphics acceleration).
+    software_renderer: bool,
     #[cfg(debug_assertions)]
     dev_exit_at: Option<Instant>,
 }
 
 impl MixerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions) -> Self {
-        log_renderer(cc);
+        let software_renderer = log_renderer(cc);
         let ctx = cc.egui_ctx.clone();
         let has_icon_font = fonts::install(&ctx);
         let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
@@ -199,6 +214,14 @@ impl MixerApp {
             IconService::start(move || ctx.request_repaint())
         };
         let (tray_tx, tray_rx) = crossbeam_channel::unbounded();
+        // `--exit` (used by the uninstaller) takes the same path as the tray's Exit.
+        let exit_listener = {
+            let (tx, ctx) = (tray_tx.clone(), ctx.clone());
+            ExitListener::start(move || {
+                let _ = tx.send(TrayAction::Exit);
+                ctx.request_repaint();
+            })
+        };
         let mut toasts = Vec::new();
         let tray = match hwnd {
             Some(h) => match Tray::create(h, audio.clone(), tray_tx, ctx.clone()) {
@@ -219,9 +242,8 @@ impl MixerApp {
         let hotkeys = if tray.is_some() {
             hwnd.and_then(|_| match HotkeyService::start(audio.clone(), ctx.clone()) {
                 Ok(service) => {
-                    // A start-hidden window is cloaked until its first frame.
-                    // Registering the show/hide chord before that handoff can
-                    // consume a show request while the window is still cloaked.
+                    // A start-hidden window is cloaked until its first frame; a show
+                    // request before then would be lost, so register after hiding.
                     if !opts.hidden
                         && let Err(e) = service.configure(&opts.settings.hotkeys, opts.settings.hotkey_step)
                     {
@@ -284,6 +306,7 @@ impl MixerApp {
             hwnd,
             tray,
             tray_rx,
+            exit_listener,
             view: View::Mixer,
             mixer: mixer::MixerState::default(),
             login: startup::state(),
@@ -295,6 +318,7 @@ impl MixerApp {
             shut_down: false,
             pending_start_hide: start_hidden,
             force_opaque: opts.force_opaque,
+            software_renderer,
             #[cfg(debug_assertions)]
             dev_exit_at: std::env::var_os("GLASS_MIXER_DEV_PROFILE")
                 .and_then(|_| std::env::var("GLASS_MIXER_DEV_EXIT_AFTER_MS").ok())
@@ -447,6 +471,7 @@ impl MixerApp {
             return;
         }
         self.shut_down = true;
+        self.exit_listener = None;
         if self.dirty_since.take().is_some()
             && let Err(e) = self.store.save(&self.settings)
         {
@@ -473,9 +498,7 @@ impl MixerApp {
 
     fn draw_toasts(&mut self, ui: &mut egui::Ui) {
         let now = Instant::now();
-        // This pass only runs while the window is visible, so any toast that
-        // has not started counting down yet (for example one queued during
-        // `ui`) starts now and gets its full visible time.
+        // Toasts queued during `ui` start counting down here.
         for toast in &mut self.toasts {
             toast.expiry.tick(true, now);
         }
@@ -612,8 +635,8 @@ impl eframe::App for MixerApp {
             self.hide_to_tray();
         }
 
-        // Window actions requested by global shortcuts. The shortcut thread only
-        // queues them; the UI thread owns the window, so exit can never wait on it.
+        // The shortcut thread only queues window actions; the UI thread performs
+        // them, so exit never waits on a cross-thread window call.
         let hotkey_events = self.hotkeys.as_ref().map(HotkeyService::take_events).unwrap_or_default();
         for event in hotkey_events {
             match event {
@@ -622,7 +645,7 @@ impl eframe::App for MixerApp {
         }
 
         let shown = self.hwnd.is_none_or(window::is_shown);
-        self.audio.set_meters_wanted(shown && self.settings.show_meters);
+        self.audio.set_meters_wanted(meters_wanted(shown, self.settings.show_meters, self.software_renderer));
 
         let snapshot = self.audio.snapshot();
         self.icons.sync_live_apps(
@@ -648,11 +671,6 @@ impl eframe::App for MixerApp {
             }
         }
 
-        // Toasts count down only while the window is shown: a hidden pass
-        // freezes the remaining time instead of extending or expiring it, so a
-        // warning queued while hidden is displayed for its full duration when
-        // the window is revealed after any idle interval. No hidden timer or
-        // repaint is scheduled.
         let toast_now = Instant::now();
         for toast in &mut self.toasts {
             toast.expiry.tick(shown, toast_now);
@@ -667,8 +685,8 @@ impl eframe::App for MixerApp {
                     self.prefs = prefs;
                 }
             }
-            // Pick up Windows theme/transparency changes while visible; idle cost is one
-            // registry read every two seconds, and nothing at all while hidden.
+            // Windows doesn't notify eframe of theme or transparency changes, so
+            // re-read them while visible.
             ctx.request_repaint_after(PREFS_INTERVAL);
         }
         self.track_window(ctx, shown);
@@ -737,6 +755,7 @@ impl eframe::App for MixerApp {
                         login: &mut self.login,
                         glass,
                         support: self.support,
+                        software_renderer: self.software_renderer,
                         can_switch_default: snapshot.can_switch_default,
                         audio: &self.audio,
                         icons: &mut self.icons,
@@ -804,8 +823,7 @@ mod tests {
     fn hidden_toast_time_is_frozen_and_restarts_when_first_shown() {
         let created = Instant::now();
 
-        // Queued while hidden with no logic pass in between: the full duration
-        // starts at the reveal, however long the idle interval was.
+        // Queued while hidden: the full duration starts at the reveal.
         let mut queued_while_hidden = ToastExpiry::new(Duration::from_secs(7));
         queued_while_hidden.tick(true, created + Duration::from_secs(3600));
         assert!(
@@ -814,14 +832,21 @@ mod tests {
         );
         assert!(queued_while_hidden.expired(created + Duration::from_secs(3600 + 8)));
 
-        // Already counting down when hidden: the remaining time is preserved
-        // across a long hidden interval with no callbacks and resumes on reveal.
+        // Hidden mid-countdown: the remaining time resumes on reveal.
         let mut frozen = ToastExpiry::new(Duration::from_secs(7));
         frozen.tick(true, created);
         frozen.tick(false, created + Duration::from_secs(3));
         frozen.tick(true, created + Duration::from_secs(3600));
         assert!(!frozen.expired(created + Duration::from_secs(3600 + 3)), "7s minus 3s shown = 4s left");
         assert!(frozen.expired(created + Duration::from_secs(3600 + 5)));
+    }
+
+    #[test]
+    fn meters_run_while_shown_except_with_a_software_renderer() {
+        assert!(meters_wanted(true, true, false));
+        assert!(!meters_wanted(false, true, false), "hidden");
+        assert!(!meters_wanted(true, false, false), "meters turned off");
+        assert!(!meters_wanted(true, true, true), "software rendering");
     }
 
     #[test]

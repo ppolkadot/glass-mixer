@@ -2,6 +2,7 @@
 //! icons, fonts, launch-at-login, single-instance and system preferences.
 
 pub mod backdrop;
+pub mod exit_request;
 pub mod fonts;
 pub mod hotkeys;
 pub mod icons;

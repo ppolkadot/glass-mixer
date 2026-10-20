@@ -97,11 +97,8 @@ impl HotkeyService {
         Self::start_inner(sink, context, Registration::new)
     }
 
-    /// Starts a service whose bindings resolve without calling
-    /// `RegisterHotKey`, so tests can exercise the worker's message handling
-    /// and shutdown without depending on which chords Windows (or another
-    /// process) currently owns. Real registration stays covered by the
-    /// ignored desktop tests.
+    /// Bindings resolve without `RegisterHotKey`, so tests don't depend on
+    /// which chords other processes own.
     #[cfg(test)]
     fn start_synthetic(sink: impl Fn(Command) + Send + 'static, context: egui::Context) -> Result<Self, String> {
         Self::start_inner(sink, context, synthetic_registration)
@@ -142,10 +139,8 @@ impl HotkeyService {
         }
     }
 
-    /// Enqueues a change; `status()` reports the exact active set and each
-    /// binding that could not be registered once the worker finishes. Working
-    /// bindings stay active when others fail. Calling this again retries every
-    /// binding that is not active.
+    /// Enqueues a change; `status()` reports the result once the worker has
+    /// applied it. Calling again retries every binding that is not active.
     pub fn configure(&self, bindings: &[HotkeyBinding], step: u8) -> Result<(), String> {
         let mut status = self.status.lock();
         status.revision = status.revision.wrapping_add(1);
@@ -173,16 +168,13 @@ impl HotkeyService {
         self.events.try_iter().collect()
     }
 
-    /// Stops the worker. The worker never calls into the UI thread, so it exits
-    /// promptly; if it somehow does not within `SHUTDOWN_WAIT` it is detached
-    /// rather than allowed to block application exit.
+    /// Stops the worker, detaching it if it hasn't finished within `SHUTDOWN_WAIT`.
     pub fn shutdown(&mut self) {
         let Some(thread) = self.thread.take() else {
             return;
         };
         let _ = self.tx.send(Request::Shutdown);
-        // If the Windows queue is full, its next message also drains requests.
-        // If the thread is already gone, the wait below ends immediately.
+        // If the post fails because the queue is full, the next message drains requests too.
         let _ = unsafe { PostThreadMessageW(self.thread_id, CONFIGURE_MESSAGE, WPARAM(0), LPARAM(0)) };
         let deadline = Instant::now() + SHUTDOWN_WAIT;
         while !thread.is_finished() && Instant::now() < deadline {
@@ -212,9 +204,7 @@ struct Registration {
     synthetic: bool,
 }
 
-/// Turns one valid binding into a registration. Production passes
-/// [`Registration::new`]; tests substitute a synthetic implementation so the
-/// worker's message handling can be exercised without owning a global chord.
+/// Turns one validated binding into a registration; tests substitute a synthetic one.
 type Registrar = fn(i32, HotkeyBinding, Chord) -> Result<Registration, String>;
 
 impl Registration {
@@ -268,21 +258,17 @@ impl Registrations {
         self.active.iter().map(|registration| registration.binding.clone()).collect()
     }
 
-    /// Test entry point: like the worker, it registers each accepted binding
-    /// with Windows.
     #[cfg(test)]
     fn configure(&mut self, bindings: &[HotkeyBinding], step: u8) -> Vec<FailedBinding> {
         self.configure_with(bindings, step, Registration::new)
     }
 
-    /// Makes the active set match `bindings` as closely as the registration
-    /// step allows. Invalid, duplicate and rejected bindings are returned;
-    /// every other binding is registered (or stays registered) regardless.
+    /// Makes the active set match `bindings` and returns the bindings that are
+    /// invalid, duplicated or rejected; all others stay registered.
     fn configure_with(&mut self, bindings: &[HotkeyBinding], step: u8, register: Registrar) -> Vec<FailedBinding> {
         let Validated { valid, rejected } = validate_bindings(bindings);
         let mut failed = rejected;
-        // Release chords nobody wants any more. Chords that are still wanted keep
-        // their registration, including ones reassigned to another action.
+        // Chords still wanted keep their registration, even if reassigned to another action.
         self.active.retain(|registration| valid.iter().any(|(_, chord)| registration.chord == *chord));
         for (binding, chord) in valid {
             if let Some(existing) = self.active.iter_mut().find(|registration| registration.chord == chord) {
@@ -305,7 +291,7 @@ impl Registrations {
         failed
     }
 
-    /// Maps a `WM_HOTKEY` message to its action. Pure: performs no side effects.
+    /// Maps a `WM_HOTKEY` message to its action.
     fn resolve(&self, id: usize, lparam: isize) -> Option<Resolved> {
         let registration = self.active.iter().find(|r| r.id as usize == id)?;
         // Ignore a queued message belonging to an old registration if an ID
@@ -637,16 +623,14 @@ impl HotkeyEditor {
                     )
                     .labelled_by(label.id)
                     .on_hover_text(format!("Shortcut for {}", action.label()));
-                    // Short visible text keeps the row inside the card; the accessible
-                    // name still says which action the button is for.
+                    // Short visible text keeps the row narrow; the accessible name names the action.
                     let bind = crate::ui::widgets::scroll_on_focus(ui.button("Bind"));
                     crate::ui::widgets::set_name(ui, &bind, &format!("Bind {}", action.label()));
                     if bind.on_hover_text(format!("Bind {}", action.label())).clicked() {
                         let mut proposed = bindings.clone();
                         proposed.retain(|b| b.action != action);
                         proposed.push(HotkeyBinding { action, chord: draft.trim().to_string() });
-                        // Only this binding's own problems block it; another
-                        // action's bad entry must not stop the user from binding.
+                        // Another action's invalid entry must not block this one.
                         match validate_bindings(&proposed).rejected.into_iter().find(|f| f.action == action) {
                             None => {
                                 *bindings = proposed;
@@ -950,9 +934,7 @@ mod tests {
     }
 
     /// Presses and releases Ctrl+Alt+F21 through the real Windows input queue.
-    /// Never falls back to synthetic `PostThreadMessageW`: if UIPI or desktop state
-    /// blocks `SendInput`, an error is returned so the caller cannot report real
-    /// keyboard delivery when none occurred.
+    /// Returns an error, never a fallback, if `SendInput` is blocked.
     fn try_press_ctrl_alt_f21() -> Result<(), InjectionError> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, SendInput};
         try_inject_ctrl_alt_f21_with(|batch| unsafe { SendInput(batch, std::mem::size_of::<INPUT>() as i32) })
@@ -1135,11 +1117,7 @@ mod tests {
 
     #[test]
     fn shutdown_completes_under_posted_hotkey_message_pressure() {
-        // Synthetic registrations resolve the posted `WM_HOTKEY` messages
-        // without registering a global chord, so this deterministic pressure
-        // check runs in every `cargo test` and does not depend on which chords
-        // Windows or another process currently owns. Real global registration
-        // and real `SendInput` delivery stay in the ignored desktop tests.
+        // Synthetic registrations need no global chord, so this always runs.
         let mut service = HotkeyService::start_synthetic(|_| {}, egui::Context::default()).unwrap();
         service.configure(&[binding(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23")], 5).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
