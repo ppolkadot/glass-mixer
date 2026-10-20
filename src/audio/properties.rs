@@ -52,9 +52,20 @@ impl fmt::Display for SpatialSupport {
     }
 }
 
-/// Notifications for these documented properties require a fresh properties read.
-pub fn is_sound_property(key: &PROPERTYKEY) -> bool {
-    *key == PKEY_AudioEngine_DeviceFormat || *key == PKEY_AudioEndpoint_Disable_SysFx
+/// Whether a changed endpoint property affects anything shown: device names, the
+/// selected format (which the mix format follows) or the system-effects flag.
+pub fn needs_device_refresh(key: &PROPERTYKEY) -> bool {
+    use windows::Win32::Devices::FunctionDiscovery::{
+        PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName, PKEY_DeviceInterface_FriendlyName,
+    };
+    [
+        PKEY_AudioEngine_DeviceFormat,
+        PKEY_AudioEndpoint_Disable_SysFx,
+        PKEY_Device_FriendlyName,
+        PKEY_Device_DeviceDesc,
+        PKEY_DeviceInterface_FriendlyName,
+    ]
+    .contains(key)
 }
 
 pub fn read_device_properties(device: &IMMDevice, is_output: bool) -> DeviceProperties {
@@ -261,6 +272,19 @@ mod tests {
         let parsed = AudioFormat::from_wave_bytes(&bytes).unwrap();
         assert_eq!((parsed.valid_bits, parsed.container_bits), (24, 32));
         assert_eq!(parsed.encoding, "PCM");
+    }
+
+    #[test]
+    fn only_displayed_properties_trigger_a_device_refresh() {
+        use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+        use windows::Win32::Media::Audio::{PKEY_AudioEndpoint_FormFactor, PKEY_AudioEndpoint_JackSubType};
+        assert!(needs_device_refresh(&PKEY_AudioEngine_DeviceFormat));
+        assert!(needs_device_refresh(&PKEY_AudioEndpoint_Disable_SysFx));
+        assert!(needs_device_refresh(&PKEY_Device_FriendlyName));
+        assert!(!needs_device_refresh(&PKEY_AudioEndpoint_FormFactor));
+        assert!(!needs_device_refresh(&PKEY_AudioEndpoint_JackSubType));
+        let vendor = PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0x1234), pid: 7 };
+        assert!(!needs_device_refresh(&vendor), "unknown driver-specific properties are ignored");
     }
 
     #[test]

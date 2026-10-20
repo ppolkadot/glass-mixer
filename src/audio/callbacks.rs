@@ -65,10 +65,11 @@ impl IMMNotificationClient_Impl for DeviceNotifier_Impl {
         Ok(())
     }
 
-    fn OnPropertyValueChanged(&self, _id: &PCWSTR, _key: &PROPERTYKEY) -> windows::core::Result<()> {
-        // Format, effects and driver-specific spatial properties can change
-        // externally. Coalesce notifications and re-read on the engine.
-        let _ = self.tx.send(Msg::DevicesChanged);
+    fn OnPropertyValueChanged(&self, _id: &PCWSTR, key: &PROPERTYKEY) -> windows::core::Result<()> {
+        // Some drivers update other properties constantly; only displayed ones refresh.
+        if super::properties::needs_device_refresh(key) {
+            let _ = self.tx.send(Msg::DevicesChanged);
+        }
         Ok(())
     }
 }

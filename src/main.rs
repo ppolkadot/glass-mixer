@@ -2,7 +2,7 @@
 
 use glass_mixer::app::{MixerApp, StartOptions};
 use glass_mixer::icon_art::render_app_icon;
-use glass_mixer::platform::{single_instance, startup, window};
+use glass_mixer::platform::{exit_request, single_instance, startup, window};
 use glass_mixer::settings::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, LoadOutcome, MIN_HEIGHT, MIN_WIDTH, SettingsStore, WindowGeometry,
 };
@@ -16,6 +16,13 @@ fn main() -> ExitCode {
     init_logging();
     install_panic_hook();
     log::info!("Glass Mixer {} starting (args: {:?})", env!("CARGO_PKG_VERSION"), &args[1..]);
+
+    // Used by the uninstaller to stop the copy running from this executable's path.
+    if args.iter().skip(1).any(|arg| arg.eq_ignore_ascii_case(exit_request::EXIT_ARG)) {
+        let outcome = exit_request::request_exit_and_wait(exit_request::EXIT_WAIT);
+        log::info!("--exit: {outcome:?}");
+        return if outcome == exit_request::ExitOutcome::StillRunning { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+    }
 
     let Some(_instance) = single_instance::acquire() else {
         log::info!("another instance is running; activating it");
@@ -106,17 +113,10 @@ fn run_with_renderer(
     eframe::run_native(window::WINDOW_TITLE, options, Box::new(move |cc| Ok(Box::new(MixerApp::new(cc, start)))))
 }
 
-/// The wgpu fallback uses Direct3D 12 or Vulkan, never wgpu's OpenGL backend.
-///
-/// The fallback only runs after OpenGL has failed (or when `--renderer=wgpu` is
-/// requested), so wgpu's GL backend cannot help. It also caused an intermittent
-/// exit deadlock: its instance owns a "wgpu-hal WGL Instance Thread" that loads
-/// the vendor OpenGL driver. When that thread exits during teardown, the driver's
-/// `DllMain` (holding the loader lock) waits for a driver thread that needs a
-/// `dwmapi` lock, which the main thread holds while destroying the window and
-/// waiting for the loader lock. Observed in thread stacks of a hung process with
-/// the NVIDIA 341.92 driver. `WGPU_BACKEND` may only re-enable GL inside a debug
-/// dev profile for diagnostics.
+/// The wgpu fallback uses Direct3D 12 or Vulkan, never wgpu's OpenGL backend: it
+/// only runs after OpenGL has failed, and the GL backend's WGL thread can
+/// deadlock with the driver's `DllMain` while the window is destroyed at exit.
+/// `WGPU_BACKEND` may re-enable GL only in a debug dev profile, for diagnostics.
 fn fallback_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
     let mut setup = WgpuSetupCreateNew::without_display_handle();

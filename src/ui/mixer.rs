@@ -559,7 +559,6 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
         ui.horizontal(|ui| {
             ui.set_min_height(m.row_height - 6.0);
             ui.add_space(4.0);
-            // Icon.
             let px = (m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
             cx.icons.request(app, px);
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(m.icon), Sense::hover());
@@ -575,7 +574,6 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 }
             }
 
-            // Name and status; click to expand details.
             let name_w = (ui.available_width() * 0.34).clamp(84.0, 210.0);
             let (nrect, nresp) = ui.allocate_exact_size(vec2(name_w, m.row_height - 10.0), Sense::click());
             let mut job = LayoutJob::simple_singleline(name.clone(), semibold(14.0), p.text);
@@ -617,7 +615,6 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 }
             }
 
-            // Mute, slider, percentage.
             let target = Target::Volume(Ctl::App(app.key.clone()));
             let mut v = st.value(&target, app.volume);
             let mute_label = format!("{} {name}", if app.muted { "Unmute" } else { "Mute" });
@@ -888,8 +885,6 @@ mod layout_tests {
         snap
     }
 
-    /// Balance and sound properties now live in the Devices view, which is one
-    /// full-height scroll area, not a nested one in a fixed panel.
     #[test]
     fn devices_view_has_the_properties_section_and_fits() {
         let harness = Harness::new(Density::Comfortable);

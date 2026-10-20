@@ -1,5 +1,48 @@
 # Testing
 
+## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
+
+Fixes for meters under software rendering, the unbounded icon-thread join, settings file
+encodings, unfiltered endpoint property notifications, and the
+hardening/compliance items (uninstaller `--exit`, license notices, full
+`explorer.exe` path, CI). Run on the machine in `PROJECT_CONTEXT.md` section 4
+(it now also has a headphone output and a microphone).
+
+- `cargo fmt --check`, PowerShell syntax parsing, and
+  `cargo clippy --locked --all-targets -- -D warnings`: passed.
+- `cargo test --locked`: 106 library tests passed (16 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 8 hardware tests ignored. New tests
+  cover pausing meters under software rendering, a stuck icon lookup (shutdown returns within the 2 s limit
+  and queued lookups are dropped), UTF-8 BOM / UTF-16 LE / UTF-16 BE settings,
+  undecodable bytes, byte-exact migration backups, refusal to replace a settings
+  file another program holds open without read sharing, the property filter,
+  per-path exit events, stale exit signals, termination of a copy that ignores
+  `--exit`, and the absolute `explorer.exe` path. Temporarily reverting each
+  fix made its tests fail.
+- `cargo +1.95 check --locked --all-targets`: passed. `cargo audit`: no
+  vulnerabilities; three unmaintained warnings for Linux-only `zbus` crates
+  that are not in the Windows build.
+- `scripts/lifecycle.ps1` with OpenGL and `-Renderer wgpu`: passed.
+- Live `--exit` against an isolated debug instance (visible, and hidden with
+  `--minimized`): the instance logged "exit requested by another process",
+  completed its normal shutdown with exit code 0 in about 1 s, and the
+  separately installed Glass Mixer kept running. With nothing running from
+  that path, `--exit` returned immediately with code 0.
+- `scripts/third-party-notices.ps1`: 170 crates, 125 distinct license texts,
+  including the egui font licenses. ISCC 6.7.3 compiled the installer with the
+  new files and `[UninstallRun]` entry. The installer and uninstaller were not
+  run, to avoid touching the installed copy.
+- CPU, release build, an isolated copy, a browser playing audio (per process).
+  With graphics acceleration, meters keep their full 30 Hz rate, so OpenGL is
+  unchanged (700–1,344 ms per 5 s on this machine's 2010-era GPU, with meters
+  on). With the wgpu fallback on WARP (software), meters on used
+  19,700–20,000 ms per 5 s (all four cores); with meters paused, the same build
+  measured 141–328 ms per 4 s. Hidden stays at 0 ms on both renderers.
+
+- Not run: the installed upgrade and uninstall flow, hot-plug of a device whose
+  name changes (covered by the property filter's name keys, not exercised
+  live), and Windows 10.
+
 ## 0.3.0 release-candidate verification (2026-10-18)
 
 The 0.3.0 version/resource update is prepared on `experiments`. Fresh local
@@ -13,7 +56,8 @@ Setup 6.7.3 produced both packages. The executable and installer report
 product version `0.3.0`; the portable archive contains the executable and
 README. Package hashes are in [`docs/releases/0.3.0.md`](releases/0.3.0.md).
 
-- [ ] Hosted Windows CI for the exact 0.3.0 commit.
+- [x] Hosted Windows CI for the exact 0.3.0 commit (`518cd33`): runs
+  `#39106819443` (`experiments`) and `#39107297354` (`main`) passed.
 - Not run for this release candidate: live audio mutations, installer upgrade
   from 0.1.0, physical keyboard injection, Narrator, Windows 10, and varied
   hardware. Earlier beta results remain below.

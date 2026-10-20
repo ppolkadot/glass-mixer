@@ -176,9 +176,8 @@ impl VolumePreset {
 
 const MAX_TRACKED_PROCESSES: usize = 1024;
 
-/// Automatic rules are deliberately conservative: only a new process after
-/// arming, a first observation of that process instance and no observed user
-/// volume/mute change qualify.
+/// An automatic rule applies only to a process started after arming, on its
+/// first observation, with no observed volume or mute change.
 pub fn may_apply_at_start(created: Option<u64>, armed: u64, already_seen: bool, untouched: bool) -> bool {
     untouched && !already_seen && created.is_some_and(|t| t > armed)
 }
@@ -191,20 +190,16 @@ pub struct ProcessInstance {
     pub created: u64,
 }
 
-/// Remembers which process instances have already been considered or adjusted,
-/// so an automatic rule applies at most once per new process without a newer
-/// sibling process suppressing an older one whose first audio session arrives later.
+/// Remembers which process instances were already considered or adjusted, so an
+/// automatic rule applies at most once per process instance.
 #[derive(Debug, Default)]
 pub struct StartTracker {
     armed_at: u64,
     seen: std::collections::HashSet<ProcessInstance>,
-    /// Latched when more than `MAX_TRACKED_PROCESSES` distinct un-reclaimed
-    /// process instances are observed without exit reclamation. Live markers are
-    /// never evicted; while saturated, unseen instances are conservatively skipped.
-    /// The latch stays set until [`StartTracker::rearm`] (or a restart) even when
-    /// confirmed exits later free slots: instances skipped while saturated were
-    /// never recorded, so clearing the latch could requalify an untracked
-    /// running process that is not a fresh launch.
+    /// Set once more than `MAX_TRACKED_PROCESSES` live instances are tracked;
+    /// unseen instances are then skipped. It stays set until
+    /// [`StartTracker::rearm`]: instances skipped meanwhile were never recorded,
+    /// so clearing it early could requalify a process that isn't a new launch.
     saturated: bool,
 }
 
@@ -249,11 +244,6 @@ impl StartTracker {
         }
     }
 
-    /// Convenience wrapper for callers/tests without a distinct PID.
-    pub fn note_intervention(&mut self, key: &AppKey, created: u64) {
-        self.note_process_intervention(key, 0, created);
-    }
-
     /// Whether the rule may apply to the process instance `(key, pid, created)`.
     /// Records the process instance as seen if it started after arming.
     pub fn observe_process(&mut self, key: &AppKey, pid: u32, created: u64, untouched: bool) -> bool {
@@ -265,11 +255,6 @@ impl StartTracker {
         }
         let already_seen = self.record(ProcessInstance { key: key.clone(), pid, created });
         may_apply_at_start(Some(created), self.armed_at, already_seen, untouched)
-    }
-
-    /// Convenience wrapper for callers/tests that identify a process by `(key, created)`.
-    pub fn observe(&mut self, key: &AppKey, created: u64, untouched: bool) -> bool {
-        self.observe_process(key, 0, created, untouched)
     }
 }
 
@@ -476,9 +461,7 @@ mod tests {
         assert!(!tracker.observe_process(&app, 9999, 5000, true), "the process that exceeds capacity is skipped");
         assert!(tracker.saturated);
 
-        // Confirmed exits free slots, but the latch stays: the skipped
-        // instances were never recorded, so clearing it could requalify a
-        // genuinely running process that was skipped while saturated.
+        // Exits free slots, but the latch stays until rearming.
         for offset in 0..64 {
             tracker.forget_exited_pid(10 + offset);
         }
