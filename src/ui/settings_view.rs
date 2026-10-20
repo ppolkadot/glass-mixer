@@ -22,6 +22,8 @@ pub struct SettingsCtx<'a> {
     pub login: &'a mut LoginState,
     pub glass: GlassStatus,
     pub support: Support,
+    /// Frames are drawn by the CPU, so level meters are paused.
+    pub software_renderer: bool,
     pub can_switch_default: bool,
     pub audio: &'a AudioHandle,
     pub icons: &'a mut IconService,
@@ -112,7 +114,12 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             210.0,
         );
     });
-    toggle_row(ui, &look, &mut s.show_meters, "Level meters", Some("Show live audio levels under the sliders"));
+    let meters = if cx.software_renderer {
+        "Paused: without graphics acceleration, live levels would use a lot of CPU"
+    } else {
+        "Show live audio levels under the sliders"
+    };
+    toggle_row(ui, &look, &mut s.show_meters, "Level meters", Some(meters));
     if widgets::scroll_on_focus(ui.button("Use recommended window size (480 × 720)")).clicked() {
         ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT)));
     }
@@ -239,7 +246,7 @@ fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
         && widgets::scroll_on_focus(ui.button("Open settings folder")).clicked()
     {
         let _ = std::fs::create_dir_all(&dir);
-        if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+        if let Err(e) = crate::platform::window::open_folder(&dir) {
             cx.errors.push(format!("Couldn't open the folder: {e}"));
         }
     }
@@ -281,6 +288,7 @@ mod tests {
                 login: &mut login,
                 glass: GlassStatus::TransparencyOff,
                 support: Support::Full,
+                software_renderer: false,
                 can_switch_default: true,
                 audio: &audio,
                 icons: &mut icons,
@@ -348,6 +356,7 @@ mod tests {
                         login: &mut login,
                         glass: GlassStatus::TransparencyOff,
                         support: Support::Full,
+                        software_renderer: false,
                         can_switch_default: true,
                         audio: &audio,
                         icons: &mut icons,
@@ -381,6 +390,7 @@ mod tests {
                             login: &mut login,
                             glass: GlassStatus::TransparencyOff,
                             support: Support::Full,
+                            software_renderer: false,
                             can_switch_default: true,
                             audio: &audio,
                             icons: &mut icons,
@@ -417,6 +427,7 @@ mod tests {
                             login: &mut login,
                             glass: GlassStatus::TransparencyOff,
                             support: Support::Full,
+                            software_renderer: false,
                             can_switch_default: true,
                             audio: &audio,
                             icons: &mut icons,
@@ -454,6 +465,7 @@ mod tests {
                                 login: &mut login,
                                 glass: GlassStatus::TransparencyOff,
                                 support: Support::Full,
+                                software_renderer: false,
                                 can_switch_default: true,
                                 audio: &audio,
                                 icons: &mut icons,
@@ -487,6 +499,7 @@ mod tests {
                             login: &mut login,
                             glass: GlassStatus::TransparencyOff,
                             support: Support::Full,
+                            software_renderer: false,
                             can_switch_default: true,
                             audio: &audio,
                             icons: &mut icons,

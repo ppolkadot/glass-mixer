@@ -11,9 +11,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-    SetWindowPos, ShowWindow,
+    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -77,11 +76,7 @@ pub fn is_shown(hwnd: Hwnd) -> bool {
     unsafe { IsWindowVisible(hwnd.get()).as_bool() && !IsIconic(hwnd.get()).as_bool() }
 }
 
-pub fn is_foreground(hwnd: Hwnd) -> bool {
-    unsafe { GetForegroundWindow() == hwnd.get() }
-}
-
-fn process_image_name(pid: u32) -> Option<String> {
+fn process_image_path(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
@@ -89,9 +84,59 @@ fn process_image_name(pid: u32) -> Option<String> {
         let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
         let _ = windows::Win32::Foundation::CloseHandle(h);
         ok.ok()?;
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_lowercase())
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
     }
+}
+
+fn process_image_name(pid: u32) -> Option<String> {
+    let path = process_image_path(pid)?;
+    std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_lowercase())
+}
+
+/// Process IDs of other running copies started from exactly `exe` (compared
+/// without regard to case), found by their main window, hidden or not.
+pub fn instance_pids(exe: &std::path::Path) -> Vec<u32> {
+    struct Search {
+        exe: String,
+        own_pid: u32,
+        found: Vec<u32>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        let mut title = [0u16; 64];
+        let n = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
+        if String::from_utf16_lossy(&title[..n]) == WINDOW_TITLE {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid != search.own_pid
+                && !search.found.contains(&pid)
+                && process_image_path(pid).is_some_and(|path| path.to_lowercase() == search.exe)
+            {
+                search.found.push(pid);
+            }
+        }
+        true.into()
+    }
+    let mut search =
+        Search { exe: exe.to_string_lossy().to_lowercase(), own_pid: std::process::id(), found: Vec::new() };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
+    }
+    search.found
+}
+
+/// Opens a folder in File Explorer. `explorer.exe` is started by its full path
+/// because Windows looks for a bare program name in the application's folder first.
+pub fn open_folder(dir: &std::path::Path) -> Result<(), String> {
+    let explorer = explorer_path().ok_or("Couldn't find the Windows folder.")?;
+    std::process::Command::new(explorer).arg(dir).spawn().map(drop).map_err(|e| e.to_string())
+}
+
+fn explorer_path() -> Option<std::path::PathBuf> {
+    use windows::Win32::UI::Shell::{FOLDERID_Windows, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    let windows_dir = unsafe { SHGetKnownFolderPath(&FOLDERID_Windows, KF_FLAG_DEFAULT, None) }.ok()?;
+    let windows_dir = crate::audio::com::take_pwstr(windows_dir);
+    (!windows_dir.is_empty()).then(|| std::path::Path::new(&windows_dir).join("explorer.exe"))
 }
 
 /// Finds the main window of an already running Glass Mixer (same executable
@@ -129,5 +174,23 @@ pub fn activate_existing_instance() -> bool {
             true
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_is_resolved_to_an_absolute_path_in_the_windows_folder() {
+        let path = explorer_path().expect("the Windows folder is known");
+        assert!(path.is_absolute(), "{path:?}");
+        assert!(path.ends_with("explorer.exe"));
+        assert!(path.is_file(), "{path:?} should exist");
+    }
+
+    #[test]
+    fn no_other_copy_of_the_test_binary_has_a_mixer_window() {
+        assert!(instance_pids(&std::env::current_exe().unwrap()).is_empty());
     }
 }

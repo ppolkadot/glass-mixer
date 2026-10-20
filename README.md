@@ -1,186 +1,316 @@
 # Glass Mixer
 
-A lightweight, native Windows audio mixer that lives in the system tray. It
-controls active output and input devices and apps with sessions on the
-default output, with a Windows 11 glass look.
+Control the volume of every app and audio device on Windows from one small
+window in the system tray. Glass Mixer lets you set each app's volume, mute
+and balance separately, switch your speakers or microphone, and keeps
+everything in sync with changes you make anywhere else in Windows. On
+Windows 11 it uses the native Acrylic or Mica glass look.
 
-Written in Rust and built on the Windows Core Audio APIs. It doesn't use a
-web view, needs no administrator rights for normal use, and makes no
-network access.
+It is a native app written in Rust on the Windows Core Audio APIs: no web
+view, no background service, no administrator rights and no network access.
+
+[![Latest release](https://img.shields.io/github/v/release/ppolkadot/glass-mixer)](https://github.com/ppolkadot/glass-mixer/releases/latest)
+[![CI](https://github.com/ppolkadot/glass-mixer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ppolkadot/glass-mixer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/ppolkadot/glass-mixer)](LICENSE)
+
+## Download
+
+Get Glass Mixer from the
+[latest release](https://github.com/ppolkadot/glass-mixer/releases/latest).
+Each release has two downloads:
+
+| Download | Choose it if | How to start |
+| --- | --- | --- |
+| `glass-mixer-<version>-setup.exe` | You want a normal installation: a Start menu entry, an uninstaller, and optional launch at sign-in. | Run the installer. It installs for your user account only, to `%LOCALAPPDATA%\Programs\Glass Mixer`, and needs no administrator rights. |
+| `glass-mixer-<version>-portable.zip` | You don't want to install anything. | Unzip it anywhere and run `glass-mixer.exe`. Settings are still kept in `%APPDATA%\GlassMixer`. |
+
+The downloads are not code-signed, so Windows SmartScreen may warn the first
+time you run them. Choose **More info**, then **Run anyway** if you trust the
+download. Recent release notes list the SHA-256 checksum of each download.
+
+To build it yourself, see [Build from source](#build-from-source).
 
 ## Features
 
-- **Output and input devices:** volume, mute and stereo balance, plus
-  default-device switching. The Devices view controls other active endpoints
-  independently. Duplicate names have a numbered suffix and full ID tooltip.
-- **Sound properties:** in the Devices view, expandable device sections show
-  balance, the selected format and the internal mix format. Format,
-  enhancements, spatial and mono controls open Windows Settings. See [probe findings](docs/SOUND_PROPERTIES_SPIKE.md).
-- **Tray notifications:** warnings and errors while hidden, with throttling,
-  duplicate suppression and a Settings toggle. Windows notification policy applies.
-- **Optional global shortcuts:** assign chords for output/microphone mute,
-  output volume up/down and showing the mixer. No chord is assigned by default.
-- **Pins and presets:** pin apps by executable or package identity; an offline
-  pin says "Not running" and exposes no volume. Presets save app volumes and
-  mutes only when you press Save, and apply only when you press Apply now or
-  enable a visible once-per-new-process rule. Automatic rules track each
-  running process instance (`(AppKey, pid, created)`), apply once to a newly
-  launched process after the rule is enabled, and only apply when that
-  process's initial audio session is still at default `100 %` and unmuted so a
-  non-default initial or Windows-restored session level is not silently
-  overwritten (use `Apply now` to override a remembered or already-adjusted
-  level). Already-running processes and observed user changes are skipped.
-- **Per-app mixer:** independent volume, mute and balance for every app
-  with a Windows audio session.
-  - Each row shows the app's own icon, its name, and whether it is
-    Playing, Idle or Muted. Status is shown as text as well as colour.
-  - An app's sessions are grouped into one row. Apps are matched by
-    executable path or package identity (AUMID), not by display name.
-  - Live peak meters (optional).
-  - Filter by name (Ctrl+F). Idle apps can be hidden; System sounds stays visible.
-- **Always in sync with Windows:** changes made with the volume keys,
-  Windows Settings, hardware buttons or other apps appear in the mixer
-  within milliseconds. Windows is the only source of truth; Glass Mixer
-  never stores or restores volume levels automatically except when you
-  explicitly save and enable a preset rule.
-- **Event-driven:** device add/remove, default-device changes, apps starting
-  and quitting, sleep/resume, and Windows Audio service restarts are all
-  detected and recovered from automatically.
-- **System tray:**
-  - Click the tray icon to open the mixer.
-  - Right-click for a menu with Open Mixer, Mute and Exit.
-  - The tooltip shows the volume and output device.
-  - The close button keeps the app running in the tray, and only one
-    copy runs at a time.
-- **Appearance:**
-  - Acrylic or Mica glass backdrop, on by default on Windows 11.
-  - Light, dark, or follow Windows.
-  - Seven accent colours.
-  - Comfortable or compact density.
-  - A 480×720 starting window and a Settings action to return to that size.
-- **Accessibility:**
-  - Full keyboard navigation with a visible focus ring and automatic scrolling
-    of newly focused controls inside scrollable views.
-  - Sliders: arrow keys (1 %), Shift+arrows or Page Up/Down (larger
-    steps), Home/End, and the mouse wheel.
-  - Screen-reader support through UI Automation. Every control has a
-    name, and sliders expose their value.
-  - Respects Windows' reduced-motion, transparency and high-contrast
-    settings.
-- **Launch at login** is optional. It registers per user and needs no
-  admin rights.
+**Audio controls**
 
-## Requirements
+- Volume, mute and stereo balance for every app that plays sound.
+- Volume, mute and balance for your default speakers and microphone, and
+  switching which device is the default.
+- A **Devices** view that controls every active output and input separately.
+- **Presets** that save app volumes and mutes and apply them on request, or
+  once whenever a saved app starts.
+- Optional global keyboard shortcuts for mute, microphone mute, volume up and
+  down, and showing the mixer. None are assigned until you choose them.
 
-- Windows 10 1809 or later, or Windows 11 (the primary target).
-- A graphics driver supporting OpenGL, or Direct3D 12 or Vulkan for the
-  fallback. Glass Mixer tries OpenGL first, then an opaque window on
-  Direct3D 12 or Vulkan if OpenGL initialization fails. The log records which
-  renderer and graphics adapter are in use.
+**Apps in the mixer**
 
-## Install
+- Each app shows its own icon, its name and whether it is Playing, Idle or
+  Muted (in text as well as colour).
+- An app with several audio streams appears as one row.
+- Filter the list by name (Ctrl+F), hide idle apps, and pin apps so they keep
+  their place even when they aren't running.
+- Live level meters under the sliders (optional).
 
-- **Installer:** run `glass-mixer-<version>-setup.exe`. It installs per user
-  to `%LOCALAPPDATA%\Programs\Glass Mixer` and needs no admin rights.
-- **Portable:** unzip `glass-mixer-<version>-portable.zip` and run
-  `glass-mixer.exe`.
+**Windows integration**
 
-Settings are stored in `%APPDATA%\GlassMixer\settings.json`. The log is
-`%LOCALAPPDATA%\GlassMixer\glass-mixer.log`.
+- Lives in the system tray: closing the window keeps it running there. The
+  tray icon shows the volume and output device in its tooltip, and its menu
+  has **Open Mixer**, **Mute** and **Exit**.
+- Follows changes made with volume keys, Windows Settings or other apps.
+- Notices devices being added, removed or switched, and reconnects to Windows
+  audio after sleep or an audio service restart (not yet verified on real
+  hardware; see [Project status](#project-status-and-documentation)).
+- Optional launch at sign-in and start minimized; only one copy runs at a
+  time.
+- While hidden, warnings and errors appear as Windows notifications; Windows
+  may hold them back, for example while you are presenting or in a
+  full-screen app.
 
-**Upgrading from 0.1.0:** the first time 0.2.0 reads an older settings file,
-it writes and verifies an untouched copy as `settings.v1.backup.json` in the
-same folder before promoting `settings.json` to the new schema. If that backup
-cannot be created or verified (for example, because the backup path is
-obstructed or unwritable), Glass Mixer warns, runs with the migrated settings
-in memory so ordinary audio controls remain available, and refuses to overwrite
-the original `settings.json` until the backup succeeds on a later save.
-**Going back to 0.1.0:** 0.1.0 cannot keep 0.2.0's pins, presets and global
-shortcuts; on its next save it drops them and rewrites the file in the old
-format. To return cleanly, exit Glass Mixer and rename
-`settings.v1.backup.json` to `settings.json` before starting 0.1.0.
+**Appearance**
 
-Command line: `glass-mixer.exe --minimized` starts with only the tray icon;
-`glass-mixer.exe --renderer=wgpu` forces the opaque Direct3D 12 / Vulkan
-fallback renderer.
+- Light, dark or follow Windows; seven accent colours.
+- Comfortable or compact layout.
+- Acrylic or Mica glass on Windows 11 (see [Requirements](#requirements-and-compatibility)).
 
-## Build from source
+**Accessibility**
 
-Prerequisites:
+- Full keyboard navigation with a visible focus ring. Sliders respond to the
+  arrow keys, Page Up/Down, Home/End and the mouse wheel.
+- Every control is named for screen readers (UI Automation), and sliders
+  report their values.
+- Follows Windows' high-contrast, transparency and animation settings.
 
-- Rust stable with the MSVC toolchain (`rustup default stable-msvc`).
-- Visual Studio 2022 or later with the "Desktop development with C++"
-  workload and a Windows SDK.
+## Quick start
 
-```powershell
-cargo build --release                 # target\release\glass-mixer.exe
-cargo run                             # debug build with a console for logs
-powershell -ExecutionPolicy Bypass -File scripts\package.ps1   # dist\ zip (+ installer)
-```
+1. Install or unzip Glass Mixer, then start it from the Start menu or by
+   running `glass-mixer.exe`. The mixer window opens and its icon appears in
+   the system tray (it may be under the **^** overflow arrow on the taskbar).
+2. Play something in an app, such as a video in your browser. The app appears
+   under **Apps**.
+3. Drag the app's slider to change its volume, or click the speaker button
+   next to it to mute it. Click the app's name to show its balance and the
+   **Pin** option.
+4. Use the drop-downs at the top (output) and bottom (input) to change your
+   default speakers or microphone. The **Devices** tab controls every device.
+5. Close the window with **X**: Glass Mixer keeps running in the tray.
+   Left-click the tray icon to bring the window back.
+6. To quit, right-click the tray icon and choose **Exit**.
 
-`scripts\package.ps1` always produces a portable zip. It also builds the
-installer when Inno Setup 6 is installed
-(`winget install JRSoftware.InnoSetup`). Optional signing and the development
-lifecycle, UI Automation and window-capture scripts are documented in
-[scripts/README.md](scripts/README.md).
+Appearance, startup, shortcut and behaviour options are under the
+**Settings** tab.
 
-## Tests
+### Command-line options
 
-```powershell
-cargo test                                                         # unit tests (no hardware)
-cargo test --test audio_integration -- --ignored --test-threads=1  # real audio devices
-```
+| Option | Effect |
+| --- | --- |
+| `--minimized` | Start with only the tray icon. |
+| `--renderer=wgpu` | Use the opaque Direct3D 12 / Vulkan renderer instead of OpenGL. |
+| `--exit` | Ask the copy running from the same folder to exit (used by the uninstaller). |
 
-The integration tests change real volumes by ±2 %, mostly on the idle System
-sounds session, and always restore them. See [docs/TESTING.md](docs/TESTING.md)
-for what is covered automatically and the manual Windows checklist.
+## Requirements and compatibility
 
-Diagnostics: `cargo run --example audio_probe -- 30` prints what the audio
-engine sees and watches for changes for 30 seconds. It changes nothing.
+- 64-bit Windows 10 version 1809 or later, or Windows 11. The installer
+  enforces this minimum.
+- A graphics driver with OpenGL, or with Direct3D 12 or Vulkan. Glass Mixer
+  tries OpenGL first and falls back to an opaque window on Direct3D 12 or
+  Vulkan.
+
+The audio controls work the same on every supported version. The glass
+effect is optional and depends on Windows:
+
+| Windows version | Glass effect |
+| --- | --- |
+| Windows 11 22H2 or later | Acrylic (default) or Mica |
+| Windows 11 21H2 | Mica only |
+| Windows 10 | Not available; a matching solid background is used |
+
+Glass also turns off when Windows transparency effects are off, when high
+contrast is on, or when the fallback renderer is in use. Settings shows the
+reason. Acrylic turns solid while the window isn't focused; that is Windows'
+own behaviour.
+
+Development and testing have been done on Windows 11. Windows 10 is supported
+by the build but has not been tested; see [TESTING.md](docs/TESTING.md).
 
 ## Limitations
 
-- **Default-device switching** uses the undocumented `IPolicyConfig`
-  interface, as EarTrumpet, SoundSwitch and the Sound control panel do.
-  Windows has no public API for this. If the interface is missing, the
-  device menu is disabled with an explanation.
-- **Session scope:** only sessions on the current default output device
-  are listed, as in Windows' own mixer. Per-app output routing isn't
-  supported.
-- **What can't be controlled:** sounds Windows doesn't expose as separate
-  sessions, such as exclusive-mode streams, some protected or DRM paths,
-  and hardware mixers. Some system sounds share the System sounds session.
-- **Balance** needs a stereo device or session. Elsewhere it is shown as
-  unavailable rather than as a value. Double-click a balance slider to center it.
-- **Glass:**
-  - Acrylic and Mica need Windows 11 22H2 or later.
-  - Windows 11 21H2 gets Mica only.
-  - Windows 10 uses a matching solid background.
-  - Glass also turns off automatically when Windows transparency effects
-    are off or high contrast is on.
-- **Notifications** appear in the app while it is visible; while hidden,
-  warnings and errors use tray notifications subject to Windows quiet policy.
-
-## Project documentation
-
-- [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md): the full project record. It covers
-  the original specification, development history, features, decisions,
-  test results, gaps and known risks.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design and the Windows API strategy.
-- [docs/TESTING.md](docs/TESTING.md): tests, results and the manual checklist.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+- **Only the default output's apps are listed.** As in Windows' own volume
+  mixer, apps playing to another device don't appear, and Glass Mixer can't
+  send an app to a different device. Change the default output, or route the
+  app in Windows' own sound settings (on Windows 11: Settings > System >
+  Sound > Volume mixer).
+- **Some audio can't be controlled separately**: sounds Windows doesn't expose
+  as their own session, such as exclusive-mode streams, some protected (DRM)
+  playback and hardware mixers. Some Windows sounds share the System sounds row.
+- **Default-device switching uses an undocumented Windows interface**
+  (`IPolicyConfig`), because Windows has no public API for it. It is the same
+  interface the Sound control panel uses. If it is unavailable, the device
+  drop-downs are disabled and say why.
+- **An app with several streams shows the loudest one**, and changing its
+  volume sets all of its streams to the same level.
+- **Balance needs a stereo device or app**; elsewhere it says it isn't
+  available.
+- **Sound formats, enhancements, spatial sound and mono audio are read-only.**
+  The Devices view shows them and opens Windows Settings to change them.
+- **Automatic presets apply only to apps that start at 100 % and unmuted.**
+  Windows remembers app volumes, so an app it restores to a different level is
+  left alone. Use **Apply now** on the preset instead.
+- **Without graphics acceleration** (for example in some virtual machines or
+  remote sessions), level meters are paused, because every frame would be
+  drawn by the processor.
+- **Launch at sign-in follows the last copy started.** If you run copies from
+  several folders, the sign-in entry points to the most recent one.
 
 ## Troubleshooting
 
-| Symptom | What to do |
+| Problem | What to do |
 | --- | --- |
-| "Glass Mixer couldn't start its window" | Both OpenGL and the opaque Direct3D 12/Vulkan fallback failed. Update the GPU driver or run it locally. The log's `renderer:` line shows what was tried last. |
-| An app is missing from the list | It has no audio session on the default output yet. Play something in it, or press ↻ Refresh. Apps playing to another device aren't listed. |
-| The device menu is greyed out | Default switching isn't available on this system. Use Windows Settings > System > Sound. |
-| No glass effect | Check Settings > Glass effect. The status line explains why it's off (Windows version, transparency effects, high contrast). |
-| Launch at login doesn't work | It may be disabled in Task Manager > Startup apps; Settings shows this. Turn the toggle off and on to re-enable it. |
-| Volumes look stuck after sleep | The app rebuilds automatically after resume. Press ↻ or Settings > Refresh audio devices to force it, and check the log file. |
-| The window is too small | Use Settings > Appearance > Use recommended window size. Existing saved sizes are preserved. |
+| An app is missing from the list | It has no audio session on the default output yet. Play something in it, or press the refresh button (↻) next to the filter. Apps playing to another device aren't listed. |
+| Volumes look stuck after sleep or after plugging in a device | Glass Mixer rebuilds automatically. Press ↻ or **Settings > Refresh audio devices** to force it, and check the log file. |
+| The device drop-downs are greyed out | Default-device switching isn't available on this system. Use Windows Settings > System > Sound. |
+| There's no glass effect | The status under **Settings > Glass effect** explains why (Windows version, transparency effects, high contrast or the fallback renderer). |
+| Level meters don't move | Check **Settings > Level meters**. Without graphics acceleration they are paused, and the setting says so. |
+| A global shortcut says "Not active" | Windows or another app already uses that key combination. Choose another one, or free it and click **Retry failed shortcuts**. |
+| Launch at sign-in doesn't work | It may be disabled in Task Manager > Startup apps; Settings shows this. Turn the option off and on to re-enable it. |
+| "Glass Mixer couldn't start its window" | Neither OpenGL nor Direct3D 12 / Vulkan could start. Update the graphics driver. The log's `renderer:` line shows what was tried. |
+| The window is too small | Use **Settings > Appearance > Use recommended window size**. |
+
+If a problem persists, check the [log file](#where-are-settings-and-logs-stored)
+and [report an issue](#contributing-and-reporting-issues).
+
+## FAQ
+
+### Does closing the window exit Glass Mixer?
+
+No. By default it keeps running in the tray; use **Exit** in the tray menu to
+quit. You can change this with **Settings > Keep running when closed**.
+
+### Does it need administrator rights?
+
+No. The installer installs for your user only, and the app runs with standard
+rights. Apps running as administrator or protected by Windows may show
+without an icon or with a generic name such as "Process 1234", because Glass
+Mixer can't read their details.
+
+### Does it access the network?
+
+No. Glass Mixer has no networking code and none of its components make
+network connections. It collects no telemetry or analytics.
+
+### Where are settings and logs stored?
+
+| What | Where |
+| --- | --- |
+| Settings | `%APPDATA%\GlassMixer\settings.json` |
+| Log | `%LOCALAPPDATA%\GlassMixer\glass-mixer.log` (once it passes 1 MB, the next launch moves it to `glass-mixer.old.log` and starts a new one) |
+| Launch at sign-in | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `GlassMixer` |
+
+Glass Mixer never stores live volume levels: Windows remains the source of
+truth. Only presets you save keep app volumes. If you edit `settings.json` by
+hand, UTF-8 and UTF-16 are both accepted; a file that can't be read is kept as
+`settings.json.bad` and defaults are used. Uninstalling asks whether to remove
+your settings.
+
+### Can I go back to an older version?
+
+Version 0.1.0 can't keep the pins, presets and shortcuts added later. When a
+newer version first reads a 0.1.0 settings file, it saves an untouched copy as
+`settings.v1.backup.json`. To return to 0.1.0, exit Glass Mixer and rename
+that backup to `settings.json` first.
+
+## Build from source
+
+You need:
+
+- [Rust](https://www.rust-lang.org/tools/install) (stable, MSVC toolchain:
+  `rustup default stable-msvc`). The minimum version is 1.95.
+- [Visual Studio](https://visualstudio.microsoft.com/downloads/) 2022 or later,
+  or its Build Tools, with the "Desktop development with C++" workload and a
+  Windows SDK.
+- Optional, for the installer: [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+  (`winget install JRSoftware.InnoSetup`).
+
+```powershell
+cargo build --release   # target\release\glass-mixer.exe
+cargo run               # debug build; also opens a console window
+powershell -ExecutionPolicy Bypass -File scripts\package.ps1
+```
+
+`scripts\package.ps1` builds the release executable and writes the portable
+zip, plus the installer when Inno Setup is installed, to `dist\`. Both include
+`LICENSE` and `THIRD-PARTY-NOTICES.txt`. Code signing and the development
+scripts are described in [scripts/README.md](scripts/README.md).
+
+## Tests and diagnostics
+
+```powershell
+cargo test   # unit and UI-layout tests; no audio hardware needed
+```
+
+These tests need real audio devices, change real volumes, and restore them
+when they finish:
+
+```powershell
+# Changes volumes by about 2 %, mostly on the idle System sounds session,
+# and plays silence from a helper process.
+cargo test --test audio_integration -- --ignored --test-threads=1
+# Changes the volume and balance of every active device, then restores them.
+cargo test --test devices_integration -- --ignored --test-threads=1
+```
+
+These diagnostic tools only read state and change nothing:
+
+```powershell
+cargo run --example audio_probe -- 30      # devices, apps and meters; watches for changes for 30 s
+cargo run --example sound_properties_probe # device formats, effects and spatial-audio support
+```
+
+The release build logs at the info level, and debug builds at the debug level.
+Both use the [log file](#where-are-settings-and-logs-stored).
+[TESTING.md](docs/TESTING.md) lists what is covered automatically, recorded
+results and the manual checklist.
+
+## Project status and documentation
+
+Glass Mixer is a Windows-only project, released as described in
+[CHANGELOG.md](CHANGELOG.md). It has been developed and tested on Windows 11;
+Windows 10, multi-device hot-plug, sleep and resume, and audio service
+restarts are implemented but not yet verified on real hardware.
+
+| Document | For | Contents |
+| --- | --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | Everyone | What changed in each version, upgrade notes and known limitations |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Developers | Threads, data flow and the Windows APIs used |
+| [docs/TESTING.md](docs/TESTING.md) | Contributors | Automated tests, recorded results and the manual checklist |
+| [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) | Maintainers | The full project record: original specification, decisions, gaps and known risks |
+| [docs/SOUND_PROPERTIES_SPIKE.md](docs/SOUND_PROPERTIES_SPIKE.md) | Developers | Why sound-property controls open Windows Settings |
+| [scripts/README.md](scripts/README.md) | Contributors | Packaging, signing and development test scripts |
+
+## Contributing and reporting issues
+
+Report bugs and request features in
+[GitHub Issues](https://github.com/ppolkadot/glass-mixer/issues). For an audio
+problem, please include:
+
+- Your Windows version and the Glass Mixer version (shown under
+  **Settings > About**).
+- The audio device involved (for example USB headset or HDMI monitor) and the
+  affected app.
+- The steps that reproduce the problem.
+- The relevant part of the log file. It contains device names and app paths,
+  which can include your user name; remove anything private before sharing.
+
+Before opening a pull request, run the checks that CI runs:
+
+```powershell
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+## License
+
+Glass Mixer is released under the [MIT License](LICENSE). The licenses of the
+open-source components compiled into it are in `THIRD-PARTY-NOTICES.txt`,
+included with each download from version 0.4.0.

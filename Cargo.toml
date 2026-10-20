@@ -1,20 +1,11 @@
 [package]
 name = "glass-mixer"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A lightweight, native Windows audio mixer that lives in the system tray."
 license = "MIT"
 publish = false
-build = "build.rs"
-
-[[bin]]
-name = "glass-mixer"
-path = "src/main.rs"
-
-[lib]
-name = "glass_mixer"
-path = "src/lib.rs"
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu"] }
@@ -56,7 +47,6 @@ features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ]
