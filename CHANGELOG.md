@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **An app's balance showed only one of its streams.** When an app has several
+  audio sessions, the row displayed the first stereo session's balance even if
+  the others differed. The balance is now aggregated: one value when every
+  stereo stream agrees, "Differs between streams" with a "Center all" button
+  when they don't, and "Not available" when no stream is stereo.
+- **Automatic preset rules could stop for the rest of the session.** Markers
+  for processes whose exit was never observed (no `SYNCHRONIZE` access, or
+  audio that ended before the process did) were never released, so a long
+  session could reach the 1,024-instance limit, after which no launch
+  qualified until the rules were re-armed. Markers of exited or reused PIDs are
+  now reclaimed during session refreshes, and reaching the limit recovers
+  safely once capacity frees up.
+- **One unreadable audio session blocked the whole app list from refreshing.**
+  It is now skipped and logged.
+
+### Changed
+
+- Bursts of device notifications (for example a Bluetooth reconnect) are merged
+  into one re-enumeration 50 ms after the first; default-device changes remain
+  immediate.
+- New read-only `examples/grouping_probe.rs` lists sessions with their Windows
+  grouping parameter, to check multi-process grouping before relying on it.
+
 ## 0.4.0 (2026-10-20)
 
 Fixes and hardening from the 2026-10-20 audit of 0.3.0. Not yet published

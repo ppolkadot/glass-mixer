@@ -784,7 +784,11 @@ mod tests {
         let registrations = registrations_for(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23", 5);
         assert_eq!(registrations.resolve(7, lparam(chord)), Some(Resolved::Window(HotkeyEvent::ToggleWindow)));
         // Nothing in this module can touch a window: it does not import `platform::window`.
-        assert!(!include_str!("hotkeys.rs").split("#[cfg(test)]").next().unwrap().contains("window::"));
+        // Everything before the test module is checked, including test-only seams.
+        let source = include_str!("hotkeys.rs");
+        let (module, _) = source.split_once("\nmod tests {").expect("test module marker");
+        assert!(module.contains("RegisterHotKey("), "the scan must cover the worker, not stop early");
+        assert!(!module.contains("window::"));
     }
 
     #[test]

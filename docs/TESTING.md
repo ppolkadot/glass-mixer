@@ -1,5 +1,34 @@
 # Testing
 
+## Stage 1 correctness fixes (2026-11-05, branch `stage1/correctness`)
+
+Balance aggregation, process-marker reclaim and saturation recovery, skipping
+unreadable sessions, device-notification coalescing, and the hotkey test guard.
+
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`:
+  passed.
+- `cargo test --locked`: 118 library tests passed (12 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 8 hardware tests ignored. New tests
+  cover uniform, mixed, mono-only and mono-plus-stereo balances, sessions
+  appearing and ending, aligning after an adjustment, the mixer showing the
+  right balance control for each state, 20,000 launches with unobserved exits
+  and constant PID reuse (never saturates, each launch qualifies once),
+  recovery from saturation without requalifying skipped or live processes,
+  unknown processes keeping their markers, the liveness check against the test
+  process and an exited child, and device-event bursts producing one refresh
+  without losing a late event. The hotkey "never touches `window::`" guard now
+  scans the whole module up to `mod tests`.
+- `cargo test --test audio_integration -- --ignored --test-threads=1`: all 7
+  passed on real devices (external change seen after 20 ms, new session after
+  61 ms, removal 20 ms after process exit).
+- `cargo run --example grouping_probe`: 4 sessions on the default output
+  (system sounds and three single-process apps), each with its own grouping
+  GUID. No multi-process app was running, so how Windows groups helper
+  processes is still unverified; grouping is unchanged.
+- Not run: a Bluetooth reconnect burst (the coalescing is unit-tested only), an
+  app with several stereo sessions at different balances on real hardware,
+  saturation over a real long-running session, and Windows 10.
+
 ## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
 
 Fixes for meters under software rendering, the unbounded icon-thread join, settings file

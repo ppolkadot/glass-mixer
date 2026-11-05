@@ -32,14 +32,23 @@ a nondefault initial state (anything other than `100%` and unmuted), and never
 repeats for the same process instance. Tracking by `(AppKey, pid, created)`
 avoids PID reuse and handles multi-instance launches or older processes that
 open audio late independently; no polling or startup-wide restore occurs.
-Live markers are never evicted: after 1,024 un-reclaimed instances the tracker
-latches saturated and skips unseen instances, and the latch stays set until the
-rules are re-armed or Glass Mixer restarts, even if confirmed exits later free
-slots. Instances skipped while saturated were never recorded, so clearing the
-latch automatically could requalify an untracked running process.
+Live markers are never evicted. A marker is released when its process's exit
+watch fires, and also by a reclaim pass that checks each marker with
+`OpenProcess` plus the creation time (catching exits that were never observed:
+no `SYNCHRONIZE` access, or sessions that ended before the process did, and PID
+reuse). Anything Windows won't confirm as exited counts as running. The pass
+runs during session refreshes, at most every 5 minutes, or every 10 seconds
+once 512 markers are held; there is no timer. If 1,024 live instances are
+tracked anyway, the tracker latches saturated and skips unseen instances. A
+reclaim pass that frees capacity clears the latch and moves the arming time to
+that moment, so no instance skipped while saturated (all started earlier) can
+qualify later; only launches after recovery do.
 
 ## Additional endpoints and sound properties
 
+Device added, removed, state and property notifications are coalesced: the
+first one schedules a re-enumeration 50 ms later and the rest of the burst joins
+it. Default-device changes refresh immediately, and also cover anything pending.
 Opening Devices sends `LoadDevices`. The engine lazily opens non-default
 endpoints and owns each volume callback until the device disappears or the
 engine rebuilds. Device commands use endpoint IDs; fatal read errors rebuild
@@ -76,7 +85,7 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 
 | Module | Responsibility |
 | --- | --- |
-| `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping, balance math, tooltip text. |
+| `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping (an app's balance is `Uniform`, `Mixed` when its stereo sessions disagree, or `Unavailable`), balance math, tooltip text. |
 | `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, launch at login (registry), DWM backdrop, system preferences, fonts, and app icon resolution. |
 | `ui/` | The design system (`theme.rs`), custom widgets (`widgets.rs`), the mixer view and the settings view. |
 | `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown top-level fields, atomic migration backups, and atomic writes. |
@@ -144,6 +153,8 @@ unregisters it: `Engine`, `Endpoint`, `SessionSet`, `Session`,
   service unavailable" in the UI.
 - Resume from sleep schedules a rebuild after 1.5 s.
 - Transient errors retry only the structural refresh.
+- A session that can't be read while enumerating is skipped and logged;
+  the other sessions still refresh.
 
 **Idle cost.** While hidden, the engine thread blocks on its channel and
 the UI thread gets no frames, so CPU use is 0 ms over 10 s. While visible,

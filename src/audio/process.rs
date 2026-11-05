@@ -12,12 +12,14 @@ use std::{
     },
 };
 use windows::Win32::Foundation::FILETIME;
-use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_PARAMETER, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+};
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Threading::{
-    GetProcessTimes, INFINITE, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    QueryFullProcessImageNameW, RegisterWaitForSingleObject, UnregisterWaitEx, WT_EXECUTEONLYONCE,
+    GetExitCodeProcess, GetProcessTimes, INFINITE, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, RegisterWaitForSingleObject, UnregisterWaitEx, WT_EXECUTEONLYONCE,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -50,6 +52,23 @@ pub fn open(pid: u32) -> Option<ProcessHandle> {
             .ok()
             .map(ProcessHandle)
     }
+}
+
+/// Whether the process instance started at `created` (a FILETIME) still runs
+/// under `pid`. Answers `true` whenever Windows can't confirm the opposite (an
+/// elevated process denying access, or a process that exited with code 259), so
+/// state kept for live processes is never released early.
+pub fn is_running(pid: u32, created: u64) -> bool {
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(handle) => ProcessHandle(handle),
+        // No process has this PID any more.
+        Err(e) => return e.code() != ERROR_INVALID_PARAMETER.to_hresult(),
+    };
+    if created_at(&handle).is_some_and(|t| t != created) {
+        return false; // The PID now belongs to a newer process.
+    }
+    let mut code = 0u32;
+    unsafe { GetExitCodeProcess(handle.0, &mut code) }.is_err() || code == STILL_ACTIVE.0 as u32
 }
 
 pub fn query(handle: &ProcessHandle) -> ProcessInfo {
@@ -189,5 +208,36 @@ impl Drop for ProcessWatch {
             drop(Box::from_raw(self.context));
         }
         let _ = &self.process;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn created(pid: u32) -> u64 {
+        created_at(&open(pid).expect("open own or child process")).expect("creation time")
+    }
+
+    #[test]
+    fn a_running_process_is_running_only_as_its_own_instance() {
+        let pid = std::process::id();
+        let started = created(pid);
+        assert!(is_running(pid, started));
+        assert!(!is_running(pid, started + 1), "a different creation time means the PID was reused");
+    }
+
+    #[test]
+    fn an_exited_process_is_not_running_even_while_a_handle_keeps_it_known() {
+        let mut child = std::process::Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()))
+            .args(["/c", "exit 0"])
+            .spawn()
+            .expect("spawn cmd");
+        let pid = child.id();
+        let started = created(pid);
+        child.wait().expect("wait for cmd");
+        // `child` still owns a handle, so the PID can't be reused yet.
+        assert!(!is_running(pid, started));
+        drop(child);
     }
 }

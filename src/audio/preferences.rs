@@ -40,7 +40,7 @@ impl PinnedApp {
             muted: false,
             activity: Activity::Idle,
             session_count: 0,
-            balance: None,
+            balance: crate::audio::BalanceState::Unavailable,
         }
     }
 }
@@ -197,9 +197,9 @@ pub struct StartTracker {
     armed_at: u64,
     seen: std::collections::HashSet<ProcessInstance>,
     /// Set once more than `MAX_TRACKED_PROCESSES` live instances are tracked;
-    /// unseen instances are then skipped. It stays set until
-    /// [`StartTracker::rearm`]: instances skipped meanwhile were never recorded,
-    /// so clearing it early could requalify a process that isn't a new launch.
+    /// unseen instances are then skipped. Instances skipped meanwhile were never
+    /// recorded, so only [`StartTracker::reclaim`] (which also moves the arming
+    /// time past them) or [`StartTracker::rearm`] may clear it.
     saturated: bool,
 }
 
@@ -234,6 +234,26 @@ impl StartTracker {
     pub fn forget_exited_pid(&mut self, pid: u32) {
         if pid != 0 {
             self.seen.retain(|existing| existing.pid != pid);
+        }
+    }
+
+    /// Whether enough markers are held that [`StartTracker::reclaim`] is worth its cost.
+    pub fn wants_reclaim(&self) -> bool {
+        self.saturated || self.seen.len() >= MAX_TRACKED_PROCESSES / 2
+    }
+
+    /// Drops markers whose process instance is no longer running, including
+    /// processes whose exit was never observed. `is_running(pid, created)` must
+    /// answer `true` when it can't tell, so a live instance is never forgotten.
+    ///
+    /// If this frees capacity while saturated, the latch is cleared and the
+    /// arming time moves to `now`: instances skipped while saturated started
+    /// before `now`, so none of them can qualify later.
+    pub fn reclaim(&mut self, now: u64, mut is_running: impl FnMut(u32, u64) -> bool) {
+        self.seen.retain(|i| i.pid == 0 || is_running(i.pid, i.created));
+        if self.saturated && self.seen.len() < MAX_TRACKED_PROCESSES {
+            self.saturated = false;
+            self.armed_at = self.armed_at.max(now);
         }
     }
 
@@ -471,6 +491,76 @@ mod tests {
         tracker.rearm(7000);
         assert!(!tracker.saturated);
         assert!(tracker.observe_process(&app, 8888, 7001, true), "rearming clears the latch");
+    }
+
+    #[test]
+    fn long_runs_of_launches_with_unobserved_exits_never_saturate() {
+        let (app, helper) = (exe("player.exe"), exe("helper.exe"));
+        let mut tracker = StartTracker::new(100);
+        let mut live: HashSet<(u32, u64)> = HashSet::new();
+        let mut applied = 0;
+        for n in 0..20_000u32 {
+            // PIDs cycle through a small range, so they are reused constantly.
+            let (pid, created) = (4 + n % 700 * 4, 200 + u64::from(n));
+            let key = if n % 3 == 0 { &helper } else { &app };
+            if tracker.observe_process(key, pid, created, true) {
+                applied += 1;
+            }
+            assert!(!tracker.observe_process(key, pid, created, true), "launch {n} considered twice");
+            live.insert((pid, created));
+            // Each process lives for a while, then exits without an exit notification.
+            live.retain(|&(_, c)| c + 300 > created);
+            if n % 50 == 0 && tracker.wants_reclaim() {
+                tracker.reclaim(created, |pid, c| live.contains(&(pid, c)));
+            }
+            assert!(!tracker.saturated, "saturated after {n} launches");
+        }
+        assert_eq!(applied, 20_000, "every launch qualifies exactly once");
+        assert!(tracker.seen.len() <= MAX_TRACKED_PROCESSES);
+    }
+
+    #[test]
+    fn reclaiming_after_saturation_resumes_rules_without_requalifying_skipped_or_live_processes() {
+        let app = exe("a.exe");
+        let mut tracker = StartTracker::new(100);
+        for offset in 0..(MAX_TRACKED_PROCESSES as u32) {
+            assert!(tracker.observe_process(&app, 10 + offset, 200 + u64::from(offset), true));
+        }
+        assert!(!tracker.observe_process(&app, 9000, 5000, true), "skipped while saturated, so never recorded");
+        assert!(tracker.saturated);
+
+        // A reclaim that finds every process alive changes nothing.
+        tracker.reclaim(5500, |_, _| true);
+        assert!(tracker.saturated);
+        assert_eq!(tracker.armed_at, 100);
+
+        // 600 processes exited unnoticed; the skipped one still runs.
+        let exited = |pid: u32| (10..610).contains(&pid);
+        tracker.reclaim(6000, |pid, _| !exited(pid));
+        assert!(!tracker.saturated, "freed capacity clears the latch");
+        assert!(
+            !tracker.observe_process(&app, 9000, 5000, true),
+            "the process skipped while saturated must not qualify when its session appears later"
+        );
+        assert!(!tracker.observe_process(&app, 900, 1090, true), "a live tracked process stays ineligible");
+        assert!(tracker.observe_process(&app, 9001, 6001, true), "a launch after recovery qualifies");
+        assert!(!tracker.observe_process(&app, 9001, 6001, true));
+    }
+
+    #[test]
+    fn reclaim_keeps_unknown_processes_and_handles_pid_reuse() {
+        let app = exe("a.exe");
+        let mut tracker = StartTracker::new(100);
+        assert!(tracker.observe_process(&app, 10, 150, true));
+        assert!(tracker.observe_process(&app, 20, 160, true));
+        // Pid 10 is unknown (for example access denied), so it is reported as running.
+        tracker.reclaim(170, |pid, _| pid == 10);
+        assert!(!tracker.observe_process(&app, 10, 150, true), "an unknown process keeps its marker");
+        assert!(tracker.seen.iter().all(|i| i.pid != 20));
+        // Pid 20 was reused by a later process, which is a new instance.
+        assert!(tracker.observe_process(&app, 20, 400, true));
+        assert!(!tracker.observe_process(&app, 20, 400, true));
+        assert_eq!(tracker.armed_at, 100, "reclaiming without saturation never moves the arming time");
     }
 
     #[test]

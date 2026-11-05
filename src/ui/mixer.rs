@@ -9,8 +9,8 @@
 use super::Look;
 use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label, semibold};
 use crate::audio::{
-    Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, Command, EndpointState, Flow, Meters, ServiceStatus,
-    matches_filter, show_with_idle_filter, to_percent,
+    Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, BalanceState, Command, EndpointState, Flow, Meters,
+    ServiceStatus, matches_filter, show_with_idle_filter, to_percent,
 };
 use crate::platform::icons::{IconKey, IconResult, IconService};
 use crate::settings::Settings;
@@ -681,7 +681,7 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
         ui.add_space(indent);
         ui.label(RichText::new("Balance").color(p.text_muted));
         match app.balance {
-            Some(balance) => {
+            BalanceState::Uniform(balance) => {
                 ui.label(RichText::new("L").small().color(p.text_muted));
                 let target = Target::Balance(Ctl::App(app.key.clone()));
                 let mut b = st.value(&target, balance);
@@ -699,7 +699,15 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
                     cx.audio.send(Command::SetAppBalance { key: app.key.clone(), balance: 0.0 });
                 }
             }
-            None => {
+            BalanceState::Mixed => {
+                ui.label(RichText::new("Differs between streams").small().color(p.text_muted)).on_hover_text(
+                    "This app's audio streams use different balances. Centering sets every stream to the same balance.",
+                );
+                if widgets::scroll_on_focus(ui.small_button("Center all")).clicked() {
+                    cx.audio.send(Command::SetAppBalance { key: app.key.clone(), balance: 0.0 });
+                }
+            }
+            BalanceState::Unavailable => {
                 ui.label(RichText::new("Not available for this app").small().color(p.text_muted));
             }
         }
@@ -768,7 +776,7 @@ mod layout_tests {
             muted: false,
             activity: Activity::Idle,
             session_count: 1,
-            balance: None,
+            balance: BalanceState::Unavailable,
         }
     }
 
@@ -873,6 +881,42 @@ mod layout_tests {
             !names.iter().any(|n| n.contains("Open Windows sound settings")),
             "sound properties belong to the Devices view: {names:?}"
         );
+    }
+
+    #[test]
+    fn each_balance_state_shows_its_own_control_and_fits() {
+        let key = AppKey::Exe(r"c:\apps\player.exe".into());
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let slider = "A Media Player With A Remarkably Long Display Name balance";
+        for (balance, has_slider, has_center) in [
+            (BalanceState::Uniform(0.3), true, false),
+            (BalanceState::Mixed, false, true),
+            (BalanceState::Unavailable, false, false),
+        ] {
+            let mut snap = snapshot();
+            snap.apps[1].balance = balance;
+            let (audio, meters) = (AudioHandle::detached(), Meters::default());
+            let (mut settings, mut icons, mut state) =
+                (Settings::default(), IconService::detached(), MixerState::default());
+            state.expanded.insert(key.clone());
+            let frame = harness.run(width, 560.0, |ui| {
+                let mut cx = MixerCtx {
+                    audio: &audio,
+                    snap: &snap,
+                    meters: &meters,
+                    look: &look,
+                    settings: &mut settings,
+                    icons: &mut icons,
+                };
+                show(ui, &mut state, &mut cx);
+            });
+            let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+            assert_eq!(names.contains(&slider), has_slider, "{balance:?}: {names:?}");
+            assert_eq!(names.contains(&"Center all"), has_center, "{balance:?}: {names:?}");
+            assert_fits(&format!("{balance:?}"), width, &frame);
+        }
     }
 
     fn device_snapshot() -> AudioSnapshot {
@@ -1158,7 +1202,7 @@ mod layout_tests {
                     .map(|i| {
                         let mut entry =
                             app(AppKey::Exe(format!(r"c:\apps\app_{i}.exe")), &format!("Application Number {i}"));
-                        entry.balance = Some(0.0);
+                        entry.balance = BalanceState::Uniform(0.0);
                         entry
                     })
                     .collect();

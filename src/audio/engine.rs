@@ -33,7 +33,15 @@ use windows::core::{HSTRING, Interface};
 
 const METER_INTERVAL: Duration = Duration::from_millis(33);
 const RESUME_SETTLE: Duration = Duration::from_millis(1500);
+/// Device add/remove/state/property notifications arrive in bursts (a Bluetooth
+/// reconnect sends several); they are merged into one re-enumeration.
+const DEVICE_COALESCE: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// How often process markers are checked for exits that were never observed,
+/// piggybacked on session refreshes (there is no timer).
+const RECLAIM_INTERVAL: Duration = Duration::from_secs(300);
+/// The same check while the tracker is large or saturated.
+const RECLAIM_RETRY: Duration = Duration::from_secs(10);
 
 type WinResult<T> = windows::core::Result<T>;
 
@@ -53,6 +61,33 @@ fn open_settings(uri: &str) -> Result<(), String> {
         Err("Couldn't open Windows Settings. Open Settings > System > Sound manually.".into())
     } else {
         Ok(())
+    }
+}
+
+/// A deadline set by the first event of a burst. Later events in the window
+/// don't extend it, so a steady stream still refreshes every window.
+#[derive(Default)]
+struct Coalesce {
+    due: Option<Instant>,
+}
+
+impl Coalesce {
+    fn note(&mut self, now: Instant, window: Duration) {
+        self.due.get_or_insert(now + window);
+    }
+
+    /// Whether the window has elapsed; resets it if so.
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.due.is_some_and(|t| now >= t);
+        if due {
+            self.due = None;
+        }
+        due
+    }
+
+    /// A refresh that already covers the pending events.
+    fn cancel(&mut self) {
+        self.due = None;
     }
 }
 
@@ -81,6 +116,7 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
         retry_at: Some(Instant::now()),
         backoff: Duration::from_millis(250),
         delayed_rebuild: None,
+        device_events: Coalesce::default(),
         last_meter_poll: Instant::now(),
         last_meters: Meters::default(),
         was_unavailable: false,
@@ -121,6 +157,7 @@ struct Runner {
     retry_at: Option<Instant>,
     backoff: Duration,
     delayed_rebuild: Option<Instant>,
+    device_events: Coalesce,
     last_meter_poll: Instant,
     last_meters: Meters,
     was_unavailable: bool,
@@ -136,7 +173,9 @@ impl Runner {
             match msg {
                 Msg::Shutdown => return false,
                 Msg::Cmd(cmd) => push_coalesced(&mut commands, cmd),
-                Msg::DevicesChanged | Msg::DefaultDeviceChanged => self.dirty.devices = true,
+                Msg::DevicesChanged => self.device_events.note(Instant::now(), DEVICE_COALESCE),
+                // The default device decides which sessions are shown, so it is never delayed.
+                Msg::DefaultDeviceChanged => self.dirty.devices = true,
                 Msg::EndpointVolumeChanged | Msg::SessionValuesChanged => self.dirty.values = true,
                 Msg::SessionsChanged => self.dirty.sessions = true,
                 Msg::Resumed => {
@@ -235,6 +274,9 @@ impl Runner {
             self.delayed_rebuild = None;
             self.dirty.rebuild = true;
         }
+        if self.device_events.take_due(now) {
+            self.dirty.devices = true;
+        }
         if self.dirty.rebuild {
             self.dirty = Dirty::default();
             self.engine = None;
@@ -265,6 +307,9 @@ impl Runner {
         }
         self.retry_at = None;
         let dirty = std::mem::take(&mut self.dirty);
+        if dirty.devices {
+            self.device_events.cancel();
+        }
         let engine = self.engine.as_mut().expect("engine present");
         let result = engine.refresh(dirty, &self.shared).and_then(|()| engine.snapshot(&self.shared));
         match result {
@@ -315,6 +360,9 @@ impl Runner {
             consider(t);
         }
         if let Some(t) = self.delayed_rebuild {
+            consider(t);
+        }
+        if let Some(t) = self.device_events.due {
             consider(t);
         }
         if self.engine.is_some() && self.shared.meters_wanted() {
@@ -421,6 +469,7 @@ struct Engine {
     properties: HashMap<String, super::properties::DeviceProperties>,
     preset_rules: Vec<super::preferences::VolumePreset>,
     start_tracker: super::preferences::StartTracker,
+    last_reclaim: Instant,
 }
 
 impl Engine {
@@ -452,6 +501,7 @@ impl Engine {
             properties: HashMap::new(),
             preset_rules: Vec::new(),
             start_tracker: super::preferences::StartTracker::new(current_filetime()),
+            last_reclaim: Instant::now(),
         })
     }
 
@@ -539,6 +589,11 @@ impl Engine {
         {
             for exited_pid in set.sync(&self.tx)? {
                 self.start_tracker.forget_exited_pid(exited_pid);
+            }
+            let wait = if self.start_tracker.wants_reclaim() { RECLAIM_RETRY } else { RECLAIM_INTERVAL };
+            if self.last_reclaim.elapsed() >= wait {
+                self.last_reclaim = Instant::now();
+                self.start_tracker.reclaim(current_filetime(), process::is_running);
             }
         }
         Ok(())
@@ -1098,12 +1153,24 @@ impl SessionSet {
         let count = unsafe { enumerator.GetCount()? };
         let mut seen = HashSet::new();
         for i in 0..count {
-            let control = unsafe { enumerator.GetSession(i)? };
-            let control: IAudioSessionControl2 = control.cast()?;
-            if unsafe { control.GetState()? } == AudioSessionStateExpired {
-                continue;
-            }
-            let instance_id = take_pwstr(unsafe { control.GetSessionInstanceIdentifier()? });
+            // One unreadable session must not hide every other one.
+            let read = (|| -> WinResult<Option<(IAudioSessionControl2, String)>> {
+                let control: IAudioSessionControl2 = unsafe { enumerator.GetSession(i)? }.cast()?;
+                if unsafe { control.GetState()? } == AudioSessionStateExpired {
+                    return Ok(None);
+                }
+                let instance_id = take_pwstr(unsafe { control.GetSessionInstanceIdentifier()? });
+                Ok(Some((control, instance_id)))
+            })();
+            let (control, instance_id) = match read {
+                Ok(Some(session)) => session,
+                Ok(None) => continue,
+                Err(e) if is_fatal(e.code()) => return Err(e),
+                Err(e) => {
+                    log::warn!("skipping unreadable audio session {i}: {e}");
+                    continue;
+                }
+            };
             if self.sessions.iter().any(|s| s.instance_id == instance_id) {
                 seen.insert(instance_id);
                 continue;
@@ -1313,6 +1380,30 @@ mod tests {
                 Command::SetEndpointVolume { flow: Flow::Output, volume: 0.5 },
             ]
         );
+    }
+
+    #[test]
+    fn a_burst_of_device_events_refreshes_once_and_late_events_are_not_lost() {
+        let window = DEVICE_COALESCE;
+        let t0 = Instant::now();
+        let mut c = Coalesce::default();
+        assert!(!c.take_due(t0), "nothing pending");
+        for ms in [0, 10, 30, 45] {
+            c.note(t0 + Duration::from_millis(ms), window);
+        }
+        assert_eq!(c.due, Some(t0 + window), "later events in the burst don't push the refresh out");
+        assert!(!c.take_due(t0 + Duration::from_millis(49)));
+        assert!(c.take_due(t0 + window), "one refresh for the whole burst");
+        assert!(!c.take_due(t0 + window * 2), "and only one");
+
+        // An event after the refresh started opens a new window instead of being dropped.
+        c.note(t0 + window + Duration::from_millis(5), window);
+        assert!(c.take_due(t0 + window * 2 + Duration::from_millis(5)));
+
+        // A refresh for another reason (such as a default-device change) covers pending events.
+        c.note(t0, window);
+        c.cancel();
+        assert!(!c.take_due(t0 + window));
     }
 
     #[test]

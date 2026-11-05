@@ -484,7 +484,7 @@ mod tests {
             muted: false,
             activity: crate::audio::Activity::Idle,
             session_count: 1,
-            balance: None,
+            balance: crate::audio::BalanceState::Unavailable,
         }
     }
 
