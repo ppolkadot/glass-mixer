@@ -98,6 +98,32 @@ impl BalanceState {
     }
 }
 
+/// The output device Windows uses for an app.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Route {
+    /// The app follows the system default output.
+    #[default]
+    SystemDefault,
+    /// The app is set to use this output (endpoint ID), connected or not.
+    Device(String),
+    /// Windows doesn't say: per-app routing is unsupported, or the app's
+    /// process couldn't be queried (for example an elevated app).
+    Unknown,
+}
+
+/// One audio session of an app row, for the expanded per-stream controls.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamEntry {
+    /// The session instance identifier; commands address the stream by it.
+    pub id: String,
+    pub pid: u32,
+    /// The output device the stream plays on.
+    pub device_id: String,
+    pub volume: f32,
+    pub muted: bool,
+    pub activity: Activity,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppEntry {
     pub key: AppKey,
@@ -112,6 +138,9 @@ pub struct AppEntry {
     pub activity: Activity,
     pub session_count: usize,
     pub balance: BalanceState,
+    /// The sessions behind this row, in the order Windows lists them.
+    pub streams: Vec<StreamEntry>,
+    pub route: Route,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -135,6 +164,14 @@ pub struct AudioSnapshot {
     pub properties: HashMap<String, super::properties::DeviceProperties>,
     /// Whether the (undocumented) default-device switching interface is available.
     pub can_switch_default: bool,
+    /// The app in Solo; every other app is lowered.
+    pub solo: Option<AppKey>,
+    /// Whether apps can be set to use a specific output device.
+    pub can_route_apps: bool,
+    /// Microphone ducking is lowering its target apps right now.
+    pub mic_ducking: bool,
+    /// Apps lowered right now because another app is in the foreground.
+    pub background_lowered: Vec<AppKey>,
 }
 
 impl AudioSnapshot {
@@ -165,6 +202,9 @@ pub struct Meters {
 /// Per-session facts gathered by the engine, before grouping into [`AppEntry`] rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionFacts {
+    pub id: String,
+    pub pid: u32,
+    pub device_id: String,
     pub key: AppKey,
     pub name: String,
     pub exe_path: Option<PathBuf>,
@@ -188,8 +228,17 @@ pub fn group_sessions(sessions: &[SessionFacts]) -> Vec<AppEntry> {
     let mut groups: Vec<AppEntry> = Vec::new();
     let mut index: HashMap<&AppKey, usize> = HashMap::new();
     for s in sessions {
+        let stream = StreamEntry {
+            id: s.id.clone(),
+            pid: s.pid,
+            device_id: s.device_id.clone(),
+            volume: s.volume,
+            muted: s.muted,
+            activity: if s.active { Activity::Playing } else { Activity::Idle },
+        };
         if let Some(&i) = index.get(&s.key) {
             let g = &mut groups[i];
+            g.streams.push(stream);
             g.volume = g.volume.max(s.volume);
             g.muted &= s.muted;
             if s.active {
@@ -215,6 +264,8 @@ pub fn group_sessions(sessions: &[SessionFacts]) -> Vec<AppEntry> {
                 activity: if s.active { Activity::Playing } else { Activity::Idle },
                 session_count: 1,
                 balance: BalanceState::Unavailable,
+                streams: vec![stream],
+                route: Route::SystemDefault,
             });
         }
     }
@@ -323,6 +374,9 @@ mod tests {
 
     fn facts(key: AppKey, name: &str, volume: f32, muted: bool, active: bool) -> SessionFacts {
         SessionFacts {
+            id: format!("{key:?}/{name}/{volume}"),
+            pid: 0,
+            device_id: "out".into(),
             key,
             name: name.into(),
             exe_path: None,

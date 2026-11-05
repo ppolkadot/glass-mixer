@@ -116,7 +116,8 @@ fn run_with_renderer(
 /// The wgpu fallback uses Direct3D 12 or Vulkan, never wgpu's OpenGL backend: it
 /// only runs after OpenGL has failed, and the GL backend's WGL thread can
 /// deadlock with the driver's `DllMain` while the window is destroyed at exit.
-/// `WGPU_BACKEND` may re-enable GL only in a debug dev profile, for diagnostics.
+/// The GL backend isn't compiled at all (see Cargo.toml); `WGPU_BACKEND` can
+/// still narrow the choice to one backend for diagnostics.
 fn fallback_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
     let mut setup = WgpuSetupCreateNew::without_display_handle();

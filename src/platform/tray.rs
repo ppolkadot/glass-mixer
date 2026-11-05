@@ -17,8 +17,9 @@ use std::{
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::UI::Shell::{
-    NIF_GUID, NIF_INFO, NIF_REALTIME, NIIF_ERROR, NIIF_NOSOUND, NIIF_RESPECT_QUIET_TIME, NIIF_WARNING, NIM_MODIFY,
-    NOTIFYICONDATAW, QUNS_ACCEPTS_NOTIFICATIONS, SHQueryUserNotificationState, Shell_NotifyIconW,
+    NIF_GUID, NIF_INFO, NIF_REALTIME, NIIF_ERROR, NIIF_INFO, NIIF_NOSOUND, NIIF_RESPECT_QUIET_TIME, NIIF_WARNING,
+    NIM_MODIFY, NOTIFY_ICON_INFOTIP_FLAGS, NOTIFYICONDATAW, QUNS_ACCEPTS_NOTIFICATIONS, SHQueryUserNotificationState,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
 
@@ -136,20 +137,28 @@ impl Tray {
         if level == NoticeLevel::Info {
             return;
         }
-        if unsafe { SHQueryUserNotificationState() }.ok() != Some(QUNS_ACCEPTS_NOTIFICATIONS) {
+        if !accepts_notifications() || !self.notices.allow(text, Instant::now()) {
             return;
         }
-        if !self.notices.allow(text, Instant::now()) {
-            return;
+        self.balloon(if level == NoticeLevel::Error { NIIF_ERROR } else { NIIF_WARNING }, text);
+    }
+
+    /// The result of something the user just did while the window is hidden,
+    /// such as switching the output with a shortcut. Not throttled: each one
+    /// replaces the previous balloon.
+    pub fn announce(&mut self, text: &str) {
+        if accepts_notifications() {
+            self.balloon(NIIF_INFO, text);
         }
+    }
+
+    fn balloon(&mut self, kind: NOTIFY_ICON_INFOTIP_FLAGS, text: &str) {
         let mut data = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: windows::Win32::Foundation::HWND(self.icon.window_handle()),
             guidItem: windows::core::GUID::from_u128(self.guid),
             uFlags: NIF_GUID | NIF_INFO | NIF_REALTIME,
-            dwInfoFlags: (if level == NoticeLevel::Error { NIIF_ERROR } else { NIIF_WARNING })
-                | NIIF_NOSOUND
-                | NIIF_RESPECT_QUIET_TIME,
+            dwInfoFlags: kind | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME,
             ..Default::default()
         };
         write_wide(&mut data.szInfoTitle, "Glass Mixer");
@@ -178,6 +187,10 @@ impl Tray {
             self.last_muted = Some(muted);
         }
     }
+}
+
+fn accepts_notifications() -> bool {
+    unsafe { SHQueryUserNotificationState() }.ok() == Some(QUNS_ACCEPTS_NOTIFICATIONS)
 }
 
 fn write_wide<const N: usize>(buf: &mut [u16; N], text: &str) {

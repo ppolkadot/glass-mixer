@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Added
+
+- **Per-app output devices.** An app's details offer an Output menu: System
+  default or any connected output. Windows remembers the choice for the app,
+  so its later launches start there too. Apps that follow the default device
+  move at once; apps that opened a specific device switch when they restart
+  playback, and the row says so. Settings > Audio can reset every app's
+  device, after a confirmation, because Windows only offers that for all apps
+  at once. Apps playing on any output now appear in the Mixer.
+- **Solo.** A pinned app's Solo button lowers every other app (to a percentage
+  of its own level, or muted; set in Settings). The header shows which app is
+  soloed with an End solo button. When Solo ends, levels come back, except
+  any you changed meanwhile, which are kept.
+- **Lower in background.** Opt-in per pinned app: lower or mute it while
+  another app's window is in front, and bring it back when you return to it.
+  Focus has to stay put for a quarter second first, so alt-tabbing doesn't
+  bounce levels.
+- **Microphone ducking.** Opt-in in Settings > Audio: lower chosen pinned apps
+  while you talk, with a speech level, start and restore delays, and a level
+  to keep. Only the microphone level is read; nothing is recorded. The header
+  shows when it's active, with Turn off.
+- **Profiles** (formerly presets) can also store each app's output device, the
+  master level, and the default output and input; they can be renamed,
+  duplicated, trimmed part by part and deleted. Existing presets load as they
+  were.
+- **More shortcuts:** next pinned output device, and per pinned app mute,
+  volume up/down and Solo, plus one per profile. Pin outputs for cycling in
+  Devices; a shortcut switch is confirmed in the tray while hidden.
+- **Per-stream controls.** An app with several streams lists each one, with
+  its own mute and volume, in its details.
+- **Mouse wheel step** for volume sliders: 1, 2 or 5 % or a custom value.
+
 ### Fixed
 
 - **An app's balance showed only one of its streams.** When an app has several
@@ -21,6 +53,20 @@
 
 ### Changed
 
+- **Level meters no longer allocate while polling.** Each 30 Hz poll reuses its
+  buffers, and the UI shares the published levels instead of copying them
+  every frame. The rate is unchanged.
+- **Relaunched apps reuse their icon.** Extracted icons are cached by the
+  executable's path, size and modification time (plus the icon resource,
+  AUMID and pixel size) in a bounded LRU, so a short-lived process or a
+  second app running the same binary needs no new Shell extraction, and an
+  updated binary is extracted again. Recently used textures are kept and an
+  identical result is not uploaded to the GPU again.
+- **The icon request queue is bounded (16).** A full queue never blocks the
+  UI; the dropped request is made again on a later frame.
+- **Smaller executable.** wgpu (the fallback renderer) is built with only its
+  Direct3D 12 and Vulkan backends, the only ones the fallback ever uses: the
+  release exe shrinks from 15.86 MB to 15.33 MB and 2 crates leave the build.
 - Bursts of device notifications (for example a Bluetooth reconnect) are merged
   into one re-enumeration 50 ms after the first; default-device changes remain
   immediate.

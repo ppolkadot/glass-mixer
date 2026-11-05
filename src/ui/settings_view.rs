@@ -25,6 +25,9 @@ pub struct SettingsCtx<'a> {
     /// Frames are drawn by the CPU, so level meters are paused.
     pub software_renderer: bool,
     pub can_switch_default: bool,
+    pub can_route_apps: bool,
+    /// The "reset all app devices" confirmation is showing.
+    pub confirm_route_reset: &'a mut bool,
     pub audio: &'a AudioHandle,
     pub icons: &'a mut IconService,
     pub settings_path: &'a Path,
@@ -54,7 +57,12 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
         section(ui, &look, "Audio", |ui| audio(ui, cx));
         section(ui, &look, "Global shortcuts", |ui| {
             if let Some(service) = cx.hotkeys {
-                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service);
+                let slots = crate::platform::hotkeys::slots(
+                    &cx.settings.pinned_apps,
+                    &cx.settings.presets,
+                    &cx.settings.hotkeys,
+                );
+                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service, &slots);
             } else {
                 ui.label("Global shortcuts are unavailable in this session.");
             }
@@ -206,6 +214,34 @@ fn behavior(ui: &mut Ui, cx: &mut SettingsCtx) {
 
 fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
     let look = *cx.look;
+    let s = &mut *cx.settings;
+    // Preset steps, or "Custom" for any other value the field below sets.
+    let mut preset = if [1, 2, 5].contains(&s.wheel_step) { s.wheel_step } else { 0 };
+    labeled(ui, &look, "Mouse wheel step", |ui| {
+        let custom = ui.add_enabled(preset == 0, egui::DragValue::new(&mut s.wheel_step).range(1..=20).suffix("%"));
+        widgets::set_name(ui, &custom, "Custom mouse wheel step");
+        widgets::scroll_on_focus(custom).on_hover_text("Any step from 1 to 20 percent");
+        if segmented(ui, &look, &mut preset, &[(1, "1%"), (2, "2%"), (5, "5%"), (0, "Custom")], 200.0) {
+            s.wheel_step = if preset == 0 { 3 } else { preset };
+        }
+    });
+    ui.label(RichText::new("Volume change per wheel notch over a volume slider.").small().color(look.p.text_muted));
+    let mut keep = s.solo.keep_percent.min(90);
+    labeled(ui, &look, "Solo keeps other apps at", |ui| {
+        let field = ui.add_enabled(!s.solo.mute, egui::DragValue::new(&mut keep).range(0..=90).suffix("%"));
+        widgets::set_name(ui, &field, "Solo keeps other apps at this percent of their volume");
+        widgets::scroll_on_focus(field);
+    });
+    s.solo.keep_percent = keep;
+    toggle_row(
+        ui,
+        &look,
+        &mut s.solo.mute,
+        "Solo mutes other apps",
+        Some(
+            "Mute other apps instead of lowering them. Their own levels come back when Solo ends, unless you changed them meanwhile.",
+        ),
+    );
     ui.horizontal(|ui| {
         if widgets::scroll_on_focus(ui.button("Refresh audio devices"))
             .on_hover_text("Reconnect to all devices and audio sessions")
@@ -220,6 +256,10 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
             .small()
             .color(look.p.text_muted),
     );
+    mic_ducking(ui, cx);
+    if cx.can_route_apps {
+        app_device_reset(ui, cx);
+    }
     if !cx.can_switch_default {
         ui.label(
             RichText::new(
@@ -229,6 +269,91 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
             .color(look.p.text_muted),
         );
     }
+}
+
+/// Opt-in: lower chosen pinned apps while the microphone picks up speech.
+fn mic_ducking(ui: &mut Ui, cx: &mut SettingsCtx) {
+    let look = *cx.look;
+    let s = &mut *cx.settings;
+    let mic = &mut s.mic_ducking;
+    toggle_row(
+        ui,
+        &look,
+        &mut mic.enabled,
+        "Microphone ducking",
+        Some(
+            "Lower the apps chosen below while you talk. Only the microphone level is read; nothing is recorded. It works while an app is using the microphone.",
+        ),
+    );
+    if !mic.enabled {
+        return;
+    }
+    let field = |ui: &mut Ui, label: &str, value: &mut u16, range: std::ops::RangeInclusive<u16>, suffix: &str| {
+        labeled(ui, &look, label, |ui| {
+            let drag = ui.add(egui::DragValue::new(value).range(range).suffix(suffix));
+            widgets::set_name(ui, &drag, label);
+            widgets::scroll_on_focus(drag);
+        });
+    };
+    let mut threshold = u16::from(mic.threshold_percent);
+    field(ui, "Speech level", &mut threshold, 1..=60, "%");
+    mic.threshold_percent = threshold as u8;
+    field(ui, "Start after", &mut mic.attack_ms, 20..=2000, " ms");
+    field(ui, "Restore after silence of", &mut mic.release_ms, 100..=5000, " ms");
+    let mut keep = u16::from(mic.keep_percent);
+    field(ui, "Lowered apps keep", &mut keep, 0..=90, "%");
+    mic.keep_percent = keep as u8;
+    if s.pinned_apps.is_empty() {
+        ui.label(
+            RichText::new("Pin apps in the Mixer to choose which ones are lowered.").small().color(look.p.text_muted),
+        );
+    }
+    for pin in &s.pinned_apps {
+        let mut chosen = mic.targets.contains(&pin.key);
+        let check = widgets::scroll_on_focus(ui.checkbox(&mut chosen, format!("Lower {} while you talk", pin.name)));
+        if check.changed() {
+            if chosen {
+                mic.targets.push(pin.key.clone());
+            } else {
+                mic.targets.retain(|k| *k != pin.key);
+            }
+        }
+    }
+}
+
+/// Windows can only reset every app's device choice at once, so this is a
+/// separate, confirmed action; a single app is reset from its row in the Mixer.
+fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
+    let look = *cx.look;
+    if !*cx.confirm_route_reset {
+        if widgets::scroll_on_focus(ui.button("Reset all app devices…"))
+            .on_hover_text("Make every app follow the system default output and input again")
+            .clicked()
+        {
+            *cx.confirm_route_reset = true;
+        }
+        return;
+    }
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "This resets the device choice of every app on this PC, including choices made in Windows Settings. To reset one app, choose System default in its row instead.",
+            )
+            .color(look.p.text),
+        )
+        .wrap(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        let confirm = widgets::scroll_on_focus(ui.button("Reset all apps"));
+        widgets::set_name(ui, &confirm, "Confirm: reset the device choice of all apps");
+        if confirm.clicked() {
+            cx.audio.send(Command::ResetAllAppDevices);
+            *cx.confirm_route_reset = false;
+        }
+        if widgets::scroll_on_focus(ui.button("Cancel")).clicked() {
+            *cx.confirm_route_reset = false;
+        }
+    });
 }
 
 fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
@@ -268,7 +393,11 @@ mod tests {
         let width = window_width - 2.0 * look.m.pad;
         let service = HotkeyService::start_with(|_| {}, harness.ctx.clone()).unwrap();
         let mut settings = Settings {
-            hotkeys: vec![HotkeyBinding { action: HotkeyAction::ToggleOutputMute, chord: "Ctrl+Alt+nonsense".into() }],
+            hotkeys: vec![HotkeyBinding {
+                action: HotkeyAction::ToggleOutputMute,
+                chord: "Ctrl+Alt+nonsense".into(),
+                target: None,
+            }],
             ..Default::default()
         };
         service.configure(&settings.hotkeys, settings.hotkey_step).unwrap();
@@ -290,6 +419,8 @@ mod tests {
                 support: Support::Full,
                 software_renderer: false,
                 can_switch_default: true,
+                can_route_apps: true,
+                confirm_route_reset: &mut false,
                 audio: &audio,
                 icons: &mut icons,
                 settings_path: &path,
@@ -300,6 +431,69 @@ mod tests {
             show(ui, &mut cx);
         });
         (width, frame)
+    }
+
+    #[test]
+    fn resetting_every_app_device_needs_a_confirmation_that_fits() {
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors, mut settings) = (LoginState::Disabled, Vec::new(), Settings::default());
+        let path = std::path::PathBuf::from(r"C:\settings.json");
+        let mut confirm = false;
+        let mut render = |confirm: &mut bool, settings: &mut Settings| {
+            harness.run(width, 3000.0, |ui| {
+                let mut cx = SettingsCtx {
+                    look: &look,
+                    settings,
+                    login: &mut login,
+                    glass: GlassStatus::TransparencyOff,
+                    support: Support::Full,
+                    software_renderer: false,
+                    can_switch_default: true,
+                    can_route_apps: true,
+                    confirm_route_reset: &mut *confirm,
+                    audio: &audio,
+                    icons: &mut icons,
+                    settings_path: &path,
+                    hotkeys: None,
+                    hotkey_editor: &mut editor,
+                    errors: &mut errors,
+                };
+                show(ui, &mut cx);
+            })
+        };
+        let names = |f: &crate::ui::test_support::Frame| f.widgets.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+        let first = render(&mut confirm, &mut settings);
+        assert!(names(&first).iter().any(|n| n == "Reset all app devices…"));
+        assert!(!names(&first).iter().any(|n| n.starts_with("Confirm")), "nothing is reset without a second step");
+        confirm = true;
+        settings.mic_ducking.enabled = true;
+        settings.pinned_apps.push(crate::audio::preferences::PinnedApp {
+            key: crate::audio::AppKey::Exe("music.exe".into()),
+            name: "Music".into(),
+            exe_path: None,
+            aumid: None,
+        });
+        let second = render(&mut confirm, &mut settings);
+        for expected in [
+            "Speech level",
+            "Start after",
+            "Restore after silence of",
+            "Lowered apps keep",
+            "Lower Music while you talk",
+        ] {
+            assert!(names(&second).iter().any(|n| n == expected), "missing {expected}: {:?}", names(&second));
+        }
+        assert!(
+            names(&second).iter().any(|n| n == "Confirm: reset the device choice of all apps"),
+            "{:?}",
+            names(&second)
+        );
+        let clipped = crate::ui::test_support::past_right_edge(&second.widgets, width);
+        assert!(clipped.is_empty(), "{clipped:?}");
     }
 
     #[test]
@@ -358,6 +552,8 @@ mod tests {
                         support: Support::Full,
                         software_renderer: false,
                         can_switch_default: true,
+                        can_route_apps: true,
+                        confirm_route_reset: &mut false,
                         audio: &audio,
                         icons: &mut icons,
                         settings_path: &path,
@@ -392,6 +588,8 @@ mod tests {
                             support: Support::Full,
                             software_renderer: false,
                             can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -429,6 +627,8 @@ mod tests {
                             support: Support::Full,
                             software_renderer: false,
                             can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -467,6 +667,8 @@ mod tests {
                                 support: Support::Full,
                                 software_renderer: false,
                                 can_switch_default: true,
+                                can_route_apps: true,
+                                confirm_route_reset: &mut false,
                                 audio: &audio,
                                 icons: &mut icons,
                                 settings_path: &path,
@@ -501,6 +703,8 @@ mod tests {
                             support: Support::Full,
                             software_renderer: false,
                             can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,

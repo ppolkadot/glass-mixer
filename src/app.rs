@@ -5,6 +5,7 @@ use crate::audio::{AudioHandle, NoticeLevel};
 use crate::platform::backdrop::{self, Applied, Support};
 use crate::platform::exit_request::ExitListener;
 use crate::platform::fonts;
+use crate::platform::foreground::ForegroundWatch;
 use crate::platform::hotkeys::{HotkeyEditor, HotkeyEvent, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
@@ -174,6 +175,8 @@ pub struct MixerApp {
     mixer: mixer::MixerState,
     login: LoginState,
     toasts: Vec<Toast>,
+    confirm_route_reset: bool,
+    foreground: Option<ForegroundWatch>,
     exiting: bool,
     has_icon_font: bool,
     look: Look,
@@ -205,6 +208,7 @@ impl MixerApp {
 
         let audio = AudioHandle::start();
         audio.send(crate::audio::Command::SetPresetRules(opts.settings.presets.clone()));
+        send_audio_preferences(&audio, &opts.settings);
         {
             let ctx = ctx.clone();
             audio.add_listener(move || ctx.request_repaint());
@@ -311,6 +315,8 @@ impl MixerApp {
             mixer: mixer::MixerState::default(),
             login: startup::state(),
             toasts,
+            confirm_route_reset: false,
+            foreground: None,
             exiting: false,
             has_icon_font,
             look,
@@ -329,6 +335,7 @@ impl MixerApp {
             app.toast(NoticeLevel::Warning, err);
         }
         app.refresh_look(&ctx);
+        app.update_foreground_watch();
         app
     }
 
@@ -418,11 +425,21 @@ impl MixerApp {
     }
 
     fn toast(&mut self, level: NoticeLevel, text: String) {
+        self.notify(crate::audio::Notice { level, text, announce: false });
+    }
+
+    /// Shows a notice in the window, and in the tray while hidden.
+    fn notify(&mut self, notice: crate::audio::Notice) {
+        let crate::audio::Notice { level, text, announce } = notice;
         if self.settings.hidden_notifications
             && self.hwnd.is_some_and(|h| !window::is_shown(h))
             && let Some(tray) = self.tray.as_mut()
         {
-            tray.notify(level, &text);
+            if announce {
+                tray.announce(&text);
+            } else {
+                tray.notify(level, &text);
+            }
         }
         let secs = match level {
             NoticeLevel::Info => 4,
@@ -458,6 +475,37 @@ impl MixerApp {
         }
     }
 
+    /// The foreground watcher runs only while a focus rule exists.
+    fn update_foreground_watch(&mut self) {
+        let wanted = !self.settings.focus_rules.is_empty() && !self.shut_down;
+        if wanted == self.foreground.is_some() {
+            return;
+        }
+        self.foreground = if wanted {
+            let audio = self.audio.clone();
+            match ForegroundWatch::start(move |pid| audio.send(crate::audio::Command::ForegroundChanged { pid })) {
+                Ok(watch) => Some(watch),
+                Err(e) => {
+                    self.toast(NoticeLevel::Error, format!("{e} Background lowering is unavailable."));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    }
+
+    /// Applies a saved profile by name (from its shortcut).
+    fn activate_profile(&mut self, name: &str) {
+        match self.settings.presets.iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
+            Some(profile) => self.audio.send(crate::audio::Command::ActivateProfile(profile.clone())),
+            None => self.toast(
+                NoticeLevel::Warning,
+                format!("The profile \"{name}\" no longer exists, so its shortcut does nothing."),
+            ),
+        }
+    }
+
     fn request_exit(&mut self, ctx: &egui::Context) {
         log::info!("exit requested");
         self.exiting = true;
@@ -479,6 +527,7 @@ impl MixerApp {
         }
         self.tray = None;
         self.hotkeys = None;
+        self.foreground = None;
         self.audio.shutdown();
         self.icons.shutdown();
         log::info!("shutdown complete");
@@ -555,6 +604,31 @@ impl MixerApp {
             self.toasts.remove(i);
         }
     }
+}
+
+/// Preferences the engine acts on by itself (shortcuts reach it directly).
+fn send_audio_preferences(audio: &AudioHandle, settings: &Settings) {
+    use crate::audio::{Command, MicDucking, attenuation::Reduction, automation::MicGateConfig};
+    audio.send(Command::SetPinnedOutputs(settings.pinned_devices.iter().map(|d| d.id.clone()).collect()));
+    audio.send(Command::SetSoloOptions { factor: settings.solo.factor(), mute: settings.solo.mute });
+    let keep = |percent: u8| f32::from(percent.min(90)) / 100.0;
+    audio.send(Command::SetFocusRules(
+        settings
+            .focus_rules
+            .iter()
+            .map(|rule| (rule.key.clone(), Reduction { factor: keep(rule.keep_percent), mute: rule.mute }))
+            .collect(),
+    ));
+    let mic = &settings.mic_ducking;
+    audio.send(Command::SetMicDucking((mic.enabled && !mic.targets.is_empty()).then(|| MicDucking {
+        gate: MicGateConfig {
+            threshold: f32::from(mic.threshold_percent.clamp(1, 60)) / 100.0,
+            attack: Duration::from_millis(u64::from(mic.attack_ms.clamp(20, 2000))),
+            release: Duration::from_millis(u64::from(mic.release_ms.clamp(100, 5000))),
+        },
+        reduction: Reduction { factor: keep(mic.keep_percent), mute: false },
+        targets: mic.targets.clone(),
+    })));
 }
 
 fn record_window_geometry(
@@ -641,6 +715,7 @@ impl eframe::App for MixerApp {
         for event in hotkey_events {
             match event {
                 HotkeyEvent::ToggleWindow => self.toggle_window(),
+                HotkeyEvent::ActivateProfile(name) => self.activate_profile(&name),
             }
         }
 
@@ -659,7 +734,7 @@ impl eframe::App for MixerApp {
             tray.update(&snapshot);
         }
         for n in self.audio.take_notices() {
-            self.toast(n.level, n.text);
+            self.notify(n);
         }
         if let Some(service) = &self.hotkeys {
             let errors = service.status().messages();
@@ -757,6 +832,8 @@ impl eframe::App for MixerApp {
                         support: self.support,
                         software_renderer: self.software_renderer,
                         can_switch_default: snapshot.can_switch_default,
+                        can_route_apps: snapshot.can_route_apps,
+                        confirm_route_reset: &mut self.confirm_route_reset,
                         audio: &self.audio,
                         icons: &mut self.icons,
                         settings_path: self.store.path(),
@@ -782,6 +859,14 @@ impl eframe::App for MixerApp {
         if self.settings != before {
             if self.settings.presets != before.presets {
                 self.audio.send(crate::audio::Command::SetPresetRules(self.settings.presets.clone()));
+            }
+            if self.settings.pinned_devices != before.pinned_devices
+                || self.settings.solo != before.solo
+                || self.settings.focus_rules != before.focus_rules
+                || self.settings.mic_ducking != before.mic_ducking
+            {
+                send_audio_preferences(&self.audio, &self.settings);
+                self.update_foreground_watch();
             }
             if (self.settings.hotkeys != before.hotkeys || self.settings.hotkey_step != before.hotkey_step)
                 && let Some(service) = &self.hotkeys

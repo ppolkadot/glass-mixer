@@ -8,7 +8,11 @@ license = "MIT"
 publish = false
 
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu_no_default_features"] }
+# The wgpu renderer is only the fallback for machines where OpenGL fails, and it
+# runs on Direct3D 12 or Vulkan only (see main.rs), so only those backends are
+# compiled. wgpu's default features add OpenGL ES, WebGPU and Metal.
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan", "wgsl", "std", "parking_lot"] }
 egui = "0.36"
 raw-window-handle = "0.6"
 # The default `libappindicator` feature pulls GTK 0.18 on Linux, which locks
@@ -42,6 +46,7 @@ features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_System_WinRT",
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",

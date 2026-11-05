@@ -1,5 +1,97 @@
 # Testing
 
+## Stages 3 and 4: controls, profiles, routing and ducking (2026-11-05, branch `stage3-4/features`)
+
+Pinned outputs and cycling, the wheel step, app and profile shortcuts, per-stream
+controls, Solo, profiles, per-app output devices (with sessions on every
+output), background lowering and microphone ducking. Run on the machine in
+`PROJECT_CONTEXT.md` section 4 (Windows 11 build 26200; outputs: headphones and
+HDMI; one microphone).
+
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`:
+  passed.
+- `cargo test --locked`: 157 library tests passed (31 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 12 hardware tests ignored. New tests
+  cover cycling with no, one or several pinned outputs (pin order, unpinned and
+  disconnected devices, devices returning), the settings fields with bad values,
+  the attenuation ledger (written once, undone, a user change kept, mute,
+  combined reductions, ended sessions), app and profile shortcuts resolving to
+  their commands, one shortcut per app, the unchanged saved format of a binding
+  without a target, the editor's slots, the per-app routing device-ID format and
+  vtable slots (25, 26, 27), profile capture of chosen parts and the preset
+  format, unique copy names and shortcuts following renamed or deleted
+  profiles, profile notices, the microphone gate (attack, release, pauses), focus
+  settling (alt-tab doesn't change anything), how Solo, focus rules and
+  microphone ducking combine, the foreground watcher starting and stopping
+  within 500 ms, the hook path not using audio, COM or blocking calls, the
+  output-device status wording, the confirmation before resetting all app
+  devices, and that every new control is named and fits at minimum width.
+- `cargo test --test audio_integration -- --ignored --test-threads=1`: all 11
+  passed on real devices. New: Solo halves another app (a silent helper),
+  restores it, and keeps a level set while it was lowered; app mute and
+  relative-volume commands; a focus rule lowers the helper while another
+  process is reported in front and restores it when the helper is reported in
+  front; and per-app routing. For routing, Windows reported the chosen device
+  (HDMI) at once; the helper's running stream did not move within 8 s, because
+  it opened a specific device; a second process of the same app, launched
+  afterwards, started on HDMI; resetting returned the preference to the system
+  default.
+- `cargo run --example routing_probe`: the per-app routing interface is
+  available on this build (the 21H2 interface ID).
+- Release build: 15,726,592 bytes. `scripts/lifecycle.ps1` passed with OpenGL
+  (hidden CPU 16 ms over 1 s) and `-Renderer wgpu` (281 ms on WARP, within its
+  usual spread).
+- Not run: the real foreground hook switching between real windows (the engine
+  path was tested with reported process IDs), microphone ducking with a live
+  voice (no capturing app was running; the gate is unit-tested), routing on
+  Windows 10 (the pre-21H2 interface ID), routing an elevated app, a shortcut
+  cycle with real tray balloons while hidden, and Windows 10 in general.
+
+## Stage 2 performance (2026-11-05, branch `stage2/performance`)
+
+Allocation-free meter polling, the icon extraction LRU with a bounded request
+queue, texture reuse, and wgpu built with only Direct3D 12 and Vulkan.
+
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`:
+  passed.
+- `cargo test --locked`: 126 library tests passed (8 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 8 hardware tests ignored. New tests
+  cover each app's loudest peak with every session read once and the map
+  reused, apps that left or went silent, the meter change threshold in both
+  directions, a relaunched app and a second app on the same binary reusing one
+  extraction, a separate extraction per pixel size, a modified executable being
+  extracted again, failures not being cached, a full request queue returning at
+  once and every dropped request resolving later, LRU eviction, identical icons
+  not being uploaded again while changed ones are, and keeping only the 32 most
+  recent icons of apps that left.
+- Build measurements, each a clean release build in its own target directory
+  on this machine:
+
+  | Configuration | Clean build | Incremental (one file) | Release exe | Crates |
+  | --- | --- | --- | --- | --- |
+  | Before (eframe `wgpu` feature) | 146 s | 50 s | 15,859,200 B | 199 |
+  | wgpu `dx12` + `vulkan` only (adopted) | 140 s | 51 s | 15,325,696 B | 197 |
+  | Same, plus `lto = "fat"` (not adopted) | 216 s | 113 s | 14,751,232 B | 197 |
+
+  The lockfile lost `khronos-egl` and three empty `wgpu-core-deps-*` crates; no
+  version changed. Fat LTO saves another 0.57 MB but more than doubles
+  incremental release builds with no measured runtime gain. `panic = "unwind"`
+  is kept: the panic hook and the `Drop`-based COM and registration cleanup
+  rely on unwinding.
+- `--renderer=wgpu` with a dev profile logged `renderer: wgpu fallback, Dx12 on
+  "Microsoft Basic Render Driver"` and exited with code 0.
+  `scripts/lifecycle.ps1` passed with OpenGL and with `-Renderer wgpu`. CPU in
+  the first second after hiding: OpenGL 0–31 ms; wgpu on WARP 78–484 ms, the
+  same spread as before the change (78–344 ms).
+- Silent-path meter CPU, debug builds, window visible with meters on, one
+  silent audio session, 10 s per sample, 8 alternating samples each: before
+  47–5,625 ms (median about 211 ms), after 16–1,312 ms (median about 86 ms).
+  Both have outliers of seconds from other activity on the machine, so this
+  suggests a reduction but doesn't prove one.
+- Not run: Explorer restart (tray-icon 0.26.1 re-adds the icon on
+  `TaskbarCreated`; it needs Explorer to be ended by hand), the wgpu fallback
+  on real Direct3D 12 or Vulkan hardware (this GPU has neither), and Windows 10.
+
 ## Stage 1 correctness fixes (2026-11-05, branch `stage1/correctness`)
 
 Balance aggregation, process-marker reclaim and saturation recovery, skipping

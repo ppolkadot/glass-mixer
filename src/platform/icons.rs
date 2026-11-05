@@ -8,8 +8,11 @@
 //! 3. Desktop apps: the executable's icon via `IShellItemImageFactory`.
 //! 4. Otherwise none: the UI draws a consistent generic tile.
 //!
-//! Successful results are cached per app and pixel size. Failed lookups can be
-//! retried on Refresh or when an app returns with a new session.
+//! Successful extractions are kept in a bounded LRU keyed by what they were
+//! extracted from (the executable's path, size and modification time, the icon
+//! resource, the AUMID) and the pixel size, so relaunching the same binary
+//! reuses its icon and a changed binary is extracted again. Failures are never
+//! cached; they can be retried on Refresh or when an app returns.
 
 use crate::audio::com::{ComGuard, take_pwstr};
 use crate::audio::{AppEntry, AppKey};
@@ -44,6 +47,11 @@ pub type IconKey = (AppKey, u32);
 /// How long shutdown waits for the worker before detaching it. A Shell lookup
 /// can block for a long time, for example on an offline network share.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+/// Requests waiting for the worker. When full, a request is dropped and made
+/// again on a later frame, so the UI never blocks behind a slow lookup.
+const QUEUE_CAPACITY: usize = 16;
+/// Extracted icons kept by the worker, about 9 KB each at 48 px.
+const CACHE_CAPACITY: usize = 96;
 
 #[derive(Clone, Debug, Default)]
 pub struct IconResult {
@@ -59,14 +67,76 @@ struct Request {
     icon_resource: Option<String>,
 }
 
-enum WorkerRequest {
-    Resolve(Request),
-    InvalidateFailed(Option<AppKey>),
-    Retain { live: HashSet<AppKey>, pixel_size: Option<u32> },
+/// What an extraction depends on. Two apps with equal keys get the same icon.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExtractKey {
+    px: u32,
+    icon_resource: Option<String>,
+    aumid: Option<String>,
+    exe: Option<FileIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FileIdentity {
+    path: String,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl ExtractKey {
+    fn of(req: &Request) -> Self {
+        let exe = req.exe_path.as_ref().map(|path| {
+            let meta = std::fs::metadata(path).ok();
+            FileIdentity {
+                path: path.to_string_lossy().to_lowercase(),
+                len: meta.as_ref().map_or(0, |m| m.len()),
+                modified: meta.and_then(|m| m.modified().ok()),
+            }
+        });
+        Self {
+            px: req.key.1,
+            icon_resource: req.icon_resource.as_ref().map(|r| r.trim().to_lowercase()),
+            aumid: req.aumid.as_ref().map(|a| a.to_lowercase()),
+            exe,
+        }
+    }
+}
+
+/// A small least-recently-used map. Eviction scans all entries, which is cheap
+/// at the sizes used here.
+struct Lru<K, V> {
+    entries: HashMap<K, (V, u64)>,
+    clock: u64,
+    capacity: usize,
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V> Lru<K, V> {
+    fn new(capacity: usize) -> Self {
+        Self { entries: HashMap::new(), clock: 0, capacity }
+    }
+
+    fn get(&mut self, key: &K) -> Option<&V> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.entries.get_mut(key).map(|(value, used)| {
+            *used = clock;
+            &*value
+        })
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.clock += 1;
+        self.entries.insert(key, (value, self.clock));
+        if self.entries.len() > self.capacity
+            && let Some(oldest) = self.entries.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+    }
 }
 
 pub struct IconService {
-    tx: Option<Sender<WorkerRequest>>,
+    tx: Option<Sender<Request>>,
     ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>,
     requested: HashSet<IconKey>,
     failed: HashSet<IconKey>,
@@ -104,7 +174,7 @@ impl IconService {
         on_ready: impl Fn() + Send + 'static,
         resolve: impl Fn(&Request) -> IconResult + Send + 'static,
     ) -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded::<WorkerRequest>();
+        let (tx, rx) = crossbeam_channel::bounded::<Request>(QUEUE_CAPACITY);
         let ready = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
@@ -132,22 +202,28 @@ impl IconService {
         }
     }
 
-    /// Requests resolution for an app at a pixel size, once.
+    /// Requests resolution for an app at a pixel size, once. Never blocks: if the
+    /// queue is full, the request is forgotten and the next call makes it again.
     pub fn request(&mut self, app: &AppEntry, px: u32) {
         let key = (app.key.clone(), px);
         if app.key == AppKey::System && app.icon_resource.is_none() {
             return;
         }
-        if !self.requested.insert(key.clone()) {
+        if self.requested.contains(&key) {
             return;
         }
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(WorkerRequest::Resolve(Request {
-                key,
-                exe_path: app.exe_path.clone(),
-                aumid: app.aumid.clone(),
-                icon_resource: app.icon_resource.clone(),
-            }));
+        let Some(tx) = &self.tx else {
+            self.requested.insert(key);
+            return;
+        };
+        let request = Request {
+            key: key.clone(),
+            exe_path: app.exe_path.clone(),
+            aumid: app.aumid.clone(),
+            icon_resource: app.icon_resource.clone(),
+        };
+        if tx.try_send(request).is_ok() {
+            self.requested.insert(key);
         }
     }
 
@@ -168,9 +244,6 @@ impl IconService {
         for key in self.failed.drain() {
             self.requested.remove(&key);
         }
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(WorkerRequest::InvalidateFailed(None));
-        }
     }
 
     pub fn sync_live_apps(&mut self, keys: impl IntoIterator<Item = AppKey>) {
@@ -178,22 +251,14 @@ impl IconService {
         if live == self.active {
             return;
         }
-        for key in live.difference(&self.active) {
-            let failed: Vec<_> = self.failed.iter().filter(|icon| &icon.0 == key).cloned().collect();
-            if !failed.is_empty() {
-                for icon in failed {
-                    self.failed.remove(&icon);
-                    self.requested.remove(&icon);
-                }
-                if let Some(tx) = &self.tx {
-                    let _ = tx.send(WorkerRequest::InvalidateFailed(Some(key.clone())));
-                }
-            }
+        // An app that returns gets another try at an icon that failed before.
+        let returned = |key: &AppKey| live.contains(key) && !self.active.contains(key);
+        let retry: Vec<_> = self.failed.iter().filter(|icon| returned(&icon.0)).cloned().collect();
+        for icon in retry {
+            self.failed.remove(&icon);
+            self.requested.remove(&icon);
         }
         self.requested.retain(|(key, _)| live.contains(key));
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(WorkerRequest::Retain { live: live.clone(), pixel_size: self.pixel_size });
-        }
         self.active = live;
     }
 
@@ -204,9 +269,6 @@ impl IconService {
         self.pixel_size = Some(px);
         self.requested.retain(|(_, size)| *size == px);
         self.failed.retain(|(_, size)| *size == px);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(WorkerRequest::Retain { live: self.active.clone(), pixel_size: Some(px) });
-        }
     }
 
     /// Stops the worker, detaching it if it hasn't finished within `SHUTDOWN_WAIT`.
@@ -237,37 +299,27 @@ impl Drop for IconService {
 }
 
 fn worker(
-    rx: Receiver<WorkerRequest>,
+    rx: Receiver<Request>,
     ready: Arc<Mutex<Vec<(IconKey, IconResult)>>>,
     on_ready: impl Fn(),
     stop: &AtomicBool,
     resolve: impl Fn(&Request) -> IconResult,
 ) {
     let _com = ComGuard::apartment();
-    let mut cache: HashMap<IconKey, IconResult> = HashMap::new();
-    for message in rx {
+    let mut cache: Lru<ExtractKey, IconResult> = Lru::new(CACHE_CAPACITY);
+    for req in rx {
         // Requests still queued at shutdown are dropped.
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let req = match message {
-            WorkerRequest::Resolve(req) => req,
-            WorkerRequest::InvalidateFailed(key) => {
-                cache.retain(|(app, _), result| {
-                    result.image.is_some() || key.as_ref().is_some_and(|wanted| wanted != app)
-                });
-                continue;
-            }
-            WorkerRequest::Retain { live, pixel_size } => {
-                cache.retain(|(key, size), _| live.contains(key) && pixel_size.is_none_or(|px| *size == px));
-                continue;
-            }
-        };
-        let result = match cache.get(&req.key) {
+        let key = ExtractKey::of(&req);
+        let result = match cache.get(&key) {
             Some(r) => r.clone(),
             None => {
                 let r = resolve(&req);
-                cache.insert(req.key.clone(), r.clone());
+                if r.image.is_some() {
+                    cache.insert(key, r.clone());
+                }
                 r
             }
         };
@@ -485,6 +537,8 @@ mod tests {
             activity: crate::audio::Activity::Idle,
             session_count: 1,
             balance: crate::audio::BalanceState::Unavailable,
+            streams: Vec::new(),
+            route: crate::audio::Route::SystemDefault,
         }
     }
 
@@ -526,6 +580,141 @@ mod tests {
         drop(release_tx);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(lookups.load(Ordering::SeqCst), 1, "a queued lookup ran after shutdown");
+    }
+
+    fn tiny_icon() -> IconResult {
+        IconResult { image: Some(ColorImage::new([1, 1], vec![egui::Color32::WHITE])), display_name: None }
+    }
+
+    /// Takes results until `count` have arrived or a few seconds pass.
+    fn wait_ready(service: &mut IconService, count: usize) -> Vec<(IconKey, IconResult)> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut got = Vec::new();
+        while got.len() < count && std::time::Instant::now() < deadline {
+            got.extend(service.take_ready());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        got
+    }
+
+    fn counting_service(
+        result: impl Fn(&Request) -> IconResult + Send + 'static,
+    ) -> (IconService, Arc<std::sync::atomic::AtomicUsize>) {
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = lookups.clone();
+        let service = IconService::start_with(
+            || {},
+            move |req| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                result(req)
+            },
+        );
+        (service, lookups)
+    }
+
+    #[test]
+    fn a_relaunched_app_reuses_its_extraction() {
+        let (mut service, lookups) = counting_service(|_| tiny_icon());
+        let exe = app(r"c:\apps\player.exe");
+        service.sync_live_apps([exe.key.clone()]);
+        service.request(&exe, 28);
+        assert_eq!(wait_ready(&mut service, 1).len(), 1);
+        // The app exits and is launched again.
+        service.sync_live_apps([]);
+        service.sync_live_apps([exe.key.clone()]);
+        service.request(&exe, 28);
+        assert_eq!(wait_ready(&mut service, 1).len(), 1, "the returning app gets its icon again");
+        assert_eq!(lookups.load(Ordering::SeqCst), 1, "from the cache, without another Shell extraction");
+        // Another app running the same binary shares the extraction too.
+        service.request(&AppEntry { key: AppKey::Pid(77), ..exe.clone() }, 28);
+        assert_eq!(wait_ready(&mut service, 1).len(), 1);
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+        service.request(&exe, 42);
+        wait_ready(&mut service, 1);
+        assert_eq!(lookups.load(Ordering::SeqCst), 2, "another pixel size is a separate extraction");
+    }
+
+    #[test]
+    fn a_changed_executable_is_extracted_again() {
+        let dir = std::env::temp_dir().join(format!("glass-mixer-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tool.exe");
+        std::fs::write(&path, b"one").unwrap();
+        let (mut service, lookups) = counting_service(|_| tiny_icon());
+        let exe = app(&path.to_string_lossy());
+        service.sync_live_apps([exe.key.clone()]);
+        service.request(&exe, 28);
+        wait_ready(&mut service, 1);
+        std::fs::write(&path, b"version two").unwrap();
+        service.sync_live_apps([]);
+        service.request(&exe, 28);
+        wait_ready(&mut service, 1);
+        assert_eq!(lookups.load(Ordering::SeqCst), 2, "a different size or modification time is a new binary");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_extractions_are_not_cached() {
+        let (mut service, lookups) = counting_service(|_| IconResult::default());
+        let exe = app(r"c:\apps\broken.exe");
+        service.request(&exe, 28);
+        wait_ready(&mut service, 1);
+        service.request(&exe, 28);
+        assert!(wait_ready(&mut service, 0).is_empty(), "a failure isn't requested again by itself");
+        service.retry_failed();
+        service.request(&exe, 28);
+        wait_ready(&mut service, 1);
+        assert_eq!(lookups.load(Ordering::SeqCst), 2, "a retry runs the lookup again");
+    }
+
+    #[test]
+    fn a_full_queue_never_blocks_and_dropped_requests_are_made_again() {
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(0);
+        let mut service = IconService::start_with(
+            || {},
+            move |_| {
+                if entered_tx.try_send(()).is_ok() {
+                    let _ = release_rx.recv();
+                }
+                tiny_icon()
+            },
+        );
+        let apps: Vec<_> = (0..QUEUE_CAPACITY * 3).map(|i| app(&format!(r"c:\apps\app{i}.exe"))).collect();
+        service.request(&apps[0], 28);
+        entered_rx.recv_timeout(Duration::from_secs(5)).expect("the first lookup starts and blocks");
+        let started = std::time::Instant::now();
+        for a in &apps[1..] {
+            service.request(a, 28);
+        }
+        assert!(started.elapsed() < Duration::from_millis(200), "requests blocked for {:?}", started.elapsed());
+        assert_eq!(service.requested.len(), 1 + QUEUE_CAPACITY, "the rest were dropped, not marked as requested");
+
+        drop(release_tx);
+        // Each frame re-requests what is still missing, as the mixer does.
+        let mut resolved = HashSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while resolved.len() < apps.len() && std::time::Instant::now() < deadline {
+            for a in &apps {
+                service.request(a, 28);
+            }
+            resolved.extend(service.take_ready().into_iter().map(|(key, _)| key.0));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(resolved.len(), apps.len(), "every dropped request was eventually resolved");
+    }
+
+    #[test]
+    fn the_lru_evicts_the_least_recently_used_entry() {
+        let mut lru = Lru::new(2);
+        lru.insert("a", 1);
+        lru.insert("b", 2);
+        assert_eq!(lru.get(&"a"), Some(&1));
+        lru.insert("c", 3);
+        assert_eq!(lru.get(&"b"), None, "b was used least recently");
+        assert_eq!(lru.get(&"a"), Some(&1));
+        assert_eq!(lru.get(&"c"), Some(&3));
+        assert_eq!(lru.entries.len(), 2);
     }
 
     #[test]
