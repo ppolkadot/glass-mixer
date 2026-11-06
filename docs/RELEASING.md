@@ -49,6 +49,13 @@ builds and uploads the packages but creates no release.
 
 ## Code signing
 
+The project's intended signing route is SignPath Foundation's free program, described
+in [CODE_SIGNING_POLICY.md](../CODE_SIGNING_POLICY.md) (application pending). SignPath
+signs from its own GitHub Action with manual approval of each release request, which
+is not what `release.yml` does today: the certificate settings below are a stand-in
+for any certificate you hold, and `release.yml` will need a SignPath step in place of
+them once the application is approved. Keep the policy in step with whatever is live.
+
 Without a certificate, releases are **unsigned**, and the release notes say so: Windows
 SmartScreen may warn the first time a download is run. A self-signed certificate does not
 change that and is not used.

@@ -24,8 +24,9 @@ Each release has two downloads:
 | `glass-mixer-<version>-setup.exe` | You want a normal installation: a Start menu entry, an uninstaller, and optional launch at sign-in. | Run the installer. It installs for your user account only, to `%LOCALAPPDATA%\Programs\Glass Mixer`, and needs no administrator rights. |
 | `glass-mixer-<version>-portable.zip` | You don't want to install anything. | Unzip it anywhere and run `glass-mixer.exe`. Settings are still kept in `%APPDATA%\GlassMixer`. |
 
-The downloads are not code-signed, so Windows SmartScreen may warn the first
-time you run them. Choose **More info**, then **Run anyway** if you trust the
+The downloads are not code-signed yet (see the
+[code signing policy](CODE_SIGNING_POLICY.md)), so Windows SmartScreen may warn
+the first time you run them. Choose **More info**, then **Run anyway** if you trust the
 download. Each release has a `SHA256SUMS.txt` with the checksum of each
 download; compare it with `Get-FileHash <file>` before running.
 
@@ -320,6 +321,7 @@ what has been tested.
 | [docs/TESTING.md](docs/TESTING.md) | Contributors | Automated tests, recorded results and the manual checklist |
 | [docs/VALIDATION_MATRIX.md](docs/VALIDATION_MATRIX.md) | Everyone | What has been tested on which Windows versions and hardware, and what has not |
 | [docs/RELEASING.md](docs/RELEASING.md) | Maintainers | Building, verifying, signing and publishing a release |
+| [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md) | Everyone | Who signs official releases, what is signed, and the current status |
 | [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) | Maintainers | The full project record: original specification, decisions, gaps and known risks |
 | [docs/SOUND_PROPERTIES_SPIKE.md](docs/SOUND_PROPERTIES_SPIKE.md) | Developers | Why sound-property controls open Windows Settings |
 | [scripts/README.md](scripts/README.md) | Contributors | Packaging, signing and development test scripts |

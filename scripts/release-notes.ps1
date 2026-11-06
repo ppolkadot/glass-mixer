@@ -25,10 +25,11 @@ if ($changelog -notmatch $pattern) { throw "CHANGELOG.md has no '## $Version (da
 $section = $Matches[1].Trim()
 if (-not $section) { throw "The CHANGELOG section for $Version is empty." }
 
+$policy = 'https://github.com/ppolkadot/glass-mixer/blob/main/CODE_SIGNING_POLICY.md'
 $signing = if ($Signed) {
-    'The executable and the installer are digitally signed.'
+    "The executable and the installer are digitally signed. See the [code signing policy]($policy)."
 } else {
-    'These downloads are **not code-signed**, so Windows SmartScreen may warn the first time you run them. Compare the SHA-256 checksums in `SHA256SUMS.txt` before running.'
+    "**Signing status:** these downloads are **not code-signed** yet, so Windows SmartScreen may warn the first time you run them. Compare the SHA-256 checksums in ``SHA256SUMS.txt`` before running. See the [code signing policy]($policy)."
 }
 $text = @(
     "# Glass Mixer $Version",
