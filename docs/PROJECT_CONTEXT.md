@@ -4,14 +4,14 @@ The whole project in one document. It records what was asked, what was
 built and why, how it was checked, what is known to be missing or risky,
 and the context needed to continue the work.
 
-Last updated: 2026-11-06 (version `0.5.0`, in development on `experiments`,
-not yet published). The v0.1.0 release record
+Last updated: 2026-11-06 (version `0.5.0`, released from `main`).
+The v0.1.0 release record
 remains below; later changes and their verification are in
 [CHANGELOG.md](../CHANGELOG.md) and [TESTING.md](TESTING.md).
 
 - Repository: https://github.com/ppolkadot/glass-mixer (public)
 - Releases: https://github.com/ppolkadot/glass-mixer/releases
-- [0.5.0 release record](releases/0.5.0.md): the candidate build, its verification and what was not tested.
+- [0.5.0 release record](releases/0.5.0.md): downloads, checksums, verification and what was not tested.
 - [0.4.0 release record](releases/0.4.0.md): downloads, checksums and verification.
 - [RELEASING.md](RELEASING.md): how a version is built, verified, signed and published.
 - [VALIDATION_MATRIX.md](VALIDATION_MATRIX.md): what has been tested, on what, and what has not.
@@ -55,7 +55,7 @@ Status:
 - **0.4.0 contains the audit and final review corrections.** These cover
   software-rendered meters, bounded shutdown, safe settings recovery and
   per-installation exit handling (see [CHANGELOG.md](../CHANGELOG.md)).
-- **0.5.0 is the current development version** (not yet tagged or published).
+- **0.5.0 is the current version** (GitHub release `v0.5.0`).
   It adds per-app output routing, Solo, foreground and microphone-ducking
   rules, app names and pin ordering, settings export and import, a diagnostic
   report, the embedded Polaris typeface, and release automation (version
