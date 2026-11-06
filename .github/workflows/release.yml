@@ -1,0 +1,121 @@
+name: Release
+
+# Builds, tests, packages and verifies a release, then leaves it as a DRAFT GitHub
+# release for review. Nothing is published automatically.
+#
+# Start it by pushing a version tag that matches Cargo.toml:
+#   git tag v0.5.0 && git push origin v0.5.0
+# or run it by hand for a dry run, which builds and uploads the packages but creates
+# no release. Signing is optional; see docs/RELEASING.md.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # creates the draft release
+    env:
+      # Optional Authenticode signing. Without the secrets the build is unsigned, and
+      # the release notes say so. Never commit a certificate or its password.
+      SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+      SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+      GLASS_MIXER_SIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGN_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag, Cargo.toml, Cargo.lock, the manifest, the installer and the changelog
+      # must all name the same version, and the changelog may have no Unreleased section.
+      - name: Version consistency
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { ./scripts/check-version.ps1 -Tag $env:GITHUB_REF_NAME } else { ./scripts/check-version.ps1 }
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+
+      - name: Import the code-signing certificate
+        if: ${{ env.SIGN_PFX_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          try {
+            $password = ConvertTo-SecureString $env:SIGN_PFX_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          } finally {
+            Remove-Item $pfx -Force
+          }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe was not found in the Windows SDK.' }
+          "GLASS_MIXER_SIGN_CERT_SHA1=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "GLASS_MIXER_SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SIGNED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Builds the release exe, the portable ZIP and the installer, signs them when a
+      # certificate was imported, then verifies them and writes SHA256SUMS.txt.
+      - name: Package and verify
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Require the installer (and the signature, when signing)
+        shell: pwsh
+        run: |
+          if ($env:SIGNED -eq 'true') { ./scripts/verify-package.ps1 -RequireInstaller -RequireSigned } else { ./scripts/verify-package.ps1 -RequireInstaller }
+      - name: Release notes
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:SIGNED -eq 'true') { ./scripts/release-notes.ps1 -Version $version -OutFile dist/release-notes.md -Signed } else { ./scripts/release-notes.ps1 -Version $version -OutFile dist/release-notes.md }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glass-mixer-${{ env.VERSION }}
+          path: |
+            dist/glass-mixer-${{ env.VERSION }}-portable.zip
+            dist/glass-mixer-${{ env.VERSION }}-setup.exe
+            dist/glass-mixer-${{ env.VERSION }}-SHA256SUMS.txt
+            dist/release-notes.md
+          if-no-files-found: error
+
+      # A draft: review it, then publish it from the GitHub Releases page.
+      - name: Draft release
+        if: ${{ github.ref_type == 'tag' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            "dist/glass-mixer-$env:VERSION-portable.zip" `
+            "dist/glass-mixer-$env:VERSION-setup.exe" `
+            "dist/glass-mixer-$env:VERSION-SHA256SUMS.txt" `
+            --draft --title "Glass Mixer $env:VERSION" --notes-file dist/release-notes.md
+
+      - name: Remove the certificate from the runner
+        if: ${{ always() && env.SIGN_PFX_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          if ($env:GLASS_MIXER_SIGN_CERT_SHA1) { Remove-Item "Cert:\CurrentUser\My\$env:GLASS_MIXER_SIGN_CERT_SHA1" -Force -ErrorAction SilentlyContinue }

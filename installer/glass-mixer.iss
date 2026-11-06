@@ -3,7 +3,11 @@
 ; Built by scripts\package.ps1 (which passes /DAppVersion=...).
 
 #ifndef AppVersion
-  #define AppVersion "0.4.0"
+  #define AppVersion "0.5.0"
+#endif
+; Four numeric parts, for the setup program's file version (scripts\package.ps1 passes it).
+#ifndef AppVersionNumeric
+  #define AppVersionNumeric "0.5.0.0"
 #endif
 
 [Setup]
@@ -20,6 +24,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=..\dist
 OutputBaseFilename=glass-mixer-{#AppVersion}-setup
+VersionInfoVersion={#AppVersionNumeric}
+VersionInfoProductName=Glass Mixer
+VersionInfoDescription=Glass Mixer setup
 SetupIconFile=..\target\release\app.ico
 UninstallDisplayIcon={app}\glass-mixer.exe
 Compression=lzma2/max
@@ -59,6 +66,20 @@ Filename: "{app}\glass-mixer.exe"; Description: "Start Glass Mixer"; Flags: nowa
 Filename: "{app}\glass-mixer.exe"; Parameters: "--exit"; Flags: runhidden waituntilterminated; RunOnceId: "StopGlassMixer"
 
 [Code]
+// Before files are replaced, ask a running installed copy to exit cleanly (saving its
+// settings and removing its tray icon) instead of leaving it to the Restart Manager,
+// which terminates it. A copy running from elsewhere is unaffected.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Exe: String;
+  ResultCode: Integer;
+begin
+  Exe := ExpandConstant('{app}\glass-mixer.exe');
+  if FileExists(Exe) then
+    Exec(Exe, '--exit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := '';
+end;
+
 // Remove the launch-at-login entry even if it was enabled from inside the app,
 // and optionally the user's settings.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

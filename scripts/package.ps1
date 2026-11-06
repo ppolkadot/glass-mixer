@@ -6,6 +6,10 @@
   Produces, in .\dist:
     glass-mixer-<version>-portable.zip   always (executable, README, LICENSE, THIRD-PARTY-NOTICES.txt, fonts\LICENSE.txt)
     glass-mixer-<version>-setup.exe      when Inno Setup 6 (ISCC.exe) is installed
+    glass-mixer-<version>-SHA256SUMS.txt checksums of the above, in sha256sum format
+
+  The version is checked first (scripts\check-version.ps1) and the packages are
+  verified last (scripts\verify-package.ps1).
 
   Run from the repository root:  powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 #>
@@ -14,13 +18,20 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+$numeric = ((($version -split '[-+]')[0]) + '.0')
 Write-Host "Glass Mixer $version"
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'check-version.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'The version check failed.' }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 }
 cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'check-version.ps1') -Exe (Join-Path $root 'target\release\glass-mixer.exe')
+if ($LASTEXITCODE -ne 0) { throw 'The built executable has the wrong version.' }
 
 # Optional certificate-store signing. Set GLASS_MIXER_SIGN_CERT_SHA1 to the
 # thumbprint of a code-signing certificate with its private key installed.
@@ -62,7 +73,17 @@ New-Item -ItemType Directory -Force (Join-Path $staging 'fonts') | Out-Null
 Copy-Item assets\fonts\LICENSE.txt (Join-Path $staging 'fonts')
 $zip = Join-Path dist "glass-mixer-$version-portable.zip"
 Remove-Item $zip -Force -ErrorAction SilentlyContinue
-Compress-Archive -Path "$staging\*" -DestinationPath $zip
+# Not Compress-Archive: Windows PowerShell 5.1 writes backslashes in entry names, which other tools mishandle.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::Open((Join-Path $root $zip), 'Create')
+try {
+    foreach ($file in Get-ChildItem -LiteralPath $staging -Recurse -File) {
+        $entry = $file.FullName.Substring($staging.Length + 1).Replace('\', '/')
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entry, 'Optimal')
+    }
+} finally {
+    $archive.Dispose()
+}
 Remove-Item $staging -Recurse -Force
 Write-Host "Portable zip: $zip"
 
@@ -72,10 +93,17 @@ $iscc = @(
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($iscc) {
-    & $iscc "/DAppVersion=$version" installer\glass-mixer.iss
+    & $iscc "/DAppVersion=$version" "/DAppVersionNumeric=$numeric" installer\glass-mixer.iss
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
     Sign-File (Join-Path $root "dist\glass-mixer-$version-setup.exe")
     Write-Host "Installer: dist\glass-mixer-$version-setup.exe"
 } else {
     Write-Warning "Inno Setup 6 not found; skipping installer. Install it with: winget install JRSoftware.InnoSetup"
 }
+
+# A hashtable, so the switches bind by name (an array would pass them as positional values).
+$verify = @{ WriteChecksums = $true }
+if ($env:GLASS_MIXER_SIGN_CERT_SHA1) { $verify.RequireSigned = $true }
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'verify-package.ps1') @verify
+if ($LASTEXITCODE -ne 0) { throw 'Package verification failed.' }

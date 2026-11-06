@@ -183,7 +183,10 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Module | Responsibility |
 | --- | --- |
 | `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping (an app's balance is `Uniform`, `Mixed` when its stereo sessions disagree, or `Unavailable`), balance math, tooltip text. |
-| `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, launch at login (registry), DWM backdrop, system preferences, fonts, and app icon resolution. |
+| `audio/attenuation.rs`, `automation.rs`, `app_routing.rs` | The attenuation ledger shared by Solo, foreground rules and microphone ducking (a level the user changes is never overwritten), those two automatic rules, and per-app output routing through the undocumented `AudioPolicyConfig` factory. |
+| `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, exit requests (`--exit`), launch at login (registry), DWM backdrop, system preferences, the foreground-window hook (`foreground.rs`), the embedded Polaris typeface (`fonts.rs`), and app icon resolution. |
+| `diagnostics.rs` | The diagnostic report: versions, states, counts and recent warnings, with app, device and profile names replaced; made locally, sent nowhere. |
+| `transfer.rs` | Settings export and import: versioned JSON, validated before anything changes, reporting what cannot be read. |
 | `ui/` | The design system (`theme.rs`), custom widgets (`widgets.rs`), the mixer view and the settings view. |
 | `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown top-level fields, atomic migration backups, and atomic writes. |
 | `app.rs` | Lifecycle. It wires everything together and owns the single shutdown path. |

@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-11-06)
+
+Package details and checksums are in [the release record](docs/releases/0.5.0.md).
 
 ### Added
 
@@ -91,6 +93,18 @@
   immediate.
 - New read-only `examples/grouping_probe.rs` lists sessions with their Windows
   grouping parameter, to check multi-process grouping before relying on it.
+- **The installer asks a running copy to exit before an upgrade.** The previous
+  installer relied on Windows to close the app, which terminated it without
+  saving its settings or removing its tray icon.
+- **Release tooling.** One version number is checked across `Cargo.toml`,
+  `Cargo.lock`, the manifest, the installer and this changelog. Packaging
+  verifies both packages (exact contents, version, 64-bit build, the Polaris
+  notice, byte-exact licenses, signature state) and writes SHA-256 checksums.
+  `scripts/installer-smoke.ps1` tests install, upgrade over a running copy and
+  uninstall of a running copy in isolation from a real installation, and a
+  tagged release builds a draft release in CI. Packages are signed when a
+  certificate is configured; none is, so 0.5.0 downloads are unsigned. See
+  `docs/RELEASING.md` and `docs/VALIDATION_MATRIX.md`.
 
 ## 0.4.0 (2026-10-20)
 

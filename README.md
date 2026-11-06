@@ -26,7 +26,8 @@ Each release has two downloads:
 
 The downloads are not code-signed, so Windows SmartScreen may warn the first
 time you run them. Choose **More info**, then **Run anyway** if you trust the
-download. Recent release notes list the SHA-256 checksum of each download.
+download. Each release has a `SHA256SUMS.txt` with the checksum of each
+download; compare it with `Get-FileHash <file>` before running.
 
 To build it yourself, see [Build from source](#build-from-source).
 
@@ -38,18 +39,28 @@ To build it yourself, see [Build from source](#build-from-source).
 - Volume, mute and balance for your default speakers and microphone, and
   switching which device is the default.
 - A **Devices** view that controls every active output and input separately.
-- **Presets** that save app volumes and mutes and apply them on request, or
-  once whenever a saved app starts.
+- **Profiles** (presets) that save app volumes and mutes, and optionally each
+  app's output device, the master level and the default devices. They apply on
+  request, or once whenever a saved app starts.
+- **Per-app output devices:** send an app to any connected output from its
+  details. Windows remembers the choice.
+- **Solo** lowers every other app until you end it; **Lower in background**
+  and **Microphone ducking** are opt-in rules for pinned apps that lower them
+  while another window is in front, or while you talk. Levels you change by
+  hand in the meantime are never overwritten.
 - Optional global keyboard shortcuts for mute, microphone mute, volume up and
-  down, and showing the mixer. None are assigned until you choose them.
+  down, showing the mixer, cycling pinned outputs, per-app mute, volume and
+  Solo, and applying a profile. None are assigned until you choose them.
 
 **Apps in the mixer**
 
 - Each app shows its own icon, its name and whether it is Playing, Idle or
   Muted (in text as well as colour).
-- An app with several audio streams appears as one row.
+- An app with several audio streams appears as one row; its details list each
+  stream with its own mute and volume.
 - Filter the list by name (Ctrl+F), hide idle apps, and pin apps so they keep
-  their place even when they aren't running.
+  their place, in an order you choose, even when they aren't running. Apps can
+  be given your own names.
 - Live level meters under the sliders (optional).
 
 **Windows integration**
@@ -72,6 +83,16 @@ To build it yourself, see [Build from source](#build-from-source).
 - Light, dark or follow Windows; seven accent colours.
 - Comfortable or compact layout.
 - Acrylic or Mica glass on Windows 11 (see [Requirements](#requirements-and-compatibility)).
+- The Salted Flutters Polaris typeface, or Windows' Segoe UI if you prefer.
+
+**Backup and support**
+
+- Export your settings to a file and import them again; an import is checked
+  and shown to you first, and your current settings are backed up before
+  anything is replaced.
+- A diagnostic report (Settings > About) for bug reports. It hides app, device
+  and profile names and your user folder, is made on your PC and is never sent
+  anywhere.
 
 **Accessibility**
 
@@ -135,11 +156,16 @@ by the build but has not been tested; see [TESTING.md](docs/TESTING.md).
 
 ## Limitations
 
-- **Only the default output's apps are listed.** As in Windows' own volume
-  mixer, apps playing to another device don't appear, and Glass Mixer can't
-  send an app to a different device. Change the default output, or route the
-  app in Windows' own sound settings (on Windows 11: Settings > System >
-  Sound > Volume mixer).
+- **Per-app output devices use an undocumented Windows interface**, because
+  Windows has no public API for it (the one Settings > System > Sound > Volume
+  mixer uses). If it is unavailable, the Output menu says why. Apps that follow
+  the default device move at once; an app that opened a specific device
+  switches when it restarts playback. Windows can only forget the choices for
+  all apps at once (Settings > Audio).
+- **Automatic lowering never overrides you.** If you change a level that Solo,
+  Lower in background or Microphone ducking lowered, that app is left alone
+  until the reduction ends. Microphone ducking reads only the microphone's level;
+  nothing is recorded.
 - **Some audio can't be controlled separately**: sounds Windows doesn't expose
   as their own session, such as exclusive-mode streams, some protected (DRM)
   playback and hardware mixers. Some Windows sounds share the System sounds row.
@@ -147,8 +173,8 @@ by the build but has not been tested; see [TESTING.md](docs/TESTING.md).
   (`IPolicyConfig`), because Windows has no public API for it. It is the same
   interface the Sound control panel uses. If it is unavailable, the device
   drop-downs are disabled and say why.
-- **An app with several streams shows the loudest one**, and changing its
-  volume sets all of its streams to the same level.
+- **An app's row shows its loudest stream**, and changing the row's volume sets
+  all of its streams to the same level; use the details to change one stream.
 - **Balance needs a stereo device or app**; elsewhere it says it isn't
   available.
 - **Sound formats, enhancements, spatial sound and mono audio are read-only.**
@@ -166,7 +192,8 @@ by the build but has not been tested; see [TESTING.md](docs/TESTING.md).
 
 | Problem | What to do |
 | --- | --- |
-| An app is missing from the list | It has no audio session on the default output yet. Play something in it, or press the refresh button (↻) next to the filter. Apps playing to another device aren't listed. |
+| An app is missing from the list | It has no audio session yet. Play something in it, or press the refresh button (↻) next to the filter. |
+| An app didn't move when I changed its output | An app that opened a specific device switches when it restarts playback; pause and resume it. |
 | Volumes look stuck after sleep or after plugging in a device | Glass Mixer rebuilds automatically. Press ↻ or **Settings > Refresh audio devices** to force it, and check the log file. |
 | The device drop-downs are greyed out | Default-device switching isn't available on this system. Use Windows Settings > System > Sound. |
 | There's no glass effect | The status under **Settings > Glass effect** explains why (Windows version, transparency effects, high contrast or the fallback renderer). |
@@ -240,10 +267,13 @@ cargo run               # debug build; also opens a console window
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 ```
 
-`scripts\package.ps1` builds the release executable and writes the portable
-zip, plus the installer when Inno Setup is installed, to `dist\`. Both include
-`LICENSE` and `THIRD-PARTY-NOTICES.txt`. Code signing and the development
-scripts are described in [scripts/README.md](scripts/README.md).
+`scripts\package.ps1` checks that the version agrees everywhere, builds the
+release executable, writes the portable zip (plus the installer when Inno Setup
+is installed) and `SHA256SUMS.txt` to `dist\`, and verifies them. Both packages
+include `LICENSE`, `THIRD-PARTY-NOTICES.txt` and the typeface's license. Code
+signing and the development scripts are described in
+[scripts/README.md](scripts/README.md), and the release process in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Tests and diagnostics
 
@@ -278,14 +308,18 @@ results and the manual checklist.
 
 Glass Mixer is a Windows-only project, released as described in
 [CHANGELOG.md](CHANGELOG.md). It has been developed and tested on Windows 11;
-Windows 10, multi-device hot-plug, sleep and resume, and audio service
-restarts are implemented but not yet verified on real hardware.
+Windows 10, USB and Bluetooth devices, multi-device hot-plug, sleep and
+resume, and audio service restarts are implemented but not yet verified on real
+hardware; [docs/VALIDATION_MATRIX.md](docs/VALIDATION_MATRIX.md) lists exactly
+what has been tested.
 
 | Document | For | Contents |
 | --- | --- | --- |
 | [CHANGELOG.md](CHANGELOG.md) | Everyone | What changed in each version, upgrade notes and known limitations |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Developers | Threads, data flow and the Windows APIs used |
 | [docs/TESTING.md](docs/TESTING.md) | Contributors | Automated tests, recorded results and the manual checklist |
+| [docs/VALIDATION_MATRIX.md](docs/VALIDATION_MATRIX.md) | Everyone | What has been tested on which Windows versions and hardware, and what has not |
+| [docs/RELEASING.md](docs/RELEASING.md) | Maintainers | Building, verifying, signing and publishing a release |
 | [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) | Maintainers | The full project record: original specification, decisions, gaps and known risks |
 | [docs/SOUND_PROPERTIES_SPIKE.md](docs/SOUND_PROPERTIES_SPIKE.md) | Developers | Why sound-property controls open Windows Settings |
 | [scripts/README.md](scripts/README.md) | Contributors | Packaging, signing and development test scripts |
@@ -316,7 +350,7 @@ cargo test --locked
 
 Glass Mixer is released under the [MIT License](LICENSE). The licenses of the
 open-source components compiled into it are in `THIRD-PARTY-NOTICES.txt`,
-included with each download from version 0.4.0.
+included with each download (since version 0.4.0).
 
 The interface typeface is Salted Flutters Polaris by ppoolar (Regular and
 Semibold), embedded in the executable and used under its own license, which is

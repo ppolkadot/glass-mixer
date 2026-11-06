@@ -1,2 +1,4 @@
 /target
 /dist
+# Written and removed by scripts/installer-smoke.ps1.
+/installer/*.generated.iss

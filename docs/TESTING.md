@@ -1,5 +1,54 @@
 # Testing
 
+## Stage 6: release readiness (2026-11-06, `experiments`)
+
+Machine: Windows 11 build 26200, HDMI output active, one monitor at 100 %. See
+[VALIDATION_MATRIX.md](VALIDATION_MATRIX.md) for what this machine does and does
+not cover.
+
+- **Gate**, with every step's exit status checked: `cargo fmt --check`, `cargo
+  clippy --locked --all-targets -- -D warnings`, `cargo test --locked` (194 library
+  tests passed, 3 ignored, plus the binary and source-encoding tests), a release
+  build (23,137,280 bytes), the 12 real-device integration tests, and
+  `scripts/lifecycle.ps1` with OpenGL (hidden CPU 16 ms over 1 s, 47.7 MB private)
+  and `-Renderer wgpu` (109 ms on WARP, 285.8 MB private).
+- **Packaging:** `scripts/package.ps1` ran end to end: version check, release build,
+  notices, portable ZIP, installer, checksums, and `verify-package.ps1`, which
+  passed. Both packages are reported as **unsigned**: no certificate exists, so the
+  signing path has not been exercised. Negative tests showed the verifiers fail on a
+  wrong version, a missing file, a tampered checksum and `-RequireSigned` without a
+  signature.
+- **Installer lifecycle** (`scripts/installer-smoke.ps1`): a variant installer with
+  its own identity and the debug build, so the real installation could not be touched.
+  The final run passed all 32 checks: fresh install, upgrade over a running copy
+  (closed cleanly, one uninstall entry, new files), uninstall of a running copy
+  (asked to exit and did, everything removed, nothing left running), and the real
+  installation (launch-at-login, uninstall entry, executable hash, files, shortcuts,
+  processes) unchanged. An earlier run failed one check: the upgrade closed the copy
+  by terminating it. The installer now runs `--exit` from the installed folder before
+  replacing files, and the check passes. Not tested: upgrading from a 0.1.0 to 0.3.0
+  installation (those versions do not know `--exit`), and the installer built from the
+  release executable (the smoke test uses the debug build).
+- **Performance, 0.4.0 (`41f656d`) against this branch**, release builds in scratch
+  copies with their own settings folders and single-instance name, three runs each,
+  10 s of CPU after 4 s of settling:
+
+  | | 0.4.0 | 0.5.0 candidate |
+  | --- | --- | --- |
+  | Executable | 15.12 MB | 22.07 MB (the Polaris typeface is about 7 MB of it) |
+  | CPU, window visible, meters on (median) | 47 ms | 62 ms |
+  | CPU, hidden (median) | 0 ms | 0 ms |
+  | Working set, visible (median) | 68 MB | 69.7 MB |
+  | Working set, hidden (median) | 67.3 MB | 69.2 MB |
+  | Private memory, visible (median) | 50.5 MB | 50.6 MB |
+
+  The CPU difference is inside the spread of the runs (0 to 78 ms over 10 s). Time to
+  the first window handle was 552 ms and 389 ms on the cold first runs and about
+  30 ms afterwards; that is the first top-level window, not the first painted frame,
+  so it is not a startup benchmark. No clean-build times were measured.
+- **Not run:** the GitHub Actions workflows (`ci.yml`, `release.yml`) have not run on
+  GitHub; Windows 10; other hardware; the matrix in [VALIDATION_MATRIX.md](VALIDATION_MATRIX.md).
+
 ## Stage 5, part 2: app names, ordering, and settings export and import (2026-11-06, `experiments`)
 
 Machine: Windows 11 build 26200, with only the HDMI output active.
