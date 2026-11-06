@@ -90,7 +90,9 @@ impl ToastExpiry {
 
 /// Logs the renderer and graphics adapter in use. Returns whether frames are
 /// rendered in software (WARP, the "Microsoft Basic Render Driver").
-fn log_renderer(cc: &eframe::CreationContext<'_>) -> bool {
+/// Logs how the window is drawn; returns whether that is software rendering,
+/// and a description for the diagnostic report.
+fn log_renderer(cc: &eframe::CreationContext<'_>) -> (bool, String) {
     if let Some(state) = &cc.wgpu_render_state {
         let info = state.adapter.get_info();
         log::info!(
@@ -109,12 +111,12 @@ fn log_renderer(cc: &eframe::CreationContext<'_>) -> bool {
         if software {
             log::info!("software rendering: level meters are paused");
         }
-        software
+        (software, format!("wgpu fallback, {:?} on \"{}\" ({:?})", info.backend, info.name, info.device_type))
     } else {
         if cc.gl.is_some() {
             log::info!("renderer: OpenGL (glow)");
         }
-        false
+        (false, "OpenGL (glow)".to_owned())
     }
 }
 
@@ -187,15 +189,18 @@ pub struct MixerApp {
     force_opaque: bool,
     /// Frames are drawn by the CPU (no graphics acceleration).
     software_renderer: bool,
+    renderer: String,
+    /// Warnings and errors shown to the user, for the diagnostic report.
+    recent_notices: std::collections::VecDeque<crate::diagnostics::RecentNotice>,
     #[cfg(debug_assertions)]
     dev_exit_at: Option<Instant>,
 }
 
 impl MixerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions) -> Self {
-        let software_renderer = log_renderer(cc);
+        let (software_renderer, renderer) = log_renderer(cc);
         let ctx = cc.egui_ctx.clone();
-        let has_icon_font = fonts::install(&ctx);
+        let has_icon_font = fonts::install(&ctx, opts.settings.typeface);
         let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
             RawWindowHandle::Win32(w) => Some(Hwnd(w.hwnd.get())),
             _ => None,
@@ -325,6 +330,8 @@ impl MixerApp {
             pending_start_hide: start_hidden,
             force_opaque: opts.force_opaque,
             software_renderer,
+            renderer,
+            recent_notices: std::collections::VecDeque::new(),
             #[cfg(debug_assertions)]
             dev_exit_at: std::env::var_os("GLASS_MIXER_DEV_PROFILE")
                 .and_then(|_| std::env::var("GLASS_MIXER_DEV_EXIT_AFTER_MS").ok())
@@ -431,6 +438,12 @@ impl MixerApp {
     /// Shows a notice in the window, and in the tray while hidden.
     fn notify(&mut self, notice: crate::audio::Notice) {
         let crate::audio::Notice { level, text, announce } = notice;
+        if level != NoticeLevel::Info {
+            self.recent_notices.push_back(crate::diagnostics::RecentNotice { level, text: text.clone() });
+            while self.recent_notices.len() > crate::diagnostics::MAX_NOTICES {
+                self.recent_notices.pop_front();
+            }
+        }
         if self.settings.hidden_notifications
             && self.hwnd.is_some_and(|h| !window::is_shown(h))
             && let Some(tray) = self.tray.as_mut()
@@ -472,6 +485,46 @@ impl MixerApp {
             self.hide_to_tray();
         } else {
             window::show(h);
+        }
+    }
+
+    fn diagnostic_report(&self) -> String {
+        let snapshot = self.audio.snapshot();
+        let hotkeys = self.hotkeys.as_ref().map(HotkeyService::status);
+        let notices: Vec<_> = self.recent_notices.iter().cloned().collect();
+        let log_tail = crate::diagnostics::read_log_tail(crate::diagnostics::log_lines());
+        let unix_seconds =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        crate::diagnostics::build(&crate::diagnostics::Inputs {
+            settings: &self.settings,
+            snapshot: &snapshot,
+            prefs: &self.prefs,
+            renderer: &self.renderer,
+            software_renderer: self.software_renderer,
+            hotkeys: hotkeys.as_ref(),
+            notices: &notices,
+            log_tail: &log_tail,
+            unix_seconds,
+        })
+    }
+
+    /// Writes the diagnostic report beside the logs and shows the folder.
+    fn save_diagnostic_report(&mut self) {
+        let Some(dir) = crate::diagnostics::reports_dir() else {
+            return self.toast(NoticeLevel::Error, "Couldn't find a folder for the diagnostic report.".into());
+        };
+        let report = self.diagnostic_report();
+        let unix_seconds =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        match crate::diagnostics::save(&report, &dir, unix_seconds) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Err(e) = window::open_folder(&dir) {
+                    log::warn!("couldn't open the diagnostics folder: {e}");
+                }
+                self.toast(NoticeLevel::Info, format!("Diagnostic report saved: {name}"));
+            }
+            Err(e) => self.toast(NoticeLevel::Error, format!("Couldn't save the diagnostic report: {e}")),
         }
     }
 
@@ -781,6 +834,7 @@ impl eframe::App for MixerApp {
         let meters = self.audio.meters();
         let before = self.settings.clone();
         let mut errors = Vec::new();
+        let (mut save_report, mut copy_report) = (false, false);
 
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
@@ -841,8 +895,11 @@ impl eframe::App for MixerApp {
                         hotkey_editor: &mut self.hotkey_editor,
                         errors: &mut errors,
                     };
-                    if let settings_view::Outcome::Back = settings_view::show(ui, &mut cx) {
-                        self.view = View::Mixer;
+                    match settings_view::show(ui, &mut cx) {
+                        settings_view::Outcome::Back => self.view = View::Mixer,
+                        settings_view::Outcome::SaveDiagnostics => save_report = true,
+                        settings_view::Outcome::CopyDiagnostics => copy_report = true,
+                        settings_view::Outcome::None => {}
                     }
                 }
                 View::Presets => crate::ui::presets::show(
@@ -859,6 +916,9 @@ impl eframe::App for MixerApp {
         if self.settings != before {
             if self.settings.presets != before.presets {
                 self.audio.send(crate::audio::Command::SetPresetRules(self.settings.presets.clone()));
+            }
+            if self.settings.typeface != before.typeface {
+                fonts::install(ui.ctx(), self.settings.typeface);
             }
             if self.settings.pinned_devices != before.pinned_devices
                 || self.settings.solo != before.solo
@@ -881,6 +941,13 @@ impl eframe::App for MixerApp {
         }
         for e in errors {
             self.toast(NoticeLevel::Error, e);
+        }
+        if save_report {
+            self.save_diagnostic_report();
+        }
+        if copy_report {
+            ui.ctx().copy_text(self.diagnostic_report());
+            self.toast(NoticeLevel::Info, "Diagnostic report copied.".into());
         }
         self.draw_toasts(ui);
     }

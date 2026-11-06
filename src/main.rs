@@ -223,6 +223,7 @@ fn init_logging() {
     let level = if cfg!(debug_assertions) { LevelFilter::Debug } else { LevelFilter::Info };
     if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = WriteLogger::init(level, config, file);
+        glass_mixer::diagnostics::set_log_file(path);
     }
 }
 

@@ -317,3 +317,9 @@ cargo test --locked
 Glass Mixer is released under the [MIT License](LICENSE). The licenses of the
 open-source components compiled into it are in `THIRD-PARTY-NOTICES.txt`,
 included with each download from version 0.4.0.
+
+The interface typeface is Salted Flutters Polaris by ppoolar (Regular and
+Semibold), embedded in the executable and used under its own license, which is
+in [`assets/fonts/LICENSE.txt`](assets/fonts/LICENSE.txt) and ships with each
+download as `fonts\LICENSE.txt`. Settings > Appearance > Typeface switches to
+Windows' Segoe UI.

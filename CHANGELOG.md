@@ -33,6 +33,15 @@
 - **Per-stream controls.** An app with several streams lists each one, with
   its own mute and volume, in its details.
 - **Mouse wheel step** for volume sliders: 1, 2 or 5 % or a custom value.
+- **Salted Flutters Polaris typeface.** The interface now uses Polaris (Regular
+  and Semibold), embedded in the executable (about 7 MB larger). Segoe UI backs
+  it up for any glyph it lacks, and Settings > Appearance > Typeface switches
+  back to Segoe UI. The font's license ships in `fonts\LICENSE.txt` in both
+  packages.
+- **Diagnostic report** (Settings > About): saves or copies a plain-text report
+  of versions, states, counts, recent warnings and the log's tail for bug
+  reports. App, device and profile names and your user folder are hidden, audio
+  and files are never included, and nothing is sent anywhere.
 
 ### Fixed
 

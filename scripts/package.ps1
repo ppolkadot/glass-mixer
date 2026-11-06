@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Produces, in .\dist:
-    glass-mixer-<version>-portable.zip   always (executable, README, LICENSE, THIRD-PARTY-NOTICES.txt)
+    glass-mixer-<version>-portable.zip   always (executable, README, LICENSE, THIRD-PARTY-NOTICES.txt, fonts\LICENSE.txt)
     glass-mixer-<version>-setup.exe      when Inno Setup 6 (ISCC.exe) is installed
 
   Run from the repository root:  powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -57,6 +57,9 @@ if (-not ([IO.Path]::GetFullPath($staging)).StartsWith($distRoot, [StringCompari
 Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $staging | Out-Null
 Copy-Item target\release\glass-mixer.exe, README.md, LICENSE, $notices $staging
+# The Polaris font is embedded in the exe; its license must travel with it, unmodified, as LICENSE.txt.
+New-Item -ItemType Directory -Force (Join-Path $staging 'fonts') | Out-Null
+Copy-Item assets\fonts\LICENSE.txt (Join-Path $staging 'fonts')
 $zip = Join-Path dist "glass-mixer-$version-portable.zip"
 Remove-Item $zip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path "$staging\*" -DestinationPath $zip

@@ -1,5 +1,84 @@
 # Testing
 
+## Stage 5, part 1: Polaris typeface and diagnostic report (2026-11-06, `experiments`)
+
+The interface typeface (Salted Flutters Polaris Regular and Semibold, embedded) and
+the diagnostic report (Settings > About). Machine: Windows 11 build 26200; only the
+HDMI output was active, because the headphones and microphone were unplugged that
+day.
+
+- Gate, with every step's exit status checked: `cargo fmt
+  --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test
+  --locked` (177 library tests passed, 3 ignored; 3 binary tests and the source
+  encoding test passed; 12 hardware tests ignored), a release build (22,979,072
+  bytes, 7.24 MB more than the 15,737,856 before the fonts), the 12 real-device
+  integration tests, and `scripts/lifecycle.ps1` with OpenGL (hidden CPU 0 ms
+  over 1 s) and `-Renderer wgpu` (188 ms on WARP, within its usual spread).
+- The first full run of this gate failed twice, and both were fixed: a `rustfmt`
+  difference, and `focused_offscreen_controls_scroll_into_the_settings_viewport`.
+  The latter judged the first Shift+Tab while the previous step's mouse-wheel
+  smooth-scroll was still animating (the harness advances only 10 ms per pass),
+  so the control near the page end looked off-screen. The test now lets that
+  animation finish first. Its Tab and Shift+Tab budgets rose from 45 to 90 key
+  presses because the page has grown to dozens more controls.
+- Font checks with fontTools on the files as bundled: Regular and Semibold are CFF
+  OpenType, `fsType` 0 (no embedding restriction), and carry the metadata line
+  "Salted Flutters Polaris - Created by ppoolar". They cover Portuguese accents,
+  `R$ € £ ¥ ¢`, typographic punctuation, arrows and `✓`; the only glyph missing
+  from the probe set was `✕` (U+2715), which the interface doesn't draw. Average
+  advance 0.544 em for Regular against 0.540 for Segoe UI, so layouts barely move;
+  line height is 1.19 em against 1.33. Finding for the font's author: in
+  `SaltedFluttersPolaris-Bold.otf`, `usWeightClass` is 600, the same as Semibold
+  (it should be 700). It has no effect on the embedded use here.
+- New tests: the family chains (Polaris, then Segoe UI, then egui's built-in
+  fonts; the icon font separate; the Windows typeface leaving Polaris out;
+  missing system fonts), the embedded files being OpenType and keeping the notice
+  and the unmodified license, every glyph of a Portuguese and symbols sample being
+  covered in both the regular and semibold chains, and the two typefaces really
+  laying out differently (so Polaris is actually used); the setting's default and
+  its recovery from a bad value; in `diagnostics.rs`: UTC dates (leap days
+  included), redaction (longest name first, case, plain and escaped paths, short
+  and placeholder-like names left alone), a report holding the facts and none of
+  the private names, unavailable services being reported, the log's tail, and
+  keeping the newest 10 reports without touching other files; and a click on each
+  new button producing its outcome. The existing layout, naming and keyboard tests
+  all pass under Polaris.
+- Visual: the real mixer window captured with Polaris (tabs, semibold app names,
+  regular status text, percentages) shows no clipping; a neutral preview window
+  (`examples/font_preview.rs`, no user data) shows the glyph sample in both
+  typefaces.
+- End to end with the real app in an isolated profile, driven by UI Automation:
+  Settings > Save diagnostic report wrote a 2,122-character report with every
+  section, and Copy report put the same sections on the clipboard. Neither
+  contained the names of the two apps and the output device on this PC, nor the
+  user folder.
+- Not run: the typeface at 125, 150 and 200 % Windows scaling (the harness and the
+  captures are at 100 %), Windows 10, and the installer and portable ZIP with the
+  new `fonts\LICENSE.txt` (the script and installer entries were edited but
+  `scripts/package.ps1` was not run).
+
+## Stability check before Stage 5 (2026-11-06, merge `37a72d2`)
+
+`experiments` held the 0.5.0 work (`19a7f86`) and an in-progress merge of the
+published 0.4.0 release; this checks the merged tree.
+
+- 163 library tests passed three times in a row; the 12 real-device tests passed
+  twice in a row; release build and lifecycle (both renderers) passed.
+- Today the per-app routing test passed without exercising anything: it needs two
+  active outputs and only HDMI was present. It ran for real on 2026-11-05, when
+  the headphones were connected.
+- Soak of the debug app for 10 s per sample with a silent helper session, in an
+  isolated profile: with no automation, a background-lowering rule, microphone
+  ducking, or both. Medians were about the same (roughly 60 to 160 ms of CPU
+  per 10 s); single samples of several seconds appeared in every mode, including
+  ones that poll nothing, and also on the unmodified build earlier, so they are
+  machine noise. No warnings, errors or panics in the log, and the settings were
+  intact afterwards.
+- New real-device test `lowered_levels_come_back_when_the_engine_shuts_down_or_rebuilds`:
+  with another app lowered, a rebuild ends Solo and restores its level, and a
+  shutdown leaves it restored for a fresh engine. Removing the restore in
+  `Engine::drop` makes it fail (checked, then reverted).
+
 <<<<<<< HEAD
 ## Stages 3 and 4: controls, profiles, routing and ducking (2026-11-05, branch `stage3-4/features`)
 

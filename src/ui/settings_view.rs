@@ -7,13 +7,17 @@ use crate::platform::backdrop::Support;
 use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
-use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode};
+use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode, Typeface};
 use egui::{Align, Align2, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, ViewportCommand};
 use std::path::Path;
 
 pub enum Outcome {
     None,
     Back,
+    /// Write the diagnostic report to a file and show the folder.
+    SaveDiagnostics,
+    /// Put the diagnostic report on the clipboard.
+    CopyDiagnostics,
 }
 
 pub struct SettingsCtx<'a> {
@@ -67,7 +71,7 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
                 ui.label("Global shortcuts are unavailable in this session.");
             }
         });
-        section(ui, &look, "About", |ui| about(ui, cx));
+        section(ui, &look, "About", |ui| about(ui, cx, &mut outcome));
     });
     outcome
 }
@@ -113,6 +117,14 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             swatch(ui, &look, &mut s.accent, *accent);
         }
     });
+    labeled(ui, &look, "Typeface", |ui| {
+        segmented(ui, &look, &mut s.typeface, &[(Typeface::Polaris, "Polaris"), (Typeface::System, "Windows")], 210.0);
+    });
+    ui.label(
+        RichText::new("Polaris is the bundled Salted Flutters Polaris. Windows uses Segoe UI.")
+            .small()
+            .color(look.p.text_muted),
+    );
     labeled(ui, &look, "Density", |ui| {
         segmented(
             ui,
@@ -356,12 +368,30 @@ fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
     });
 }
 
-fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
+fn about(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
     let look = *cx.look;
     ui.label(RichText::new(format!("Glass Mixer {}", env!("CARGO_PKG_VERSION"))).font(semibold(14.0)));
     ui.label(
         RichText::new("Works offline. No telemetry, analytics or network access.").small().color(look.p.text_muted),
     );
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "For a bug report: a diagnostic report lists versions, states, counts and recent warnings. App, device and profile names and your user folder are hidden, and nothing is sent anywhere.",
+            )
+            .small()
+            .color(look.p.text_muted),
+        )
+        .wrap(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        if widgets::scroll_on_focus(ui.button("Save diagnostic report")).clicked() {
+            *outcome = Outcome::SaveDiagnostics;
+        }
+        if widgets::scroll_on_focus(ui.button("Copy report")).clicked() {
+            *outcome = Outcome::CopyDiagnostics;
+        }
+    });
     let dir = cx.settings_path.parent().map(Path::to_path_buf);
     // A long profile path must wrap inside the card, not run past the window edge.
     ui.add(
@@ -497,6 +527,67 @@ mod tests {
     }
 
     #[test]
+    fn the_diagnostic_buttons_ask_for_a_saved_or_copied_report() {
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors, mut settings) = (LoginState::Disabled, Vec::new(), Settings::default());
+        let path = std::path::PathBuf::from(r"C:\settings.json");
+        let seen = std::cell::RefCell::new(Vec::<&str>::new());
+        let mut render = |events: Vec<egui::Event>| {
+            harness.run_with_events(width, 3000.0, events, |ui| {
+                let mut cx = SettingsCtx {
+                    look: &look,
+                    settings: &mut settings,
+                    login: &mut login,
+                    glass: GlassStatus::TransparencyOff,
+                    support: Support::Full,
+                    software_renderer: false,
+                    can_switch_default: true,
+                    can_route_apps: true,
+                    confirm_route_reset: &mut false,
+                    audio: &audio,
+                    icons: &mut icons,
+                    settings_path: &path,
+                    hotkeys: None,
+                    hotkey_editor: &mut editor,
+                    errors: &mut errors,
+                };
+                match show(ui, &mut cx) {
+                    Outcome::SaveDiagnostics => seen.borrow_mut().push("save"),
+                    Outcome::CopyDiagnostics => seen.borrow_mut().push("copy"),
+                    Outcome::Back => seen.borrow_mut().push("back"),
+                    Outcome::None => {}
+                }
+            })
+        };
+        let frame = render(Vec::new());
+        assert!(unnamed(&frame.widgets).is_empty());
+        let click = |name: &str, frame: &crate::ui::test_support::Frame| {
+            let bounds = frame.widgets.iter().find(|w| w.name == name).and_then(|w| w.bounds).expect(name);
+            bounds.center()
+        };
+        for (name, expected) in [("Save diagnostic report", "save"), ("Copy report", "copy")] {
+            let pos = click(name, &frame);
+            for pressed in [true, false] {
+                render(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            assert_eq!(seen.borrow().last().copied(), Some(expected), "clicking {name}: {:?}", seen.borrow());
+        }
+        assert_eq!(*seen.borrow(), ["save", "copy"], "nothing else was triggered");
+    }
+
+    #[test]
     fn settings_controls_are_named_and_the_shortcut_editor_fits_at_minimum_width() {
         let (width, frame) = render(MIN_WIDTH);
         let nameless: Vec<_> = unnamed(&frame.widgets).iter().map(|w| format!("{:?} {:?}", w.role, w.bounds)).collect();
@@ -578,7 +669,7 @@ mod tests {
 
                 // Tab forward to Open settings folder; every focused control must stay inside the viewport.
                 let mut reached_open_folder = false;
-                for _ in 0..45 {
+                for _ in 0..90 {
                     let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::NONE, |ui| {
                         let mut cx = SettingsCtx {
                             look: &look,
@@ -691,9 +782,34 @@ mod tests {
                     "manual wheel scroll while focused must not be fought by scroll_on_focus (before={before_wheel}, after={after_wheel})"
                 );
 
+                // Let the wheel's smooth-scroll animation finish (the harness advances 10 ms per
+                // pass), so the first Shift+Tab is judged on focus scrolling alone.
+                for _ in 0..30 {
+                    harness.run(width, height, |ui| {
+                        let mut cx = SettingsCtx {
+                            look: &look,
+                            settings: &mut settings,
+                            login: &mut login,
+                            glass: GlassStatus::TransparencyOff,
+                            support: Support::Full,
+                            software_renderer: false,
+                            can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
+                            audio: &audio,
+                            icons: &mut icons,
+                            settings_path: &path,
+                            hotkeys: Some(&service),
+                            hotkey_editor: &mut editor,
+                            errors: &mut errors,
+                        };
+                        show(ui, &mut cx);
+                    });
+                }
+
                 // Shift+Tab backward all the way to the top Theme control.
                 let mut reached_system_theme = false;
-                for _ in 0..45 {
+                for _ in 0..90 {
                     let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::SHIFT, |ui| {
                         let mut cx = SettingsCtx {
                             look: &look,

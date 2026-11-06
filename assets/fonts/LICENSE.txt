@@ -1,0 +1,87 @@
+SALTED FLUTTERS POLARIS FONT LICENSE
+Version 1.0 — 4 November 2026
+
+Font family:  Salted Flutters Polaris (18 styles)
+Author:       ppoolar
+Copyright:    (c) 2026 ppoolar
+
+This license applies to the font software files distributed under the name
+"Salted Flutters Polaris" — the OpenType font files, the original source, and
+any accompanying documentation (together, the "Font").
+
+
+1. GRANT OF RIGHTS
+
+You are free to:
+
+  a) use the Font for personal, educational and commercial purposes, in any
+     number of projects, with no royalty and no attribution required in the
+     finished work;
+
+  b) install the Font on any number of devices that you own or control;
+
+  c) embed the Font in documents, applications, games, videos, printed matter,
+     hardware and websites — including as a downloadable or Web font — with no
+     limit on page views, installs or impressions;
+
+  d) modify, subset, convert and build upon the Font, including converting it
+     to other font formats or adding glyphs and OpenType features;
+
+  e) redistribute the Font, modified or unmodified, provided the conditions in
+     section 2 are met.
+
+
+2. CONDITIONS
+
+  a) You may not sell, license or rent the Font files on their own, or as part
+     of a bundle whose primary value is the Font itself. Selling products that
+     merely use the Font — logos, posters, apps, templates, publications — is
+     permitted and unlimited.
+
+  b) Any redistribution of the Font files must include a copy of this license,
+     unmodified, in a file named LICENSE.txt.
+
+  c) The following line must remain in the font metadata of every style:
+     "Salted Flutters Polaris - Created by ppoolar"
+
+  d) Modified versions may be distributed only under this same license. They
+     may not use "Salted Flutters Polaris" as their primary family name, and
+     may not use the name "ppoolar" in a way that suggests the author endorsed
+     the modification, unless you have written permission.
+
+  e) You may not claim authorship of the Font, nor register the Font, its name
+     or any confusingly similar name as a trademark.
+
+
+3. NO WARRANTY
+
+THE FONT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. THE ENTIRE RISK AS TO
+THE QUALITY AND PERFORMANCE OF THE FONT RESTS WITH YOU.
+
+
+4. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE FONT OR THE USE OR OTHER DEALINGS IN THE FONT.
+
+
+5. TERMINATION
+
+Your rights under this license end automatically if you breach any of its
+conditions. Termination does not affect the rights of anyone who received the
+Font from you under this license.
+
+
+6. MISCELLANEOUS
+
+This license is the complete agreement concerning the Font. If any provision is
+held unenforceable, the remaining provisions stay in force. A new version of
+this license may be published by the author; you may keep using the version
+that came with your copy of the Font.
+
+
+-------------------------------------------------------------------------------
+Salted Flutters Polaris - Created by ppoolar

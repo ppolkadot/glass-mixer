@@ -98,6 +98,23 @@ so an app playing elsewhere stays visible and controllable. Sessions on other
 outputs are listed only while playing or when their app has none on the
 default output; System sounds is listed for the default output only.
 
+## Diagnostic report
+
+`diagnostics.rs` builds a plain-text report from the app's own state: versions,
+the settings schema version, the renderer, the Windows build and appearance
+flags, the audio service status, device and session counts, device read errors,
+failed shortcuts, a settings summary (counts and choices), the last 30 warnings
+and errors the user was shown, and the last 80 log lines. It never contains
+audio, files or a name: app, device and profile names (from the snapshot, pins,
+rules, profiles and shortcut targets) and the user's profile folder, in plain
+text and in the escaped form the log uses, are replaced with `<app>`,
+`<device>`, `<profile>` and `%USERPROFILE%` before the text is written or
+copied. Names shorter than three characters, or inside a placeholder, are left
+alone so the replacement can't garble text. "Save diagnostic report" writes it
+to `diagnostics\` beside the log (the newest 10 are kept) and opens the folder; "Copy
+report" puts it on the clipboard. Nothing is sent anywhere, and no dependency or
+file dialog is involved.
+
 ## Additional endpoints and sound properties
 
 Device added, removed, state and property notifications are coalesced: the
@@ -235,6 +252,19 @@ with the system DPI when monitors use different scales. Older settings saved
 egui logical points; restoration tries each monitor's DPI and centers the
 window if more than one monitor could match. The saved size is retained only
 when the position can be validated on a monitor.
+
+**Typefaces.** `platform/fonts.rs` builds the egui font families from the
+Typeface setting. Salted Flutters Polaris (Regular for text, Semibold for names,
+labels and headings) is embedded with `include_bytes!` and `FontData::from_static`,
+so it needs no installation, no file at run time and no extra memory copy. Each
+chain is Polaris, then Segoe UI of the same weight when Windows has it, then
+egui's built-in fonts, so a glyph Polaris lacks is drawn by the next font and
+nothing disappears. The icon font (Segoe Fluent Icons or Segoe MDL2 Assets) is a
+separate family. The Windows typeface leaves Polaris out entirely. Changing the
+setting reinstalls the fonts once; there is no restart. The font's license
+requires that the files stay unmodified, that its metadata line stays in every
+style, and that `LICENSE.txt` accompanies redistribution: a test checks the first
+two, and the portable ZIP and the installer both carry `fonts\LICENSE.txt`.
 
 **Icon caches.** The worker keeps up to 96 extracted icons in an LRU keyed by
 what they came from: the executable's lower-cased path, size and modification

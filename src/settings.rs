@@ -145,6 +145,15 @@ impl SoloSettings {
     }
 }
 
+/// The interface typeface: the bundled Salted Flutters Polaris, or Windows' Segoe UI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Typeface {
+    #[default]
+    Polaris,
+    System,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
     pub x: f32,
@@ -191,6 +200,8 @@ pub struct Settings {
     pub accent: Accent,
     #[serde(deserialize_with = "lenient")]
     pub density: Density,
+    #[serde(deserialize_with = "lenient")]
+    pub typeface: Typeface,
     #[serde(deserialize_with = "lenient")]
     pub start_minimized: bool,
     #[serde(deserialize_with = "lenient_true")]
@@ -241,6 +252,7 @@ impl Default for Settings {
             backdrop: Backdrop::Acrylic,
             accent: Accent::Violet,
             density: Density::Comfortable,
+            typeface: Typeface::Polaris,
             start_minimized: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -661,6 +673,17 @@ mod tests {
             assert!(geometry_changed(Some(saved), true, moved), "{moved:?} should be saved");
         }
         assert!(geometry_changed(Some(saved), false, saved), "a version-1 (logical point) file is rewritten once");
+    }
+
+    #[test]
+    fn the_typeface_defaults_to_polaris_and_survives_a_bad_value() {
+        let old: Settings = serde_json::from_str(r#"{"version":4,"theme":"dark"}"#).unwrap();
+        assert_eq!(old.typeface, Typeface::Polaris);
+        let windows: Settings = serde_json::from_str(r#"{"typeface":"system"}"#).unwrap();
+        assert_eq!(windows.typeface, Typeface::System);
+        let bad: Settings = serde_json::from_str(r#"{"typeface":"comic","theme":"light"}"#).unwrap();
+        assert_eq!((bad.typeface, bad.theme), (Typeface::Polaris, ThemeMode::Light), "only the bad field resets");
+        assert!(serde_json::to_string(&windows).unwrap().contains(r#""typeface":"system""#));
     }
 
     #[test]
