@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 
-/// A session's volume and mute state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Level {
     pub volume: f32,

@@ -465,7 +465,6 @@ pub fn card(look: &Look) -> egui::Frame {
         .inner_margin(egui::Margin::same((look.m.pad * 0.85) as i8))
 }
 
-/// Right-aligned fixed-width percentage label.
 pub fn percent_label(ui: &mut Ui, look: &Look, text: &str, dim: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(40.0, look.m.button), Sense::hover());
     let color = if dim { look.p.text_muted } else { look.p.text };

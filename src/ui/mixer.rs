@@ -73,7 +73,6 @@ pub struct MixerState {
     /// Names the user gave apps: a copy of the setting, refreshed when it changes.
     custom_names: HashMap<AppKey, String>,
     custom_source: Vec<crate::audio::preferences::AppName>,
-    /// Text typed into the rename fields, by app.
     rename: HashMap<AppKey, String>,
 }
 

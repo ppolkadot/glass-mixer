@@ -375,21 +375,25 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
-/// Decodes and parses a settings file.
 fn parse_settings(bytes: &[u8]) -> Result<Settings, String> {
     serde_json::from_str::<Settings>(&decode_text(bytes)?).map_err(|e| e.to_string())
 }
 
 #[derive(Debug)]
 pub enum LoadOutcome {
-    /// Settings were read successfully.
     Loaded(Settings),
     /// Settings were migrated from an older version, but the untouched backup file could not be written.
-    MigratedWithWarning { settings: Settings, warning: String },
+    MigratedWithWarning {
+        settings: Settings,
+        warning: String,
+    },
     /// No settings file exists yet (first launch).
     FirstRun(Settings),
     /// The file existed but could not be used; defaults are returned.
-    Recovered { settings: Settings, error: String },
+    Recovered {
+        settings: Settings,
+        error: String,
+    },
 }
 
 impl LoadOutcome {

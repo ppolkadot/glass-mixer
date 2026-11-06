@@ -513,7 +513,6 @@ impl Runner {
         self.dirty.values = true;
     }
 
-    /// Settles focus changes and reads the microphone level for ducking.
     fn automation_tick(&mut self) {
         let now = Instant::now();
         let mut changed = self.focus.settle(FOCUS_SETTLE, now);
@@ -643,7 +642,7 @@ struct Engine {
     routes: HashMap<(u32, Option<u64>), Route>,
 }
 
-/// Solo (and, later, ducking) state: what should be lowered, and the ledger of
+/// Solo and ducking state: what should be lowered, and the ledger of
 /// what was written so it can be undone safely.
 struct Reductions {
     solo: Option<AppKey>,
@@ -1497,7 +1496,6 @@ impl PresetOutcome {
     }
 }
 
-/// What applying a whole profile did.
 #[derive(Debug, Default, PartialEq)]
 struct ProfileOutcome {
     devices_switched: bool,
@@ -1764,7 +1762,6 @@ impl Drop for Endpoint {
     }
 }
 
-/// Sessions of one output device.
 struct SessionSet {
     device_id: String,
     manager: IAudioSessionManager2,

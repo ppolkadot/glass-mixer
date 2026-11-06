@@ -34,7 +34,6 @@ pub(crate) fn reg_dword(root: windows::Win32::System::Registry::HKEY, subkey: &s
     err.is_ok().then_some(data)
 }
 
-/// Reads a `REG_SZ` value.
 pub(crate) fn reg_string(root: windows::Win32::System::Registry::HKEY, subkey: &str, value: &str) -> Option<String> {
     use windows::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
     let subkey = HSTRING::from(subkey);

@@ -1,4 +1,3 @@
-; Inno Setup script for Glass Mixer.
 ; Per-user install: no administrator rights are required.
 ; Built by scripts\package.ps1 (which passes /DAppVersion=...).
 

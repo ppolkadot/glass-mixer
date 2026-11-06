@@ -63,9 +63,7 @@ pub struct EndpointState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
-    /// The session is currently rendering audio.
     Playing,
-    /// The session exists but is not rendering.
     Idle,
 }
 
@@ -117,7 +115,6 @@ pub struct StreamEntry {
     /// The session instance identifier; commands address the stream by it.
     pub id: String,
     pub pid: u32,
-    /// The output device the stream plays on.
     pub device_id: String,
     pub volume: f32,
     pub muted: bool,

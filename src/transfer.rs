@@ -29,7 +29,6 @@ pub const KEEP_BACKUPS: usize = 5;
 pub const EXPORT_PREFIX: &str = "glass-mixer-settings";
 pub const BACKUP_PREFIX: &str = "glass-mixer-before-import";
 
-/// The export text for `settings`.
 pub fn export(settings: &Settings, app_version: &str) -> String {
     let mut value = serde_json::to_value(settings).expect("settings are serializable");
     if let Value::Object(map) = &mut value {
@@ -146,7 +145,6 @@ pub fn merge_keeping_this_pc(current: &Settings, mut imported: Settings) -> Sett
     imported
 }
 
-/// A few lines saying what an import holds.
 pub fn summary(s: &Settings) -> Vec<String> {
     vec![
         format!(

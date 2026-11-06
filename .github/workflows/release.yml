@@ -108,6 +108,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "A release for $env:GITHUB_REF_NAME already exists; leaving it as it is."
+            exit 0
+          }
           gh release create $env:GITHUB_REF_NAME `
             "dist/glass-mixer-$env:VERSION-portable.zip" `
             "dist/glass-mixer-$env:VERSION-setup.exe" `

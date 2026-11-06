@@ -54,7 +54,6 @@ function Check-Signature([string]$Path, [string]$What) {
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# ---- Portable ZIP ----
 $zip = Join-Path $Dist "glass-mixer-$Version-portable.zip"
 if (-not (Test-Path -LiteralPath $zip)) {
     $problems.Add("The portable ZIP is missing: $zip")
@@ -109,7 +108,6 @@ if (-not (Test-Path -LiteralPath $zip)) {
     }
 }
 
-# ---- Installer ----
 $setup = Join-Path $Dist "glass-mixer-$Version-setup.exe"
 $haveSetup = Test-Path -LiteralPath $setup
 if ($haveSetup) {
@@ -126,7 +124,6 @@ if ($haveSetup) {
     $notes.Add('No installer was built (Inno Setup 6 is not installed).')
 }
 
-# ---- Checksums ----
 $sums = Join-Path $Dist "glass-mixer-$Version-SHA256SUMS.txt"
 $artifacts = @($zip) + $(if ($haveSetup) { @($setup) } else { @() })
 if ($problems.Count -eq 0) {

@@ -181,7 +181,6 @@ pub(crate) enum Msg {
     SessionsChanged,
     /// A session's volume, mute, state or name changed.
     SessionValuesChanged,
-    /// The machine resumed from sleep.
     Resumed,
     /// UI visibility changed (controls meter polling).
     Wake,

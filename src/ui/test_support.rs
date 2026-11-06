@@ -191,7 +191,6 @@ pub fn is_interactive(role: accesskit::Role) -> bool {
     )
 }
 
-/// Interactive widgets that have no accessible name.
 pub fn unnamed(widgets: &[Widget]) -> Vec<&Widget> {
     widgets.iter().filter(|w| is_interactive(w.role) && w.name.trim().is_empty()).collect()
 }
