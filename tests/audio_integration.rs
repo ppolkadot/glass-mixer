@@ -307,6 +307,45 @@ fn a_focus_rule_lowers_an_app_in_the_background_and_restores_it() {
     audio.shutdown();
 }
 
+/// Lowered levels must never outlive the engine: they come back when it shuts
+/// down (exit) and when it rebuilds (a device was invalidated, or the PC woke up),
+/// where Solo ends because the new engine starts without it.
+#[test]
+#[ignore]
+fn lowered_levels_come_back_when_the_engine_shuts_down_or_rebuilds() {
+    let exe = std::env::current_exe().unwrap();
+    let key = AppKey::Exe(exe.to_string_lossy().to_lowercase());
+    let mut child = std::process::Command::new(&exe)
+        .args(["--ignored", "--exact", "silent_stream_helper", "--nocapture"])
+        .env(HELPER_ENV, "14")
+        .spawn()
+        .unwrap();
+    let level = |s: &AudioSnapshot| s.apps.iter().find(|a| a.key == key).map(|a| a.volume);
+    let audio = ready();
+    let original = level(&wait_for(&audio, "helper session detected", |s| level(s).is_some())).unwrap();
+    audio.send(Command::SetSoloOptions { factor: 0.5, mute: false });
+
+    // Rebuild while lowered.
+    audio.send(Command::ToggleSolo { key: AppKey::System });
+    wait_for(&audio, "helper lowered", |s| level(s).is_some_and(|v| close(v, original * 0.5)));
+    audio.send(Command::Refresh);
+    wait_for(&audio, "rebuilt: solo over, helper restored", |s| {
+        s.status == ServiceStatus::Ok && s.solo.is_none() && level(s).is_some_and(|v| close(v, original))
+    });
+
+    // Shut down while lowered; a fresh engine reads the real level from Windows.
+    audio.send(Command::SetSoloOptions { factor: 0.5, mute: false });
+    audio.send(Command::ToggleSolo { key: AppKey::System });
+    wait_for(&audio, "helper lowered again", |s| level(s).is_some_and(|v| close(v, original * 0.5)));
+    audio.shutdown();
+    let after = ready();
+    let seen = level(&wait_for(&after, "helper visible to a new engine", |s| level(s).is_some())).unwrap();
+    assert!(close(seen, original), "left at {seen} after shutdown, was {original}");
+    after.shutdown();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The app shortcut commands: mute toggle and relative volume on System sounds.
 #[test]
 #[ignore]
