@@ -208,8 +208,11 @@ network connections. It collects no telemetry or analytics.
 
 Glass Mixer never stores live volume levels: Windows remains the source of
 truth. Only presets you save keep app volumes. If you edit `settings.json` by
-hand, UTF-8 and UTF-16 are both accepted; a file that can't be read is kept as
-`settings.json.bad` and defaults are used. Uninstalling asks whether to remove
+hand, UTF-8 and UTF-16 are both accepted. Damaged contents are copied to
+`settings.json.bad` before defaults can replace them. If the original cannot
+be read, saving stays disabled until it can be loaded successfully; resolve
+the file-access problem and restart Glass Mixer. A failed backup leaves the
+original untouched and reports the problem. Uninstalling asks whether to remove
 your settings.
 
 ### Can I go back to an older version?
