@@ -77,6 +77,9 @@ fn private_names(i: &Inputs) -> Vec<(String, &'static str)> {
     for pin in &s.pinned_apps {
         add(&pin.name, "<app>");
     }
+    for custom in &s.app_names {
+        add(&custom.name, "<app>");
+    }
     for pin in &s.pinned_devices {
         add(&pin.name, "<device>");
     }
@@ -280,8 +283,9 @@ fn build_with_profile(i: &Inputs, profile: Option<&str>) -> String {
     ));
     line(format!("Volume step: {}%; mouse wheel step: {}%", s.hotkey_step, s.wheel_step));
     line(format!(
-        "Pinned apps: {}; pinned outputs: {}; profiles: {} ({} with an automatic rule); shortcuts: {}",
+        "Pinned apps: {}; renamed apps: {}; pinned outputs: {}; profiles: {} ({} with an automatic rule); shortcuts: {}",
         s.pinned_apps.len(),
+        s.app_names.len(),
         s.pinned_devices.len(),
         s.presets.len(),
         s.presets.iter().filter(|p| p.apply_on_start).count(),
@@ -460,6 +464,10 @@ mod tests {
         settings
             .presets
             .push(crate::audio::preferences::VolumePreset { name: "Night Shift".into(), ..Default::default() });
+        settings.app_names.push(crate::audio::preferences::AppName {
+            key: AppKey::Exe(r"c:\games\secretgame.exe".into()),
+            name: "Dad's Secret Game".into(),
+        });
         let device = |id: &str, name: &str| DeviceInfo { id: id.into(), name: name.into(), is_default: false };
         let snapshot = AudioSnapshot {
             status: ServiceStatus::Ok,
@@ -487,7 +495,10 @@ mod tests {
         };
         let notices =
             [RecentNotice { level: NoticeLevel::Error, text: "Couldn't change the device of SecretGame".into() }];
-        let log = vec![r#"12:00:00 [INFO] profile Night Shift applied from C:\Users\Someone\AppData"#.to_owned()];
+        let log = vec![
+            r#"12:00:00 [INFO] profile Night Shift applied from C:\Users\Someone\AppData"#.to_owned(),
+            "12:00:01 [INFO] Dad's Secret Game started".to_owned(),
+        ];
         let i = Inputs {
             settings: &settings,
             snapshot: &snapshot,
@@ -511,7 +522,7 @@ mod tests {
             "Outputs: 1; inputs: 0",
             "per-app devices: yes",
             "App rows: 2",
-            "Pinned apps: 1; pinned outputs: 0; profiles: 1",
+            "Pinned apps: 1; renamed apps: 1; pinned outputs: 0; profiles: 1",
             "AppMute (Ctrl+Alt+1): Windows could not register this shortcut",
             "[error] Couldn't change the device of <app>",
             "Device read errors: 1",
@@ -520,7 +531,7 @@ mod tests {
         ] {
             assert!(report.contains(expected), "missing {expected:?} in:\n{report}");
         }
-        for private in ["SecretGame", "Chatty", "My Studio Headset", "Night Shift", "Someone"] {
+        for private in ["SecretGame", "Chatty", "My Studio Headset", "Night Shift", "Someone", "Dad's"] {
             assert!(!report.to_lowercase().contains(&private.to_lowercase()), "{private} leaked into:\n{report}");
         }
         assert!(report.contains("\r\n") && !report.contains("\r\r"), "Windows line endings, once");

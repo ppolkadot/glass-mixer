@@ -98,6 +98,32 @@ so an app playing elsewhere stays visible and controllable. Sessions on other
 outputs are listed only while playing or when their app has none on the
 default output; System sounds is listed for the default output only.
 
+## Personalization and backup
+
+A name the user gives an app is stored per stable app identity (`app_names`, one
+per `AppKey`, 60 characters, 128 apps; transient apps known only by process ID
+can't be named). It is resolved before the name Windows reports and the session's
+name, and applies to the rows, the filter, the Solo notice, offline pinned rows
+and shortcut labels. It is applied when the field loses focus; an empty field or
+Reset restores the reported name. Pinned apps are listed in their saved order, so
+"Move up" and "Move down" swap neighbours in that list; the pinned outputs the
+cycle shortcut uses are likewise cycled in their saved order, and connected and
+missing pins can both be moved.
+
+`transfer.rs` exports the preferences as versioned JSON (`glass_mixer_export`
+and the settings, without the window position and size, which belong to the PC)
+and checks imports before anything changes. A file is refused, with a reason, if
+it is not text or JSON, over 1 MB, not an export or a settings file, or from a
+newer export format or settings version. It is read leniently, as every settings
+file is, but anything it could not read is listed (a list with unreadable
+entries, a value that fell back to its default) instead of being replaced
+silently. The Settings page shows what the file holds and the notes, and asks
+for confirmation. Confirming first saves the current settings to
+`exports/glass-mixer-before-import-<date>.json` (the newest 5 are kept); if that
+fails, nothing is imported. The import is applied at the start of the next frame,
+so the usual change handling runs (shortcuts, profiles, fonts, automation
+rules), and the window position of this PC is kept.
+
 ## Diagnostic report
 
 `diagnostics.rs` builds a plain-text report from the app's own state: versions,

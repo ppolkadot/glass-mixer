@@ -179,6 +179,10 @@ pub struct MixerApp {
     toasts: Vec<Toast>,
     confirm_route_reset: bool,
     foreground: Option<ForegroundWatch>,
+    transfer_ui: settings_view::TransferUi,
+    /// Settings from a confirmed import, applied at the start of the next frame so
+    /// every part of the app picks up the change the way it does for any setting.
+    import_to_apply: Option<Settings>,
     exiting: bool,
     has_icon_font: bool,
     look: Look,
@@ -322,6 +326,8 @@ impl MixerApp {
             toasts,
             confirm_route_reset: false,
             foreground: None,
+            transfer_ui: settings_view::TransferUi::default(),
+            import_to_apply: None,
             exiting: false,
             has_icon_font,
             look,
@@ -485,6 +491,65 @@ impl MixerApp {
             self.hide_to_tray();
         } else {
             window::show(h);
+        }
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs())
+    }
+
+    /// Writes the preferences to a file in the exports folder and shows the folder.
+    fn export_settings(&mut self) {
+        let dir = crate::transfer::exports_dir(self.store.path());
+        let text = crate::transfer::export(&self.settings, env!("CARGO_PKG_VERSION"));
+        match crate::transfer::save(&dir, crate::transfer::EXPORT_PREFIX, Self::unix_now(), &text) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Err(e) = window::open_folder(&dir) {
+                    log::warn!("couldn't open the exports folder: {e}");
+                }
+                self.toast(NoticeLevel::Info, format!("Settings exported: {name}"));
+            }
+            Err(e) => self.toast(NoticeLevel::Error, format!("Couldn't export the settings: {e}")),
+        }
+    }
+
+    /// Reads and checks the file named in the Settings page; shows what it holds.
+    fn check_import(&mut self) {
+        let path = std::path::PathBuf::from(self.transfer_ui.path.trim().trim_matches('"'));
+        self.transfer_ui.error = None;
+        self.transfer_ui.candidate = None;
+        match crate::transfer::read_import_file(&path) {
+            Ok(import) => {
+                let mut lines = crate::transfer::summary(&import.settings);
+                lines.extend(import.notes.iter().map(|note| format!("Not read: {note}")));
+                self.transfer_ui.candidate = Some((import.settings, lines));
+            }
+            Err(e) => self.transfer_ui.error = Some(e),
+        }
+    }
+
+    /// Confirmed: backs up the current settings, then queues the import. Without a
+    /// backup, nothing is replaced.
+    fn confirm_import(&mut self) {
+        let Some((imported, _)) = self.transfer_ui.candidate.clone() else { return };
+        let dir = crate::transfer::exports_dir(self.store.path());
+        let backup = crate::transfer::export(&self.settings, env!("CARGO_PKG_VERSION"));
+        match crate::transfer::save(&dir, crate::transfer::BACKUP_PREFIX, Self::unix_now(), &backup) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.import_to_apply = Some(crate::transfer::merge_keeping_this_pc(&self.settings, imported));
+                self.transfer_ui.candidate = None;
+                self.transfer_ui.path.clear();
+                self.toast(
+                    NoticeLevel::Info,
+                    format!("Settings imported. Your previous settings were saved as {name}."),
+                );
+            }
+            Err(e) => self.toast(
+                NoticeLevel::Error,
+                format!("Couldn't save a backup of your current settings, so nothing was imported: {e}"),
+            ),
         }
     }
 
@@ -833,8 +898,15 @@ impl eframe::App for MixerApp {
         let snapshot = self.audio.snapshot();
         let meters = self.audio.meters();
         let before = self.settings.clone();
+        if let Some(imported) = self.import_to_apply.take() {
+            self.settings = imported;
+            self.mixer.forget_drafts();
+            self.hotkey_editor = HotkeyEditor::default();
+            ui.ctx().request_repaint();
+        }
         let mut errors = Vec::new();
         let (mut save_report, mut copy_report) = (false, false);
+        let (mut export_now, mut check_now, mut import_now) = (false, false, false);
 
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
@@ -888,6 +960,7 @@ impl eframe::App for MixerApp {
                         can_switch_default: snapshot.can_switch_default,
                         can_route_apps: snapshot.can_route_apps,
                         confirm_route_reset: &mut self.confirm_route_reset,
+                        transfer: &mut self.transfer_ui,
                         audio: &self.audio,
                         icons: &mut self.icons,
                         settings_path: self.store.path(),
@@ -899,6 +972,9 @@ impl eframe::App for MixerApp {
                         settings_view::Outcome::Back => self.view = View::Mixer,
                         settings_view::Outcome::SaveDiagnostics => save_report = true,
                         settings_view::Outcome::CopyDiagnostics => copy_report = true,
+                        settings_view::Outcome::ExportSettings => export_now = true,
+                        settings_view::Outcome::CheckImport => check_now = true,
+                        settings_view::Outcome::ApplyImport => import_now = true,
                         settings_view::Outcome::None => {}
                     }
                 }
@@ -948,6 +1024,15 @@ impl eframe::App for MixerApp {
         if copy_report {
             ui.ctx().copy_text(self.diagnostic_report());
             self.toast(NoticeLevel::Info, "Diagnostic report copied.".into());
+        }
+        if export_now {
+            self.export_settings();
+        }
+        if check_now {
+            self.check_import();
+        }
+        if import_now {
+            self.confirm_import();
         }
         self.draw_toasts(ui);
     }

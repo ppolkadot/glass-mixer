@@ -38,6 +38,16 @@
   it up for any glyph it lacks, and Settings > Appearance > Typeface switches
   back to Segoe UI. The font's license ships in `fonts\LICENSE.txt` in both
   packages.
+- **Rename apps and reorder pins.** An app's details have a Name field (empty
+  or Reset restores the name Windows reports), and pinned apps have Move up and
+  Move down. Pinned outputs can be moved Earlier or Later, which sets the order
+  the cycle shortcut follows.
+- **Export and import settings** (Settings > Backup and restore). Export saves
+  your preferences, without the window position, to a versioned file. Import
+  checks a file first, shows what it contains and what couldn't be read, and asks
+  before replacing anything; your current settings are saved to a backup file
+  first, and a file that is malformed, too large or from a newer version is
+  refused with the reason.
 - **Diagnostic report** (Settings > About): saves or copies a plain-text report
   of versions, states, counts, recent warnings and the log's tail for bug
   reports. App, device and profile names and your user folder are hidden, audio

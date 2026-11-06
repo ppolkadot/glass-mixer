@@ -96,6 +96,73 @@ pub fn normalize_pinned_devices(pins: Vec<PinnedDevice>) -> Vec<PinnedDevice> {
         .collect()
 }
 
+/// A name the user gave an app, shown instead of the one Windows reports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppName {
+    pub key: AppKey,
+    pub name: String,
+}
+
+const MAX_APP_NAME: usize = 60;
+const MAX_APP_NAMES: usize = 128;
+
+/// Keeps one non-empty name per stable app identity (transient apps have none).
+pub fn normalize_app_names(names: Vec<AppName>) -> Vec<AppName> {
+    let mut seen = HashSet::new();
+    names
+        .into_iter()
+        .filter_map(|mut entry| {
+            entry.key = normalized_key(&entry.key)?;
+            entry.name = entry.name.trim().chars().take(MAX_APP_NAME).collect();
+            (!entry.name.is_empty() && seen.insert(entry.key.clone())).then_some(entry)
+        })
+        .take(MAX_APP_NAMES)
+        .collect()
+}
+
+/// The name the user gave `key`, if any.
+pub fn custom_name<'a>(names: &'a [AppName], key: &AppKey) -> Option<&'a str> {
+    let key = normalized_key(key)?;
+    names.iter().find(|n| n.key == key).map(|n| n.name.as_str())
+}
+
+/// Sets the name of an app; an empty name removes it. Returns whether anything changed.
+pub fn set_custom_name(names: &mut Vec<AppName>, key: &AppKey, name: &str) -> bool {
+    let Some(key) = normalized_key(key) else { return false };
+    let name: String = name.trim().chars().take(MAX_APP_NAME).collect();
+    match names.iter().position(|n| n.key == key) {
+        Some(i) if name.is_empty() => {
+            names.remove(i);
+            true
+        }
+        Some(i) if names[i].name != name => {
+            names[i].name = name;
+            true
+        }
+        Some(_) => false,
+        None if name.is_empty() || names.len() >= MAX_APP_NAMES => false,
+        None => {
+            names.push(AppName { key, name });
+            true
+        }
+    }
+}
+
+/// Swaps `items[index]` with its neighbour: `delta` is -1 (earlier) or 1 (later).
+/// Returns whether it moved; the ends of the list stay put.
+pub fn move_item<T>(items: &mut [T], index: usize, delta: isize) -> bool {
+    if delta.abs() != 1 || index >= items.len() {
+        return false;
+    }
+    match index.checked_add_signed(delta).filter(|&target| target < items.len()) {
+        Some(target) => {
+            items.swap(index, target);
+            true
+        }
+        None => false,
+    }
+}
+
 /// What cycling the default output through the pinned devices does.
 #[derive(Debug, PartialEq)]
 pub enum CycleOutcome<'a> {
@@ -752,6 +819,55 @@ mod tests {
         }
         let CycleOutcome::Switch(next) = next_pinned_output(&pins, &outputs) else { panic!() };
         assert_eq!(next.id, "cable");
+    }
+
+    #[test]
+    fn custom_app_names_are_trimmed_unique_per_app_and_limited_to_stable_apps() {
+        let (a, b) = (exe("C:\\Apps\\A.exe"), exe("c:\\apps\\b.exe"));
+        let name = |key: &AppKey, text: &str| AppName { key: key.clone(), name: text.into() };
+        let cleaned = normalize_app_names(vec![
+            name(&a, "  Music  "),
+            name(&exe("c:\\apps\\a.exe"), "Duplicate of the same app"),
+            name(&b, "   "),
+            name(&AppKey::Pid(4), "Transient"),
+            name(&AppKey::System, &"x".repeat(200)),
+        ]);
+        assert_eq!(cleaned.len(), 2);
+        assert_eq!((cleaned[0].key.clone(), cleaned[0].name.as_str()), (exe("c:\\apps\\a.exe"), "Music"));
+        assert_eq!(cleaned[1].name.chars().count(), 60, "long names are cut");
+        assert_eq!(custom_name(&cleaned, &a), Some("Music"), "found whatever the case of the path");
+        assert_eq!(custom_name(&cleaned, &b), None);
+        assert_eq!(custom_name(&cleaned, &AppKey::Pid(4)), None);
+    }
+
+    #[test]
+    fn setting_a_name_adds_changes_clears_and_reports_whether_anything_changed() {
+        let a = exe("c:\\apps\\a.exe");
+        let mut names = Vec::new();
+        assert!(!set_custom_name(&mut names, &a, "  "), "nothing to add");
+        assert!(set_custom_name(&mut names, &a, " Music "));
+        assert!(!set_custom_name(&mut names, &a, "Music"), "the same name changes nothing");
+        assert!(set_custom_name(&mut names, &a, "Radio"));
+        assert_eq!(custom_name(&names, &a), Some("Radio"));
+        assert!(!set_custom_name(&mut names, &AppKey::Pid(9), "No"), "transient apps can't be named");
+        assert!(set_custom_name(&mut names, &a, ""), "an empty name clears it");
+        assert!(names.is_empty() && !set_custom_name(&mut names, &a, ""));
+        for n in 0..MAX_APP_NAMES {
+            assert!(set_custom_name(&mut names, &exe(&format!("c:\\apps\\{n}.exe")), "x"));
+        }
+        assert!(!set_custom_name(&mut names, &exe("c:\\apps\\one-too-many.exe"), "x"), "the list is bounded");
+    }
+
+    #[test]
+    fn moving_an_item_swaps_with_its_neighbour_and_stops_at_the_ends() {
+        let mut items = ["a", "b", "c"];
+        assert!(move_item(&mut items, 1, -1));
+        assert_eq!(items, ["b", "a", "c"]);
+        assert!(move_item(&mut items, 1, 1));
+        assert_eq!(items, ["b", "c", "a"]);
+        assert!(!move_item(&mut items, 0, -1) && !move_item(&mut items, 2, 1), "the ends stay put");
+        assert!(!move_item(&mut items, 9, 1) && !move_item(&mut items, 0, 2) && !move_item(&mut items, 0, 0));
+        assert_eq!(items, ["b", "c", "a"], "refused moves change nothing");
     }
 
     #[test]

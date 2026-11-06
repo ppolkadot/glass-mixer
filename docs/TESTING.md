@@ -1,5 +1,49 @@
 # Testing
 
+## Stage 5, part 2: app names, ordering, and settings export and import (2026-11-06, `experiments`)
+
+Machine: Windows 11 build 26200, with only the HDMI output active.
+
+- Gate, with every step's exit status checked: `cargo fmt --check`, `cargo clippy
+  --locked --all-targets -- -D warnings`, `cargo test --locked` (194 library tests
+  passed, 3 ignored; 3 binary tests and the source encoding test passed; 12
+  hardware tests ignored), a release build (23,137,280 bytes), the 12 real-device
+  integration tests, and `scripts/lifecycle.ps1` with OpenGL (hidden CPU 31 ms
+  over 1 s) and `-Renderer wgpu` (328 ms on WARP, within its usual spread). The
+  first full run failed once, on a clippy style rule in one of the new tests; it
+  was fixed and the whole gate rerun.
+- New tests (17): custom names being trimmed, unique per app, limited to stable
+  apps and bounded; setting, changing and clearing a name and whether anything
+  changed; moving an item one place and refusing to move past the ends; the
+  rows showing the custom name, the rename and order controls being named and
+  disabled at the ends of the list, and fitting at minimum width; typing a name
+  and pressing Enter renaming the app, and Reset restoring the reported name;
+  the cycle-order buttons for connected and missing outputs; and in
+  `transfer.rs`: an export being versioned and free of the window position, an
+  export importing back unchanged, plain settings files and UTF-8 BOM and UTF-16
+  files being accepted, ten kinds of file being refused with a reason (empty,
+  not JSON, an array, no marker, no settings, no version, bad format number, not
+  text, over 1 MB), newer export formats and settings versions being refused,
+  unreadable values and list entries being reported rather than replaced
+  silently, the window position of this PC being kept, only the automatic
+  backups being pruned, and a path that is missing, a folder or too large being
+  refused before it is read; and the Backup section's buttons being named,
+  fitting, and each producing its outcome (Cancel discarding a checked import).
+- End to end with the real app in an isolated profile, driven by UI Automation and
+  guarded real keystrokes (the script refuses to type unless the Glass Mixer
+  window is in front and the path field has keyboard focus): Export wrote a
+  versioned file without a window position; a junk file was refused with
+  "isn't valid JSON" and nothing was offered for import; a good file was checked
+  and described ("1 renamed app", and a note that `hotkey_step` wasn't valid); on
+  confirmation a backup of the previous settings was written first, the saved
+  `settings.json` then held the imported theme, wheel step and renamed app, the
+  invalid `hotkey_step` 99 had become the default 5, and the import panel closed.
+- Not run: typing a custom name in the real window (the UI test types and presses
+  Enter in the real widget; the end-to-end run covered export and import only),
+  importing a file made on another PC, the new controls at 125, 150 and 200 %
+  scaling, and Windows 10. Per-app routing was not exercised because only one
+  output was active.
+
 ## Stage 5, part 1: Polaris typeface and diagnostic report (2026-11-06, `experiments`)
 
 The interface typeface (Salted Flutters Polaris Regular and Semibold, embedded) and

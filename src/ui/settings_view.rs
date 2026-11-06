@@ -18,6 +18,21 @@ pub enum Outcome {
     SaveDiagnostics,
     /// Put the diagnostic report on the clipboard.
     CopyDiagnostics,
+    /// Write the preferences to an export file.
+    ExportSettings,
+    /// Read and check the file named in [`TransferUi::path`].
+    CheckImport,
+    /// The checked import in [`TransferUi::candidate`] was confirmed.
+    ApplyImport,
+}
+
+/// What the Backup and restore section shows: the path typed, and a checked import
+/// waiting for confirmation (the settings it holds, and lines describing them).
+#[derive(Default)]
+pub struct TransferUi {
+    pub path: String,
+    pub candidate: Option<(Settings, Vec<String>)>,
+    pub error: Option<String>,
 }
 
 pub struct SettingsCtx<'a> {
@@ -32,6 +47,7 @@ pub struct SettingsCtx<'a> {
     pub can_route_apps: bool,
     /// The "reset all app devices" confirmation is showing.
     pub confirm_route_reset: &'a mut bool,
+    pub transfer: &'a mut TransferUi,
     pub audio: &'a AudioHandle,
     pub icons: &'a mut IconService,
     pub settings_path: &'a Path,
@@ -63,6 +79,7 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
             if let Some(service) = cx.hotkeys {
                 let slots = crate::platform::hotkeys::slots(
                     &cx.settings.pinned_apps,
+                    &cx.settings.app_names,
                     &cx.settings.presets,
                     &cx.settings.hotkeys,
                 );
@@ -71,6 +88,7 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
                 ui.label("Global shortcuts are unavailable in this session.");
             }
         });
+        section(ui, &look, "Backup and restore", |ui| backup(ui, cx, &mut outcome));
         section(ui, &look, "About", |ui| about(ui, cx, &mut outcome));
     });
     outcome
@@ -333,6 +351,59 @@ fn mic_ducking(ui: &mut Ui, cx: &mut SettingsCtx) {
     }
 }
 
+/// Backup and restore: export the preferences to a file, or check a file and import it.
+/// Nothing is replaced without the user confirming what the file holds.
+fn backup(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
+    let look = *cx.look;
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Export your preferences (not the window position) to a file, and import them on this or another PC. An import is checked first and shows what it contains, and your current settings are saved to a backup file before they are replaced.",
+            )
+            .small()
+            .color(look.p.text_muted),
+        )
+        .wrap(),
+    );
+    if widgets::scroll_on_focus(ui.button("Export settings")).clicked() {
+        *outcome = Outcome::ExportSettings;
+    }
+    ui.horizontal(|ui| {
+        let label = ui.label("Import from");
+        let width = (ui.available_width() - 90.0).clamp(80.0, 260.0);
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut cx.transfer.path)
+                .hint_text("Path of an exported .json file")
+                .desired_width(width),
+        );
+        widgets::set_name(ui, &field, "Path of the settings file to import");
+        widgets::scroll_on_focus(field).labelled_by(label.id);
+        let ready = !cx.transfer.path.trim().is_empty();
+        if widgets::scroll_on_focus(ui.add_enabled(ready, egui::Button::new("Check file"))).clicked() {
+            *outcome = Outcome::CheckImport;
+        }
+    });
+    if let Some(error) = &cx.transfer.error {
+        ui.add(egui::Label::new(RichText::new(error).color(look.p.danger)).wrap());
+    }
+    let mut cancel = false;
+    if let Some((_, lines)) = &cx.transfer.candidate {
+        ui.label(RichText::new("This file contains").font(semibold(13.0)));
+        for line in lines {
+            ui.add(egui::Label::new(RichText::new(line).small()).wrap());
+        }
+        ui.horizontal_wrapped(|ui| {
+            if widgets::scroll_on_focus(ui.button("Import and replace my settings")).clicked() {
+                *outcome = Outcome::ApplyImport;
+            }
+            cancel = widgets::scroll_on_focus(ui.button("Cancel")).clicked();
+        });
+    }
+    if cancel {
+        cx.transfer.candidate = None;
+    }
+}
+
 /// Windows can only reset every app's device choice at once, so this is a
 /// separate, confirmed action; a single app is reset from its row in the Mixer.
 fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
@@ -451,6 +522,7 @@ mod tests {
                 can_switch_default: true,
                 can_route_apps: true,
                 confirm_route_reset: &mut false,
+                transfer: &mut TransferUi::default(),
                 audio: &audio,
                 icons: &mut icons,
                 settings_path: &path,
@@ -485,6 +557,7 @@ mod tests {
                     can_switch_default: true,
                     can_route_apps: true,
                     confirm_route_reset: &mut *confirm,
+                    transfer: &mut TransferUi::default(),
                     audio: &audio,
                     icons: &mut icons,
                     settings_path: &path,
@@ -548,6 +621,7 @@ mod tests {
                     can_switch_default: true,
                     can_route_apps: true,
                     confirm_route_reset: &mut false,
+                    transfer: &mut TransferUi::default(),
                     audio: &audio,
                     icons: &mut icons,
                     settings_path: &path,
@@ -559,6 +633,9 @@ mod tests {
                     Outcome::SaveDiagnostics => seen.borrow_mut().push("save"),
                     Outcome::CopyDiagnostics => seen.borrow_mut().push("copy"),
                     Outcome::Back => seen.borrow_mut().push("back"),
+                    Outcome::ExportSettings | Outcome::CheckImport | Outcome::ApplyImport => {
+                        seen.borrow_mut().push("transfer")
+                    }
                     Outcome::None => {}
                 }
             })
@@ -585,6 +662,102 @@ mod tests {
             assert_eq!(seen.borrow().last().copied(), Some(expected), "clicking {name}: {:?}", seen.borrow());
         }
         assert_eq!(*seen.borrow(), ["save", "copy"], "nothing else was triggered");
+    }
+
+    #[test]
+    fn the_backup_section_exports_checks_confirms_and_cancels_with_named_buttons_that_fit() {
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors, mut settings) = (LoginState::Disabled, Vec::new(), Settings::default());
+        let path = std::path::PathBuf::from(r"C:\settings.json");
+        let transfer = std::cell::RefCell::new(TransferUi {
+            path: r"C:\Users\Someone\Documents\glass-mixer-settings-20261106-120000.json".into(),
+            candidate: Some((
+                Settings::default(),
+                vec![
+                    "2 pinned app(s), 1 renamed app(s), 1 pinned output(s)".into(),
+                    "Not read: wheel_step: the value isn't valid, so the default is used.".into(),
+                ],
+            )),
+            error: Some("The file isn't valid JSON (expected value at line 1 column 1).".into()),
+        });
+        let seen = std::cell::RefCell::new(Vec::<&str>::new());
+        let mut render = |events: Vec<egui::Event>| {
+            harness.run_with_events(width, 3000.0, events, |ui| {
+                let mut cx = SettingsCtx {
+                    look: &look,
+                    settings: &mut settings,
+                    login: &mut login,
+                    glass: GlassStatus::TransparencyOff,
+                    support: Support::Full,
+                    software_renderer: false,
+                    can_switch_default: true,
+                    can_route_apps: true,
+                    confirm_route_reset: &mut false,
+                    transfer: &mut transfer.borrow_mut(),
+                    audio: &audio,
+                    icons: &mut icons,
+                    settings_path: &path,
+                    hotkeys: None,
+                    hotkey_editor: &mut editor,
+                    errors: &mut errors,
+                };
+                match show(ui, &mut cx) {
+                    Outcome::ExportSettings => seen.borrow_mut().push("export"),
+                    Outcome::CheckImport => seen.borrow_mut().push("check"),
+                    Outcome::ApplyImport => seen.borrow_mut().push("apply"),
+                    _ => {}
+                }
+            })
+        };
+        let frame = render(Vec::new());
+        assert!(unnamed(&frame.widgets).is_empty(), "{:?}", unnamed(&frame.widgets));
+        let names: Vec<&str> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        for expected in [
+            "Export settings",
+            "Check file",
+            "Path of the settings file to import",
+            "Import and replace my settings",
+            "Cancel",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        // The text inside the path field is clipped by the field; only real controls must stay inside.
+        let outside: Vec<_> = past_right_edge(&frame.widgets, width)
+            .into_iter()
+            .filter(|w| w.role != egui::accesskit::Role::TextRun)
+            .collect();
+        assert!(outside.is_empty(), "{outside:?}");
+        assert!(frame.content_right <= width + 0.5, "content reaches {}", frame.content_right);
+
+        let press = |render: &mut dyn FnMut(Vec<egui::Event>) -> crate::ui::test_support::Frame, pos: egui::Pos2| {
+            for pressed in [true, false] {
+                render(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+        };
+        let centre =
+            |name: &str| frame.widgets.iter().find(|w| w.name == name).and_then(|w| w.bounds).expect(name).center();
+        for (name, expected) in
+            [("Export settings", "export"), ("Check file", "check"), ("Import and replace my settings", "apply")]
+        {
+            press(&mut render, centre(name));
+            assert_eq!(seen.borrow().last().copied(), Some(expected), "clicking {name}: {:?}", seen.borrow());
+        }
+        assert!(transfer.borrow().candidate.is_some(), "only Cancel discards a checked import");
+        press(&mut render, centre("Cancel"));
+        assert!(transfer.borrow().candidate.is_none(), "Cancel discards it");
+        assert_eq!(*seen.borrow(), ["export", "check", "apply"], "nothing else was triggered");
     }
 
     #[test]
@@ -645,6 +818,7 @@ mod tests {
                         can_switch_default: true,
                         can_route_apps: true,
                         confirm_route_reset: &mut false,
+                        transfer: &mut TransferUi::default(),
                         audio: &audio,
                         icons: &mut icons,
                         settings_path: &path,
@@ -681,6 +855,7 @@ mod tests {
                             can_switch_default: true,
                             can_route_apps: true,
                             confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -720,6 +895,7 @@ mod tests {
                             can_switch_default: true,
                             can_route_apps: true,
                             confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -760,6 +936,7 @@ mod tests {
                                 can_switch_default: true,
                                 can_route_apps: true,
                                 confirm_route_reset: &mut false,
+                                transfer: &mut TransferUi::default(),
                                 audio: &audio,
                                 icons: &mut icons,
                                 settings_path: &path,
@@ -796,6 +973,7 @@ mod tests {
                             can_switch_default: true,
                             can_route_apps: true,
                             confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -821,6 +999,7 @@ mod tests {
                             can_switch_default: true,
                             can_route_apps: true,
                             confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,

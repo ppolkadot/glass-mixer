@@ -230,6 +230,9 @@ pub struct Settings {
     pub pinned_devices: Vec<crate::audio::preferences::PinnedDevice>,
     #[serde(deserialize_with = "lenient")]
     pub solo: SoloSettings,
+    /// Names the user gave apps, shown instead of the ones Windows reports.
+    #[serde(deserialize_with = "read_app_names")]
+    pub app_names: Vec<crate::audio::preferences::AppName>,
     #[serde(deserialize_with = "read_focus_rules")]
     pub focus_rules: Vec<FocusRule>,
     #[serde(deserialize_with = "lenient")]
@@ -266,6 +269,7 @@ impl Default for Settings {
             wheel_step: 2,
             pinned_devices: Vec::new(),
             solo: SoloSettings::default(),
+            app_names: Vec::new(),
             focus_rules: Vec::new(),
             mic_ducking: MicDuckingSettings::default(),
             window: None,
@@ -335,6 +339,10 @@ fn read_focus_rules<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<FocusRule>, D
         .collect())
 }
 
+fn read_app_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::audio::preferences::AppName>, D::Error> {
+    Ok(crate::audio::preferences::normalize_app_names(list_items(d)?))
+}
+
 fn lenient_wheel_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value::<u8>(value).ok().filter(|v| (1..=20).contains(v)).unwrap_or(2))
@@ -347,7 +355,7 @@ fn lenient_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
 
 /// Decodes a settings file: UTF-8 with or without a byte-order mark, or UTF-16
 /// with one, as Notepad and PowerShell write when the file is edited by hand.
-fn decode_text(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, String> {
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
         let (units, odd) = rest.as_chunks::<2>();
         if !odd.is_empty() {

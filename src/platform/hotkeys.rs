@@ -511,13 +511,15 @@ impl Slot {
 /// still be cleared).
 pub fn slots(
     pins: &[crate::audio::preferences::PinnedApp],
+    app_names: &[crate::audio::preferences::AppName],
     profiles: &[crate::audio::preferences::VolumePreset],
     bindings: &[HotkeyBinding],
 ) -> Vec<Slot> {
     let mut slots: Vec<Slot> = HotkeyAction::ALL.iter().map(|&action| Slot { action, target: None }).collect();
     for pin in pins {
         for action in HotkeyAction::FOR_APP {
-            let target = HotkeyTarget::App { key: pin.key.clone(), name: pin.name.clone() };
+            let name = crate::audio::preferences::custom_name(app_names, &pin.key).unwrap_or(&pin.name);
+            let target = HotkeyTarget::App { key: pin.key.clone(), name: name.to_owned() };
             slots.push(Slot { action, target: Some(target) });
         }
     }
@@ -1061,7 +1063,7 @@ mod tests {
         let profile =
             VolumePreset { name: "Work".into(), entries: Vec::new(), apply_on_start: false, ..Default::default() };
         let orphan = targeted(HotkeyAction::AppSolo, "Ctrl+Alt+S", app_target("gone.exe", "Gone"));
-        let all = slots(&[pin], &[profile], std::slice::from_ref(&orphan));
+        let all = slots(&[pin], &[], &[profile], std::slice::from_ref(&orphan));
         let labels: Vec<_> = all.iter().map(Slot::label).collect();
         assert_eq!(labels.len(), HotkeyAction::ALL.len() + 4 + 1 + 1);
         assert!(labels.contains(&"A: Solo on / off".to_owned()));
