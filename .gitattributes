@@ -5,3 +5,5 @@
 *.ps1 text eol=crlf
 *.iss text eol=crlf
 *.manifest text eol=crlf
+# The font license must be redistributed byte for byte, so these are never converted.
+assets/fonts/** -text
