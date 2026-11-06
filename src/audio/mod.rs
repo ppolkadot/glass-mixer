@@ -6,6 +6,9 @@
 //! after every change. Windows remains the single source of truth; the engine
 //! never keeps its own copy of volume levels.
 
+pub mod app_routing;
+pub mod attenuation;
+pub mod automation;
 mod callbacks;
 pub(crate) mod com;
 mod engine;
@@ -37,7 +40,10 @@ pub enum Command {
     AdjustOutputVolume {
         delta: f32,
     },
+    /// Applies a profile from the Profiles view.
     ApplyPreset(preferences::VolumePreset),
+    /// Applies a profile from its shortcut; the result is shown in the tray.
+    ActivateProfile(preferences::VolumePreset),
     SetPresetRules(Vec<preferences::VolumePreset>),
     OpenSoundSettings,
     OpenMonoSettings,
@@ -84,8 +90,65 @@ pub enum Command {
         key: AppKey,
         balance: f32,
     },
+    /// Sets one session's volume (see [`StreamEntry::id`]).
+    SetStreamVolume {
+        id: String,
+        volume: f32,
+    },
+    SetStreamMute {
+        id: String,
+        muted: bool,
+    },
+    /// Sets the output device of every process of the app; `None` resets it to
+    /// the system default.
+    SetAppOutput {
+        key: AppKey,
+        device: Option<String>,
+    },
+    /// Resets every app's device preference in Windows, including apps Glass
+    /// Mixer never changed. The UI asks for confirmation first.
+    ResetAllAppDevices,
+    /// Apps lowered while another app is in the foreground. Empty turns it off.
+    SetFocusRules(Vec<(AppKey, attenuation::Reduction)>),
+    /// The process that owns the foreground window (from the foreground watcher).
+    ForegroundChanged {
+        pid: u32,
+    },
+    /// Lowers the target apps while the microphone picks up speech; `None` turns it off.
+    SetMicDucking(Option<MicDucking>),
+    /// Mutes every session of the app, or unmutes them all if all are muted.
+    ToggleAppMute {
+        key: AppKey,
+    },
+    /// Changes the app's volume (its loudest session's) by `delta`, for all sessions.
+    AdjustAppVolume {
+        key: AppKey,
+        delta: f32,
+    },
+    /// The output devices `CycleOutputDevice` switches between, in order.
+    SetPinnedOutputs(Vec<String>),
+    /// Makes the next connected pinned output the default.
+    CycleOutputDevice,
+    /// Starts Solo for the app, or ends it if that app is already soloed.
+    ToggleSolo {
+        key: AppKey,
+    },
+    EndSolo,
+    /// How Solo lowers the other apps: `factor` of their volume, or muted.
+    SetSoloOptions {
+        factor: f32,
+        mute: bool,
+    },
     /// Tear down and rebuild every Core Audio object.
     Refresh,
+}
+
+/// Microphone ducking: which apps are lowered, how much, and when.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MicDucking {
+    pub gate: automation::MicGateConfig,
+    pub reduction: attenuation::Reduction,
+    pub targets: Vec<AppKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +163,9 @@ pub enum NoticeLevel {
 pub struct Notice {
     pub level: NoticeLevel,
     pub text: String,
+    /// The result of something the user just did (for example a shortcut), worth
+    /// showing in the tray even as information while the window is hidden.
+    pub announce: bool,
 }
 
 /// Messages processed by the engine thread: UI commands plus notifications
@@ -127,7 +193,7 @@ type EngineThread = (JoinHandle<()>, Receiver<()>);
 
 pub(crate) struct Shared {
     snapshot: Mutex<Arc<AudioSnapshot>>,
-    meters: Mutex<Meters>,
+    meters: Mutex<Arc<Meters>>,
     notices: Mutex<VecDeque<Notice>>,
     listeners: Mutex<Vec<Listener>>,
     meters_wanted: AtomicBool,
@@ -145,13 +211,21 @@ impl Shared {
         self.notify();
     }
 
-    pub(crate) fn publish_meters(&self, meters: Meters) {
+    pub(crate) fn publish_meters(&self, meters: Arc<Meters>) {
         *self.meters.lock() = meters;
         self.notify();
     }
 
     pub(crate) fn push_notice(&self, level: NoticeLevel, text: impl Into<String>) {
-        let text = text.into();
+        self.push(level, text.into(), false);
+    }
+
+    /// An information notice the tray shows while the window is hidden.
+    pub(crate) fn push_announcement(&self, text: impl Into<String>) {
+        self.push(NoticeLevel::Info, text.into(), true);
+    }
+
+    fn push(&self, level: NoticeLevel, text: String, announce: bool) {
         match level {
             NoticeLevel::Error => log::error!("{text}"),
             NoticeLevel::Warning => log::warn!("{text}"),
@@ -162,7 +236,7 @@ impl Shared {
             if q.back().is_some_and(|n| n.text == text) {
                 return;
             }
-            q.push_back(Notice { level, text });
+            q.push_back(Notice { level, text, announce });
             while q.len() > 8 {
                 q.pop_front();
             }
@@ -198,7 +272,7 @@ impl AudioHandle {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let shared = Arc::new(Shared {
             snapshot: Mutex::new(Arc::new(AudioSnapshot::default())),
-            meters: Mutex::new(Meters::default()),
+            meters: Mutex::new(Arc::default()),
             notices: Mutex::new(VecDeque::new()),
             listeners: Mutex::new(Vec::new()),
             meters_wanted: AtomicBool::new(false),
@@ -223,7 +297,7 @@ impl AudioHandle {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let shared = Arc::new(Shared {
             snapshot: Mutex::new(Arc::new(AudioSnapshot::default())),
-            meters: Mutex::new(Meters::default()),
+            meters: Mutex::new(Arc::default()),
             notices: Mutex::new(VecDeque::new()),
             listeners: Mutex::new(Vec::new()),
             meters_wanted: AtomicBool::new(false),
@@ -239,7 +313,8 @@ impl AudioHandle {
         self.shared.snapshot.lock().clone()
     }
 
-    pub fn meters(&self) -> Meters {
+    /// The latest peak levels; cheap to call every frame.
+    pub fn meters(&self) -> Arc<Meters> {
         self.shared.meters.lock().clone()
     }
 

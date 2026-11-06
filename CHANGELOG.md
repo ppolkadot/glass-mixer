@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.5.0 (2026-11-06)
+
+Package details and checksums are in [the release record](docs/releases/0.5.0.md).
+
+### Added
+
+- **Per-app output devices.** An app's details offer an Output menu: System
+  default or any connected output. Windows remembers the choice for the app,
+  so its later launches start there too. Apps that follow the default device
+  move at once; apps that opened a specific device switch when they restart
+  playback, and the row says so. Settings > Audio can reset every app's
+  device, after a confirmation, because Windows only offers that for all apps
+  at once. Apps playing on any output now appear in the Mixer.
+- **Solo.** A pinned app's Solo button lowers every other app (to a percentage
+  of its own level, or muted; set in Settings). The header shows which app is
+  soloed with an End solo button. When Solo ends, levels come back, except
+  any you changed meanwhile, which are kept.
+- **Lower in background.** Opt-in per pinned app: lower or mute it while
+  another app's window is in front, and bring it back when you return to it.
+  Focus has to stay put for a quarter second first, so alt-tabbing doesn't
+  bounce levels.
+- **Microphone ducking.** Opt-in in Settings > Audio: lower chosen pinned apps
+  while you talk, with a speech level, start and restore delays, and a level
+  to keep. Only the microphone level is read; nothing is recorded. The header
+  shows when it's active, with Turn off.
+- **Profiles** (formerly presets) can also store each app's output device, the
+  master level, and the default output and input; they can be renamed,
+  duplicated, trimmed part by part and deleted. Existing presets load as they
+  were.
+- **More shortcuts:** next pinned output device, and per pinned app mute,
+  volume up/down and Solo, plus one per profile. Pin outputs for cycling in
+  Devices; a shortcut switch is confirmed in the tray while hidden.
+- **Per-stream controls.** An app with several streams lists each one, with
+  its own mute and volume, in its details.
+- **Mouse wheel step** for volume sliders: 1, 2 or 5 % or a custom value.
+- **Salted Flutters Polaris typeface.** The interface now uses Polaris (Regular
+  and Semibold), embedded in the executable (about 7 MB larger). Segoe UI backs
+  it up for any glyph it lacks, and Settings > Appearance > Typeface switches
+  back to Segoe UI. The font's license ships in `fonts\LICENSE.txt` in both
+  packages.
+- **Rename apps and reorder pins.** An app's details have a Name field (empty
+  or Reset restores the name Windows reports), and pinned apps have Move up and
+  Move down. Pinned outputs can be moved Earlier or Later, which sets the order
+  the cycle shortcut follows.
+- **Export and import settings** (Settings > Backup and restore). Export saves
+  your preferences, without the window position, to a versioned file. Import
+  checks a file first, shows what it contains and what couldn't be read, and asks
+  before replacing anything; your current settings are saved to a backup file
+  first, and a file that is malformed, too large or from a newer version is
+  refused with the reason.
+- **Diagnostic report** (Settings > About): saves or copies a plain-text report
+  of versions, states, counts, recent warnings and the log's tail for bug
+  reports. App, device and profile names and your user folder are hidden, audio
+  and files are never included, and nothing is sent anywhere.
+
+### Fixed
+
+- **An app's balance showed only one of its streams.** When an app has several
+  audio sessions, the row displayed the first stereo session's balance even if
+  the others differed. The balance is now aggregated: one value when every
+  stereo stream agrees, "Differs between streams" with a "Center all" button
+  when they don't, and "Not available" when no stream is stereo.
+- **Automatic preset rules could stop for the rest of the session.** Markers
+  for processes whose exit was never observed (no `SYNCHRONIZE` access, or
+  audio that ended before the process did) were never released, so a long
+  session could reach the 1,024-instance limit, after which no launch
+  qualified until the rules were re-armed. Markers of exited or reused PIDs are
+  now reclaimed during session refreshes, and reaching the limit recovers
+  safely once capacity frees up.
+- **One unreadable audio session blocked the whole app list from refreshing.**
+  It is now skipped and logged.
+
+### Changed
+
+- **Level meters no longer allocate while polling.** Each 30 Hz poll reuses its
+  buffers, and the UI shares the published levels instead of copying them
+  every frame. The rate is unchanged.
+- **Relaunched apps reuse their icon.** Extracted icons are cached by the
+  executable's path, size and modification time (plus the icon resource,
+  AUMID and pixel size) in a bounded LRU, so a short-lived process or a
+  second app running the same binary needs no new Shell extraction, and an
+  updated binary is extracted again. Recently used textures are kept and an
+  identical result is not uploaded to the GPU again.
+- **The icon request queue is bounded (16).** A full queue never blocks the
+  UI; the dropped request is made again on a later frame.
+- **Smaller executable.** wgpu (the fallback renderer) is built with only its
+  Direct3D 12 and Vulkan backends, the only ones the fallback ever uses: the
+  release exe shrinks from 15.86 MB to 15.33 MB and 2 crates leave the build.
+- Bursts of device notifications (for example a Bluetooth reconnect) are merged
+  into one re-enumeration 50 ms after the first; default-device changes remain
+  immediate.
+- New read-only `examples/grouping_probe.rs` lists sessions with their Windows
+  grouping parameter, to check multi-process grouping before relying on it.
+- **The installer asks a running copy to exit before an upgrade.** The previous
+  installer relied on Windows to close the app, which terminated it without
+  saving its settings or removing its tray icon.
+- **Release tooling.** One version number is checked across `Cargo.toml`,
+  `Cargo.lock`, the manifest, the installer and this changelog. Packaging
+  verifies both packages (exact contents, version, 64-bit build, the Polaris
+  notice, byte-exact licenses, signature state) and writes SHA-256 checksums.
+  `scripts/installer-smoke.ps1` tests install, upgrade over a running copy and
+  uninstall of a running copy in isolation from a real installation, and a
+  tagged release builds a draft release in CI. Packages are signed when a
+  certificate is configured; none is, so 0.5.0 downloads are unsigned. See
+  `docs/RELEASING.md` and `docs/VALIDATION_MATRIX.md`.
+
 ## 0.4.0 (2026-10-20)
 
 Fixes and hardening from the 2026-10-20 audit of 0.3.0 and the final review.
@@ -225,8 +331,8 @@ locally; this branch has not been merged into `main`.
 
 Checked locally on Windows 11 Pro 25H2 (build 26200), NVIDIA GeForce GT 340,
 one HDMI output and no microphone. Hosted GitHub Actions CI run `#38919273079`
-covered the earlier committed base `107a305`; the pushed beta.2 commit
-`e47b328` passed run `#39094235224` on `windows-latest`. The final review
+covered the earlier committed base `ea9c816`; the pushed beta.2 commit
+`209e563` passed run `#39094235224` on `windows-latest`. The final review
 corrections documented above were verified locally and need their own hosted
 run after push (details in `docs/TESTING.md`).
 

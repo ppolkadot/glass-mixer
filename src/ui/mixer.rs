@@ -9,8 +9,8 @@
 use super::Look;
 use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label, semibold};
 use crate::audio::{
-    Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, Command, EndpointState, Flow, Meters, ServiceStatus,
-    matches_filter, show_with_idle_filter, to_percent,
+    Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, BalanceState, Command, EndpointState, Flow, Meters, Route,
+    ServiceStatus, matches_filter, show_with_idle_filter, to_percent,
 };
 use crate::platform::icons::{IconKey, IconResult, IconService};
 use crate::settings::Settings;
@@ -29,6 +29,8 @@ const HOLD: Duration = Duration::from_millis(450);
 enum Ctl {
     Device(String),
     App(AppKey),
+    /// One session of an app, by instance identifier.
+    Stream(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -37,23 +39,78 @@ enum Target {
     Balance(Ctl),
 }
 
+/// Icon textures of apps that left the list, kept so a relaunch shows its icon
+/// at once without another upload.
+const RECENT_ICONS: usize = 32;
+
+/// An uploaded icon (or a failed lookup) and a hash of its pixels, so a result
+/// identical to what is already on the GPU isn't uploaded again.
+struct CachedIcon {
+    texture: Option<TextureHandle>,
+    pixels: u64,
+    last_live: Instant,
+}
+
+fn pixel_hash(image: &egui::ColorImage) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    image.size.hash(&mut hasher);
+    for pixel in &image.pixels {
+        pixel.to_array().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 #[derive(Default)]
 pub struct MixerState {
     pub filter: String,
     expanded: HashSet<AppKey>,
     overrides: HashMap<Target, (f32, Instant)>,
-    textures: HashMap<IconKey, Option<TextureHandle>>,
+    textures: HashMap<IconKey, CachedIcon>,
     names: HashMap<AppKey, String>,
+    /// Device choices sent to Windows and not yet visible in a snapshot.
+    routing: HashMap<AppKey, (Option<String>, Instant)>,
+    /// Names the user gave apps: a copy of the setting, refreshed when it changes.
+    custom_names: HashMap<AppKey, String>,
+    custom_source: Vec<crate::audio::preferences::AppName>,
+    /// Text typed into the rename fields, by app.
+    rename: HashMap<AppKey, String>,
 }
 
 impl MixerState {
+    /// Drops icons of other pixel sizes and failed lookups of apps that left;
+    /// keeps the most recently live [`RECENT_ICONS`] icons of apps that left.
     fn prune_cache(&mut self, live: &HashSet<AppKey>, px: u32) {
-        self.textures.retain(|(key, size), _| live.contains(key) && *size == px);
-        self.names.retain(|key, _| live.contains(key));
+        let now = Instant::now();
+        self.textures.retain(|(key, size), icon| {
+            if live.contains(key) {
+                icon.last_live = now;
+            }
+            *size == px && (live.contains(key) || icon.texture.is_some())
+        });
+        let mut gone: Vec<_> = self
+            .textures
+            .iter()
+            .filter(|((key, _), _)| !live.contains(key))
+            .map(|(k, i)| (i.last_live, k.clone()))
+            .collect();
+        if gone.len() > RECENT_ICONS {
+            gone.sort_by_key(|(last_live, _)| std::cmp::Reverse(*last_live));
+            for (_, key) in gone.drain(RECENT_ICONS..) {
+                self.textures.remove(&key);
+            }
+        }
+        let textures = &self.textures;
+        self.names.retain(|key, _| live.contains(key) || textures.contains_key(&(key.clone(), px)));
+        self.rename.retain(|key, _| live.contains(key));
     }
     #[cfg(test)]
     fn cached_icon_keys(&self) -> HashSet<IconKey> {
         self.textures.keys().cloned().collect()
+    }
+
+    fn texture(&self, key: &IconKey) -> Option<&TextureHandle> {
+        self.textures.get(key).and_then(|icon| icon.texture.as_ref())
     }
     fn value(&self, target: &Target, truth: f32) -> f32 {
         match self.overrides.get(target) {
@@ -74,18 +131,38 @@ impl MixerState {
         }
     }
 
+    /// Forgets the text typed into rename fields (settings were replaced).
+    pub fn forget_drafts(&mut self) {
+        self.rename.clear();
+    }
+
     pub fn ingest_icons(&mut self, ctx: &egui::Context, results: Vec<(IconKey, IconResult)>) {
         for (key, result) in results {
-            let texture =
-                result.image.map(|img| ctx.load_texture(format!("app-icon-{:?}", key), img, TextureOptions::LINEAR));
             if let Some(name) = result.display_name {
                 self.names.insert(key.0.clone(), name);
             }
-            self.textures.insert(key, texture);
+            let pixels = result.image.as_ref().map_or(0, pixel_hash);
+            if let Some(icon) = self.textures.get_mut(&key)
+                && icon.texture.is_some()
+                && icon.pixels == pixels
+            {
+                continue;
+            }
+            let texture =
+                result.image.map(|img| ctx.load_texture(format!("app-icon-{:?}", key), img, TextureOptions::LINEAR));
+            self.textures.insert(key, CachedIcon { texture, pixels, last_live: Instant::now() });
         }
     }
 
+    /// What the row shows: the user's name, else the one Windows reports for a
+    /// packaged app, else the session's name.
     fn display_name<'a>(&'a self, app: &'a AppEntry) -> &'a str {
+        let custom = crate::audio::preferences::normalized_key(&app.key).and_then(|key| self.custom_names.get(&key));
+        custom.map(String::as_str).unwrap_or_else(|| self.default_name(app))
+    }
+
+    /// The name without the user's change.
+    fn default_name<'a>(&'a self, app: &'a AppEntry) -> &'a str {
         self.names.get(&app.key).map(String::as_str).unwrap_or(&app.name)
     }
 }
@@ -107,6 +184,10 @@ pub struct MixerCtx<'a> {
 
 pub fn show(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> Outcome {
     st.expire(ui.ctx());
+    if st.custom_source != cx.settings.app_names {
+        st.custom_source.clone_from(&cx.settings.app_names);
+        st.custom_names = st.custom_source.iter().map(|n| (n.key.clone(), n.name.clone())).collect();
+    }
     let live: HashSet<AppKey> = cx
         .snap
         .apps
@@ -158,6 +239,34 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
             ui.add_space(look.m.gap * 0.5);
         }
 
+        if let Some(solo) = &cx.snap.solo {
+            let name = cx.snap.apps.iter().find(|a| &a.key == solo).map_or("an app", |a| st.display_name(a));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(glyph::SOLO).font(widgets::icon_font(14.0)).color(look.p.accent));
+                // The button is placed first, so a long name truncates instead of pushing it out.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::scroll_on_focus(ui.small_button("End solo")).clicked() {
+                        cx.audio.send(Command::EndSolo);
+                    }
+                    let text = format!("Solo: {name}. Other apps are lowered.");
+                    ui.add(egui::Label::new(RichText::new(&text).color(look.p.text)).truncate()).on_hover_text(text);
+                });
+            });
+        }
+        if cx.snap.mic_ducking {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(glyph::MIC).font(widgets::icon_font(14.0)).color(look.p.accent));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let off = widgets::scroll_on_focus(ui.small_button("Turn off"));
+                    widgets::set_name(ui, &off, "Turn off microphone ducking");
+                    if off.clicked() {
+                        cx.settings.mic_ducking.enabled = false;
+                    }
+                    let text = "Microphone ducking: apps are lowered while you talk.";
+                    ui.add(egui::Label::new(RichText::new(text).color(look.p.text)).truncate()).on_hover_text(text);
+                });
+            });
+        }
         ui.horizontal(|ui| {
             device_label(ui, look, glyph::SPEAKER, "Output");
             let width = ui.available_width();
@@ -287,7 +396,9 @@ fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow,
                 Flow::Input => cx.meters.input,
             });
         let a11y = format!("{} volume", ep.name);
-        let response = Slider { muted: ep.muted, meter, ..Slider::volume(&mut v, &a11y, width) }.show(ui, &look.p);
+        let response = Slider { muted: ep.muted, meter, ..Slider::volume(&mut v, &a11y, width) }
+            .wheel_percent(cx.settings.wheel_step)
+            .show(ui, &look.p);
         if response.changed() {
             st.hold(target.clone(), v);
             cx.audio.send(Command::SetDeviceVolume { id: ep.id.clone(), volume: v });
@@ -400,6 +511,31 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
                 ui.push_id(&d.id, |ui| {
                     card(cx.look).show(ui, |ui| {
                         ui.label(RichText::new(crate::audio::device_label(d, devices)).strong()).on_hover_text(&d.id);
+                        if flow == Flow::Output {
+                            let mut pinned = cx.settings.pinned_devices.iter().any(|p| p.id == d.id);
+                            let pin = widgets::scroll_on_focus(ui.checkbox(&mut pinned, "Pin for output cycling"));
+                            widgets::set_name(ui, &pin, &format!("Pin {} for output cycling", d.name));
+                            if pin.on_hover_text("The \"Next pinned output device\" shortcut switches between pinned outputs, in the order they were pinned").changed() {
+                                if pinned {
+                                    cx.settings.pinned_devices.push(crate::audio::preferences::PinnedDevice {
+                                        id: d.id.clone(),
+                                        name: d.name.clone(),
+                                    });
+                                } else {
+                                    cx.settings.pinned_devices.retain(|p| p.id != d.id);
+                                }
+                            }
+                            if let Some(index) = cx.settings.pinned_devices.iter().position(|p| p.id == d.id) {
+                                let len = cx.settings.pinned_devices.len();
+                                let mut delta = 0;
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("Cycle position {}", index + 1)).small());
+                                    let names = (format!("Cycle {} earlier", d.name), format!("Cycle {} later", d.name));
+                                    delta = order_buttons(ui, index, len, ("Earlier", "Later"), (&names.0, &names.1), false);
+                                });
+                                crate::audio::preferences::move_item(&mut cx.settings.pinned_devices, index, delta);
+                            }
+                        }
                         if d.is_default {
                             ui.label("Default device");
                         } else if widgets::scroll_on_focus(
@@ -424,8 +560,42 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
                 });
                 ui.add_space(cx.look.m.gap);
             }
+            if flow == Flow::Output {
+                disconnected_pins(ui, cx, devices);
+            }
         }
     });
+}
+
+/// Pinned outputs that aren't connected stay in the cycle order; they can be unpinned here.
+fn disconnected_pins(ui: &mut Ui, cx: &mut MixerCtx, connected: &[crate::audio::DeviceInfo]) {
+    let missing: Vec<_> = cx
+        .settings
+        .pinned_devices
+        .iter()
+        .filter(|pin| !connected.iter().any(|d| d.id.eq_ignore_ascii_case(&pin.id)))
+        .cloned()
+        .collect();
+    for pin in missing {
+        ui.push_id(("pinned-offline", &pin.id), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let unpin = widgets::scroll_on_focus(ui.small_button("Unpin"));
+                widgets::set_name(ui, &unpin, &format!("Unpin {}", pin.name));
+                if unpin.clicked() {
+                    cx.settings.pinned_devices.retain(|p| p.id != pin.id);
+                }
+                if let Some(index) = cx.settings.pinned_devices.iter().position(|p| p.id == pin.id) {
+                    let len = cx.settings.pinned_devices.len();
+                    let names = (format!("Cycle {} earlier", pin.name), format!("Cycle {} later", pin.name));
+                    let delta = order_buttons(ui, index, len, ("Earlier", "Later"), (&names.0, &names.1), true);
+                    crate::audio::preferences::move_item(&mut cx.settings.pinned_devices, index, delta);
+                }
+                let text = format!("{} · pinned, not connected", pin.name);
+                ui.add(egui::Label::new(RichText::new(&text).color(cx.look.p.text_muted)).truncate())
+                    .on_hover_text(text);
+            });
+        });
+    }
 }
 
 fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
@@ -489,6 +659,7 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
 
 fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEntry) {
     let look = cx.look;
+    let name = st.display_name(app).to_owned();
     ui.push_id((&app.key, "offline"), |ui| {
         card(look).show(ui, |ui| {
             // Fill the row, so long names truncate instead of widening the card.
@@ -499,7 +670,7 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                 ui.scope(|ui| {
                     ui.multiply_opacity(0.45);
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(look.m.icon), Sense::hover());
-                    if let Some(Some(tex)) = st.textures.get(&(app.key.clone(), px)) {
+                    if let Some(tex) = st.texture(&(app.key.clone(), px)) {
                         ui.painter().image(
                             tex.id(),
                             rect,
@@ -507,25 +678,25 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                             Color32::from_gray(128),
                         );
                     } else {
-                        fallback_tile(ui, rect, &app.name, look, None);
+                        fallback_tile(ui, rect, &name, look, None);
                     }
                 });
                 ui.vertical(|ui| {
-                    ui.add(egui::Label::new(RichText::new(&app.name).strong().color(look.p.text_muted)).truncate());
+                    ui.add(egui::Label::new(RichText::new(&name).strong().color(look.p.text_muted)).truncate());
                     ui.label("Not running");
                 });
             });
             ui.add_enabled_ui(false, |ui| {
                 ui.horizontal(|ui| {
-                    icon_button(ui, look, glyph::MUTE, "M", &format!("{} mute unavailable", app.name), None);
-                    widgets::unavailable_slider(ui, look, &format!("{} volume unavailable — not running", app.name));
+                    icon_button(ui, look, glyph::MUTE, "M", &format!("{} mute unavailable", name), None);
+                    widgets::unavailable_slider(ui, look, &format!("{} volume unavailable — not running", name));
                 });
             });
             ui.horizontal_wrapped(|ui| {
                 let unpin = widgets::scroll_on_focus(ui.button("Unpin"));
                 // The visible text is short so the row fits; the accessible name says which app.
-                widgets::set_name(ui, &unpin, &format!("Unpin {}", app.name));
-                if unpin.on_hover_text(format!("Unpin {}", app.name)).clicked() {
+                widgets::set_name(ui, &unpin, &format!("Unpin {}", name));
+                if unpin.on_hover_text(format!("Unpin {}", name)).clicked() {
                     cx.settings.pinned_apps.retain(|p| p.key != app.key);
                 }
                 ui.label(RichText::new("No active audio session").small().color(look.p.text_muted));
@@ -562,8 +733,8 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             let px = (m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
             cx.icons.request(app, px);
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(m.icon), Sense::hover());
-            match st.textures.get(&(app.key.clone(), px)) {
-                Some(Some(tex)) => {
+            match st.texture(&(app.key.clone(), px)) {
+                Some(tex) => {
                     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                     let tint = if app.muted { Color32::from_white_alpha(150) } else { Color32::WHITE };
                     ui.painter().image(tex.id(), icon_rect, uv, tint);
@@ -574,7 +745,12 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 }
             }
 
-            let name_w = (ui.available_width() * 0.34).clamp(84.0, 210.0);
+            let pinned = cx.settings.pinned_apps.iter().any(|pin| pin.key == app.key);
+            let soloed = cx.snap.solo.as_ref() == Some(&app.key);
+            // The Solo button takes its room from the name, so the slider keeps its width.
+            let (name_min, solo_room) =
+                if pinned || soloed { (52.0, m.button + ui.spacing().item_spacing.x) } else { (84.0, 0.0) };
+            let name_w = (ui.available_width() * 0.34 - solo_room).clamp(name_min, 210.0);
             let (nrect, nresp) = ui.allocate_exact_size(vec2(name_w, m.row_height - 10.0), Sense::click());
             let mut job = LayoutJob::simple_singleline(name.clone(), semibold(14.0), p.text);
             job.wrap = egui::text::TextWrapping::truncate_at_width(name_w - 4.0);
@@ -600,6 +776,17 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 if app.session_count > 1 {
                     text.push_str(&format!(" · {} streams", app.session_count));
                 }
+                match &cx.snap.solo {
+                    Some(solo) if *solo == app.key => text.push_str(" · Solo"),
+                    Some(_) if app.key != AppKey::System => text.push_str(" · lowered by Solo"),
+                    _ => {}
+                }
+                if cx.snap.background_lowered.contains(&app.key) {
+                    text.push_str(" · lowered in background");
+                }
+                if cx.snap.mic_ducking && cx.settings.mic_ducking.targets.contains(&app.key) {
+                    text.push_str(" · lowered while you talk");
+                }
                 ui.painter().text(pos2(x, sy), Align2::LEFT_TOP, text, FontId::proportional(12.0), status_color);
             }
             let details = if expanded { "Hide details" } else { "Show details" };
@@ -617,6 +804,12 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
 
             let target = Target::Volume(Ctl::App(app.key.clone()));
             let mut v = st.value(&target, app.volume);
+            if pinned || soloed {
+                let label = if soloed { format!("End solo for {name}") } else { format!("Solo {name}") };
+                if icon_button(ui, look, glyph::SOLO, "S", &label, soloed.then_some(p.accent)).clicked() {
+                    cx.audio.send(Command::ToggleSolo { key: app.key.clone() });
+                }
+            }
             let mute_label = format!("{} {name}", if app.muted { "Unmute" } else { "Mute" });
             let emphasis = app.muted.then_some(p.danger);
             if icon_button(
@@ -634,7 +827,9 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             let width = ui.available_width() - 40.0 - ui.spacing().item_spacing.x - 4.0;
             let meter = cx.settings.show_meters.then(|| cx.meters.apps.get(&app.key).copied().unwrap_or(0.0));
             let a11y = format!("{name} volume");
-            let response = Slider { muted: app.muted, meter, ..Slider::volume(&mut v, &a11y, width) }.show(ui, p);
+            let response = Slider { muted: app.muted, meter, ..Slider::volume(&mut v, &a11y, width) }
+                .wheel_percent(cx.settings.wheel_step)
+                .show(ui, p);
             if response.changed() {
                 st.hold(target.clone(), v);
                 cx.audio.send(Command::SetAppVolume { key: app.key.clone(), volume: v });
@@ -677,11 +872,25 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
             }
         }
     }
+    if let Some(key) = crate::audio::preferences::normalized_key(&app.key) {
+        rename_row(ui, st, cx, app, &key, indent);
+        if let Some(index) = cx.settings.pinned_apps.iter().position(|pin| pin.key == key) {
+            let len = cx.settings.pinned_apps.len();
+            let mut delta = 0;
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                ui.label(RichText::new("Order").color(p.text_muted));
+                let names = (format!("Move {name} up"), format!("Move {name} down"));
+                delta = order_buttons(ui, index, len, ("Move up", "Move down"), (&names.0, &names.1), false);
+            });
+            crate::audio::preferences::move_item(&mut cx.settings.pinned_apps, index, delta);
+        }
+    }
     ui.horizontal(|ui| {
         ui.add_space(indent);
         ui.label(RichText::new("Balance").color(p.text_muted));
         match app.balance {
-            Some(balance) => {
+            BalanceState::Uniform(balance) => {
                 ui.label(RichText::new("L").small().color(p.text_muted));
                 let target = Target::Balance(Ctl::App(app.key.clone()));
                 let mut b = st.value(&target, balance);
@@ -699,11 +908,28 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
                     cx.audio.send(Command::SetAppBalance { key: app.key.clone(), balance: 0.0 });
                 }
             }
-            None => {
+            BalanceState::Mixed => {
+                ui.label(RichText::new("Differs between streams").small().color(p.text_muted)).on_hover_text(
+                    "This app's audio streams use different balances. Centering sets every stream to the same balance.",
+                );
+                if widgets::scroll_on_focus(ui.small_button("Center all")).clicked() {
+                    cx.audio.send(Command::SetAppBalance { key: app.key.clone(), balance: 0.0 });
+                }
+            }
+            BalanceState::Unavailable => {
                 ui.label(RichText::new("Not available for this app").small().color(p.text_muted));
             }
         }
     });
+    if app.key != AppKey::System {
+        output_choice(ui, st, cx, app, name, indent);
+    }
+    if cx.settings.pinned_apps.iter().any(|pin| pin.key == app.key) {
+        focus_rule(ui, cx, app, name, indent);
+    }
+    if app.streams.len() > 1 {
+        streams(ui, st, cx, app, name, indent);
+    }
     let source = match (&app.key, &app.exe_path) {
         (AppKey::System, _) => "Windows system sounds".to_string(),
         (AppKey::Package(aumid), _) => format!("Packaged app · {aumid}"),
@@ -719,22 +945,323 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
     });
 }
 
+/// "Lower while in the background" for a pinned app (opt-in).
+fn focus_rule(ui: &mut Ui, cx: &mut MixerCtx, app: &AppEntry, name: &str, indent: f32) {
+    let rules = &mut cx.settings.focus_rules;
+    let index = rules.iter().position(|r| r.key == app.key);
+    let mut on = index.is_some();
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(indent);
+        let toggle = widgets::scroll_on_focus(ui.checkbox(&mut on, "Lower in background"));
+        widgets::set_name(ui, &toggle, &format!("Lower {name} while another app is in front"));
+        let toggled = toggle
+            .on_hover_text(
+                "Lower this app while another app's window is in front; its level comes back when you return to it",
+            )
+            .changed();
+        if toggled && on {
+            rules.push(crate::settings::FocusRule {
+                key: app.key.clone(),
+                name: name.to_owned(),
+                keep_percent: 30,
+                mute: false,
+            });
+        } else if toggled {
+            rules.retain(|r| r.key != app.key);
+        }
+        if let Some(rule) = rules.iter_mut().find(|r| r.key == app.key) {
+            let keep =
+                ui.add_enabled(!rule.mute, egui::DragValue::new(&mut rule.keep_percent).range(0..=90).suffix("%"));
+            widgets::set_name(ui, &keep, &format!("{name} keeps this percent of its volume in the background"));
+            widgets::scroll_on_focus(keep);
+            let mute = widgets::scroll_on_focus(ui.checkbox(&mut rule.mute, "Mute"));
+            widgets::set_name(ui, &mute, &format!("Mute {name} in the background"));
+        }
+    });
+}
+
+/// How long a device choice shows as "Applying…" before the snapshot is trusted again.
+const ROUTING_PENDING: Duration = Duration::from_secs(3);
+
+/// What the output-device status line says for an app.
+fn route_status(app: &AppEntry, snap: &AudioSnapshot, name: &str) -> String {
+    let device_name = |id: &str| snap.outputs.iter().find(|d| d.id.eq_ignore_ascii_case(id)).map(|d| d.name.as_str());
+    match &app.route {
+        _ if !snap.can_route_apps => "Choosing a device per app isn't supported on this version of Windows.".into(),
+        Route::SystemDefault => "Follows the system default output.".into(),
+        Route::Unknown => format!("Windows didn't report {name}'s device (it may run as administrator)."),
+        Route::Device(id) => match device_name(id) {
+            None => "Set to a device that isn't connected; Windows uses the default until it returns.".into(),
+            Some(device) if app.streams.iter().any(|s| s.device_id.eq_ignore_ascii_case(id)) => {
+                format!("Plays on {device}.")
+            }
+            Some(device) => {
+                format!("Set to {device}. Some apps switch only when they restart playback or are reopened.")
+            }
+        },
+    }
+}
+
+/// The output device an app uses, chosen per app (Windows remembers it for the app).
+fn output_choice(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, name: &str, indent: f32) {
+    let look = cx.look;
+    let p = &look.p;
+    let now = Instant::now();
+    let snapshot_route = match &app.route {
+        Route::Device(id) => Some(id.clone()),
+        _ => None,
+    };
+    let pending =
+        st.routing.get(&app.key).filter(|(want, at)| now - *at < ROUTING_PENDING && *want != snapshot_route).cloned();
+    let shown = pending.as_ref().map_or(snapshot_route.clone(), |(want, _)| want.clone());
+    if pending.is_none() {
+        st.routing.remove(&app.key);
+    } else {
+        ui.ctx().request_repaint_after(ROUTING_PENDING);
+    }
+    let label = |id: &Option<String>| match id {
+        None => "System default".to_owned(),
+        Some(id) => cx
+            .snap
+            .outputs
+            .iter()
+            .find(|d| d.id.eq_ignore_ascii_case(id))
+            .map_or_else(|| "Disconnected device".to_owned(), |d| crate::audio::device_label(d, &cx.snap.outputs)),
+    };
+    let mut choice = None;
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        ui.label(RichText::new("Output").color(p.text_muted));
+        ui.add_enabled_ui(cx.snap.can_route_apps && app.route != Route::Unknown, |ui| {
+            let response = egui::ComboBox::from_id_salt(("app-output", &app.key))
+                .width((ui.available_width() - 8.0).clamp(80.0, 240.0))
+                .truncate()
+                .selected_text(label(&shown))
+                .show_ui(ui, |ui| {
+                    let options = std::iter::once(None).chain(cx.snap.outputs.iter().map(|d| Some(d.id.clone())));
+                    for option in options {
+                        if ui.selectable_label(option == shown, label(&option)).clicked() && option != shown {
+                            choice = Some(option);
+                        }
+                    }
+                })
+                .response;
+            widgets::set_name(ui, &response, &format!("{name} output device"));
+            response.on_hover_text("Windows remembers this for the app, also after it restarts");
+        });
+    });
+    if let Some(device) = choice {
+        st.routing.insert(app.key.clone(), (device.clone(), now));
+        cx.audio.send(Command::SetAppOutput { key: app.key.clone(), device });
+    }
+    let status = if pending.is_some() { "Applying…".to_owned() } else { route_status(app, cx.snap, name) };
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        ui.add(egui::Label::new(RichText::new(status).small().color(p.text_muted)).wrap());
+    });
+}
+
+/// Two small buttons that move a list item; returns -1 (earlier), 1 (later) or 0.
+/// The ends of the list have their button disabled. `right_to_left` is for rows
+/// laid out right to left, where the buttons are added in reverse so they still
+/// read Earlier, Later.
+fn order_buttons(
+    ui: &mut Ui,
+    index: usize,
+    len: usize,
+    texts: (&str, &str),
+    names: (&str, &str),
+    right_to_left: bool,
+) -> isize {
+    let mut delta = 0;
+    let mut add = |ui: &mut Ui, enabled: bool, text: &str, name: &str, step: isize| {
+        let button = ui.add_enabled(enabled, egui::Button::new(text).small());
+        widgets::set_name(ui, &button, name);
+        if widgets::scroll_on_focus(button).clicked() {
+            delta = step;
+        }
+    };
+    let (earlier, later) = ((index > 0, texts.0, names.0, -1), (index + 1 < len, texts.1, names.1, 1));
+    for (enabled, text, name, step) in if right_to_left { [later, earlier] } else { [earlier, later] } {
+        add(ui, enabled, text, name, step);
+    }
+    delta
+}
+
+/// A name of the user's own for an app. It is applied when the field loses focus
+/// (Enter, or clicking elsewhere); an empty field, or Reset, goes back to the
+/// name Windows reports.
+fn rename_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, key: &AppKey, indent: f32) {
+    let p = &cx.look.p;
+    let original = st.default_name(app).to_owned();
+    let current = crate::audio::preferences::custom_name(&cx.settings.app_names, key).map(str::to_owned);
+    let draft = st.rename.entry(key.clone()).or_insert_with(|| current.clone().unwrap_or_default());
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        ui.label(RichText::new("Name").color(p.text_muted));
+        let width = (ui.available_width() - 90.0).clamp(80.0, 200.0);
+        let field = ui.add(egui::TextEdit::singleline(draft).hint_text(&original).desired_width(width).char_limit(60));
+        widgets::set_name(ui, &field, &format!("Display name for {original}"));
+        let field = widgets::scroll_on_focus(field);
+        if field.lost_focus() && crate::audio::preferences::set_custom_name(&mut cx.settings.app_names, key, draft) {
+            *draft = crate::audio::preferences::custom_name(&cx.settings.app_names, key).unwrap_or_default().to_owned();
+        }
+        let reset = ui.add_enabled(current.is_some(), egui::Button::new("Reset").small());
+        widgets::set_name(ui, &reset, &format!("Reset the name of {original}"));
+        if widgets::scroll_on_focus(reset).clicked() {
+            crate::audio::preferences::set_custom_name(&mut cx.settings.app_names, key, "");
+            draft.clear();
+        }
+    });
+}
+
+/// Per-session controls, for apps whose streams need different levels.
+fn streams(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, name: &str, indent: f32) {
+    let look = cx.look;
+    let p = &look.p;
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        ui.label(RichText::new("Streams").color(p.text_muted));
+    });
+    for (i, stream) in app.streams.iter().enumerate() {
+        let n = i + 1;
+        let activity = if stream.activity == Activity::Playing { "playing" } else { "idle" };
+        ui.push_id(("stream", &stream.id), |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                ui.label(RichText::new(format!("{n}")).small().color(p.text_muted))
+                    .on_hover_text(format!("Stream {n} · process {} · {activity}", stream.pid));
+                let mute = format!("{} {name} stream {n}", if stream.muted { "Unmute" } else { "Mute" });
+                let target = Target::Volume(Ctl::Stream(stream.id.clone()));
+                let mut v = st.value(&target, stream.volume);
+                let g = glyph::volume(v, stream.muted);
+                if icon_button(
+                    ui,
+                    look,
+                    g,
+                    if stream.muted { "M" } else { "On" },
+                    &mute,
+                    stream.muted.then_some(p.danger),
+                )
+                .clicked()
+                {
+                    cx.audio.send(Command::SetStreamMute { id: stream.id.clone(), muted: !stream.muted });
+                }
+                let width = ui.available_width() - 40.0 - ui.spacing().item_spacing.x - 4.0;
+                let a11y = format!("{name} stream {n} volume");
+                let response = Slider { muted: stream.muted, ..Slider::volume(&mut v, &a11y, width) }
+                    .wheel_percent(cx.settings.wheel_step)
+                    .show(ui, p);
+                if response.changed() {
+                    st.hold(target.clone(), v);
+                    cx.audio.send(Command::SetStreamVolume { id: stream.id.clone(), volume: v });
+                } else if response.dragged() {
+                    st.hold(target, v);
+                }
+                percent_label(ui, look, &format!("{}%", to_percent(v)), stream.muted);
+            });
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn image(shade: u8) -> egui::ColorImage {
+        egui::ColorImage::new([2, 2], vec![Color32::from_gray(shade); 4])
+    }
+
+    fn icon(image: Option<egui::ColorImage>) -> IconResult {
+        IconResult { image, display_name: None }
+    }
+
     #[test]
-    fn cache_prunes_missing_apps_and_old_pixel_sizes() {
-        let a = AppKey::Exe("a.exe".into());
-        let b = AppKey::Exe("b.exe".into());
+    fn cache_prunes_old_pixel_sizes_and_failed_lookups_of_apps_that_left() {
+        let ctx = egui::Context::default();
+        let (a, b, c) = (AppKey::Exe("a.exe".into()), AppKey::Exe("b.exe".into()), AppKey::Exe("c.exe".into()));
         let mut state = MixerState::default();
-        state.textures.insert((a.clone(), 28), None);
-        state.textures.insert((a.clone(), 42), None);
-        state.textures.insert((b.clone(), 42), None);
+        state.ingest_icons(
+            &ctx,
+            vec![((a.clone(), 28), icon(None)), ((a.clone(), 42), icon(None)), ((b.clone(), 42), icon(None))],
+        );
+        state.ingest_icons(&ctx, vec![((c.clone(), 42), icon(Some(image(9))))]);
         state.names.insert(b.clone(), "B".into());
+        state.names.insert(c.clone(), "C".into());
         state.prune_cache(&HashSet::from([a.clone()]), 42);
-        assert_eq!(state.cached_icon_keys(), HashSet::from([(a, 42)]));
+        assert_eq!(
+            state.cached_icon_keys(),
+            HashSet::from([(a, 42), (c.clone(), 42)]),
+            "b's failed lookup goes; c's icon stays for a relaunch"
+        );
         assert!(!state.names.contains_key(&b));
+        assert!(state.names.contains_key(&c));
+    }
+
+    #[test]
+    fn the_output_status_says_what_windows_actually_does() {
+        let device =
+            |id: &str, name: &str| crate::audio::DeviceInfo { id: id.into(), name: name.into(), is_default: false };
+        let stream = |device_id: &str| crate::audio::StreamEntry {
+            id: "s".into(),
+            pid: 1,
+            device_id: device_id.into(),
+            volume: 1.0,
+            muted: false,
+            activity: Activity::Playing,
+        };
+        let mut snap =
+            AudioSnapshot { outputs: vec![device("hp", "Headphones"), device("tv", "TV")], ..Default::default() };
+        let mut app = crate::audio::preferences::PinnedApp {
+            key: AppKey::Exe("a.exe".into()),
+            name: "A".into(),
+            exe_path: None,
+            aumid: None,
+        }
+        .placeholder();
+        app.streams = vec![stream("hp")];
+        assert!(route_status(&app, &snap, "A").contains("isn't supported"));
+        snap.can_route_apps = true;
+        assert_eq!(route_status(&app, &snap, "A"), "Follows the system default output.");
+        app.route = Route::Device("tv".into());
+        assert!(route_status(&app, &snap, "A").contains("switch only when they restart"), "not moved yet");
+        app.streams = vec![stream("tv")];
+        assert_eq!(route_status(&app, &snap, "A"), "Plays on TV.");
+        app.route = Route::Device("gone".into());
+        assert!(route_status(&app, &snap, "A").contains("isn't connected"));
+        app.route = Route::Unknown;
+        assert!(route_status(&app, &snap, "A").contains("administrator"));
+    }
+
+    #[test]
+    fn identical_icons_are_not_uploaded_again_but_changed_ones_are() {
+        let ctx = egui::Context::default();
+        let key = (AppKey::Exe("a.exe".into()), 28);
+        let mut state = MixerState::default();
+        state.ingest_icons(&ctx, vec![(key.clone(), icon(Some(image(10))))]);
+        let first = state.texture(&key).expect("uploaded").id();
+        state.ingest_icons(&ctx, vec![(key.clone(), icon(Some(image(10))))]);
+        assert_eq!(state.texture(&key).unwrap().id(), first, "a relaunch with the same icon reuses the texture");
+        state.ingest_icons(&ctx, vec![(key.clone(), icon(Some(image(200))))]);
+        assert_ne!(state.texture(&key).unwrap().id(), first, "an updated executable's icon replaces it");
+        state.ingest_icons(&ctx, vec![(key.clone(), icon(None))]);
+        assert!(state.texture(&key).is_none(), "a failed lookup is shown as the fallback tile");
+    }
+
+    #[test]
+    fn only_the_most_recent_icons_of_apps_that_left_are_kept() {
+        let ctx = egui::Context::default();
+        let mut state = MixerState::default();
+        let keys: Vec<_> = (0..RECENT_ICONS + 8).map(|i| AppKey::Exe(format!("app{i}.exe"))).collect();
+        for key in &keys {
+            state.ingest_icons(&ctx, vec![((key.clone(), 28), icon(Some(image(1))))]);
+            state.prune_cache(&HashSet::from([key.clone()]), 28);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        state.prune_cache(&HashSet::new(), 28);
+        assert_eq!(state.textures.len(), RECENT_ICONS);
+        assert!(state.texture(&(keys.last().unwrap().clone(), 28)).is_some(), "the latest is kept");
+        assert!(state.texture(&(keys[0].clone(), 28)).is_none(), "the oldest is evicted");
     }
 }
 
@@ -768,7 +1295,9 @@ mod layout_tests {
             muted: false,
             activity: Activity::Idle,
             session_count: 1,
-            balance: None,
+            balance: BalanceState::Unavailable,
+            streams: Vec::new(),
+            route: crate::audio::Route::SystemDefault,
         }
     }
 
@@ -873,6 +1402,260 @@ mod layout_tests {
             !names.iter().any(|n| n.contains("Open Windows sound settings")),
             "sound properties belong to the Devices view: {names:?}"
         );
+    }
+
+    #[test]
+    fn each_balance_state_shows_its_own_control_and_fits() {
+        let key = AppKey::Exe(r"c:\apps\player.exe".into());
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let slider = "A Media Player With A Remarkably Long Display Name balance";
+        for (balance, has_slider, has_center) in [
+            (BalanceState::Uniform(0.3), true, false),
+            (BalanceState::Mixed, false, true),
+            (BalanceState::Unavailable, false, false),
+        ] {
+            let mut snap = snapshot();
+            snap.apps[1].balance = balance;
+            let (audio, meters) = (AudioHandle::detached(), Meters::default());
+            let (mut settings, mut icons, mut state) =
+                (Settings::default(), IconService::detached(), MixerState::default());
+            state.expanded.insert(key.clone());
+            let frame = harness.run(width, 560.0, |ui| {
+                let mut cx = MixerCtx {
+                    audio: &audio,
+                    snap: &snap,
+                    meters: &meters,
+                    look: &look,
+                    settings: &mut settings,
+                    icons: &mut icons,
+                };
+                show(ui, &mut state, &mut cx);
+            });
+            let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+            assert_eq!(names.contains(&slider), has_slider, "{balance:?}: {names:?}");
+            assert_eq!(names.contains(&"Center all"), has_center, "{balance:?}: {names:?}");
+            assert_fits(&format!("{balance:?}"), width, &frame);
+        }
+    }
+
+    fn render_with(snap: &AudioSnapshot, settings: &mut Settings, expanded: &[AppKey], devices: bool) -> (f32, Frame) {
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, meters) = (AudioHandle::detached(), Meters::default());
+        let (mut icons, mut state) = (IconService::detached(), MixerState::default());
+        state.expanded.extend(expanded.iter().cloned());
+        let frame = harness.run(width, 900.0, |ui| {
+            let mut cx = MixerCtx {
+                audio: &audio,
+                snap,
+                meters: &meters,
+                look: &look,
+                settings: &mut *settings,
+                icons: &mut icons,
+            };
+            if devices {
+                show_devices(ui, &mut state, &mut cx);
+            } else {
+                show(ui, &mut state, &mut cx);
+            }
+        });
+        (width, frame)
+    }
+
+    #[test]
+    fn solo_streams_and_device_pins_have_named_controls_that_fit() {
+        let player = AppKey::Exe(r"c:\apps\player.exe".into());
+        let player_name = "A Media Player With A Remarkably Long Display Name";
+        let mut snap = snapshot();
+        let stream = |id: &str, volume: f32| crate::audio::StreamEntry {
+            id: id.into(),
+            pid: 42,
+            device_id: "out".into(),
+            volume,
+            muted: false,
+            activity: Activity::Playing,
+        };
+        snap.apps[1].session_count = 2;
+        snap.apps[1].streams = vec![stream("s1", 0.3), stream("s2", 0.9)];
+
+        let mut settings = Settings::default();
+        let (width, frame) = render_with(&snap, &mut settings, std::slice::from_ref(&player), false);
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(!names.iter().any(|n| n.starts_with("Solo ")), "unpinned apps have no Solo button: {names:?}");
+        for expected in [format!("{player_name} stream 1 volume"), format!("Mute {player_name} stream 2")] {
+            assert!(names.contains(&expected.as_str()), "missing {expected}: {names:?}");
+        }
+        assert_fits("streams", width, &frame);
+
+        settings.pinned_apps.push(PinnedApp::from_app(&snap.apps[1]).unwrap());
+        let (width, frame) = render_with(&snap, &mut settings, &[], false);
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&format!("Solo {player_name}").as_str()), "{names:?}");
+        assert_fits("pinned", width, &frame);
+
+        snap.solo = Some(player.clone());
+        let (width, frame) = render_with(&snap, &mut settings, &[], false);
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&format!("End solo for {player_name}").as_str()), "{names:?}");
+        assert!(names.contains(&"End solo"), "the header offers a way out: {names:?}");
+        assert_fits("solo", width, &frame);
+
+        // A pinned, expanded app offers its focus rule; mic ducking shows a way to turn it off.
+        snap.solo = None;
+        snap.mic_ducking = true;
+        settings.focus_rules.push(crate::settings::FocusRule {
+            key: player.clone(),
+            name: player_name.into(),
+            keep_percent: 30,
+            mute: false,
+        });
+        let (width, frame) = render_with(&snap, &mut settings, std::slice::from_ref(&player), false);
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        for expected in [
+            format!("Lower {player_name} while another app is in front"),
+            format!("{player_name} keeps this percent of its volume in the background"),
+            format!("{player_name} output device"),
+            "Turn off microphone ducking".to_owned(),
+        ] {
+            assert!(names.contains(&expected.as_str()), "missing {expected}: {names:?}");
+        }
+        assert_fits("focus and ducking", width, &frame);
+
+        settings
+            .pinned_devices
+            .push(crate::audio::preferences::PinnedDevice { id: "gone".into(), name: "Bluetooth Headphones".into() });
+        let mut devices = device_snapshot();
+        devices.solo = None;
+        let (width, frame) = render_with(&devices, &mut settings, &[], true);
+        let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&format!("Pin {LONG_DEVICE} for output cycling").as_str()), "{names:?}");
+        assert!(names.contains(&"Unpin Bluetooth Headphones"), "a disconnected pin can be removed: {names:?}");
+        assert_fits("devices", width, &frame);
+    }
+
+    fn named_widgets(frame: &Frame) -> Vec<(&str, bool)> {
+        frame.widgets.iter().map(|w| (w.name.as_str(), w.disabled)).collect()
+    }
+
+    fn pin(key: &AppKey, name: &str) -> PinnedApp {
+        PinnedApp { key: key.clone(), name: name.into(), exe_path: None, aumid: None }
+    }
+
+    #[test]
+    fn custom_names_and_order_controls_are_named_disabled_at_the_ends_and_fit() {
+        use crate::audio::preferences::AppName;
+        let (player, other) = (AppKey::Exe(r"c:\apps\player.exe".into()), AppKey::Exe(r"c:\apps\other.exe".into()));
+        let player_name = "A Media Player With A Remarkably Long Display Name";
+        let mut snap = snapshot();
+        snap.apps.push(app(other.clone(), "Other"));
+        let mut settings =
+            Settings { pinned_apps: vec![pin(&player, player_name), pin(&other, "Other")], ..Default::default() };
+        settings.app_names.push(AppName { key: player.clone(), name: "Player".into() });
+
+        let (width, frame) = render_with(&snap, &mut settings, &[player.clone(), other.clone()], false);
+        let widgets = named_widgets(&frame);
+        let has = |name: &str, disabled: bool| widgets.contains(&(name, disabled));
+        assert!(
+            frame.widgets.iter().any(|w| w.name.starts_with("Player, ")),
+            "the custom name replaces the reported one: {widgets:?}"
+        );
+        assert!(!frame.widgets.iter().any(|w| w.name.starts_with(player_name) && w.name.contains("details")));
+        assert!(has(&format!("Display name for {player_name}"), false), "{widgets:?}");
+        assert!(has(&format!("Reset the name of {player_name}"), false), "a renamed app can be reset");
+        assert!(has("Reset the name of Other", true), "an app with no custom name has nothing to reset");
+        assert!(has("Move Player up", true) && has("Move Player down", false), "the first pin can only move down");
+        assert!(has("Move Other up", false) && has("Move Other down", true), "the last pin can only move up");
+        assert_fits("rename and order", width, &frame);
+    }
+
+    #[test]
+    fn typing_a_name_and_pressing_enter_renames_the_app_and_reset_clears_it() {
+        use egui::{Event, Key, Modifiers, PointerButton};
+        let player = AppKey::Exe(r"c:\apps\player.exe".into());
+        let player_name = "A Media Player With A Remarkably Long Display Name";
+        let snap = snapshot();
+        let harness = Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, meters) = (AudioHandle::detached(), Meters::default());
+        let (mut icons, mut state) = (IconService::detached(), MixerState::default());
+        let settings = std::cell::RefCell::new(Settings::default());
+        state.expanded.insert(player.clone());
+        let mut frame = |events: Vec<Event>| {
+            harness.run_with_events(width, 900.0, events, |ui| {
+                let mut cx = MixerCtx {
+                    audio: &audio,
+                    snap: &snap,
+                    meters: &meters,
+                    look: &look,
+                    settings: &mut settings.borrow_mut(),
+                    icons: &mut icons,
+                };
+                show(ui, &mut state, &mut cx);
+            })
+        };
+        let centre = |frame: &Frame, name: &str| {
+            frame.widgets.iter().find(|w| w.name == name).and_then(|w| w.bounds).expect(name).center()
+        };
+        let click = |pos: egui::Pos2, pressed: bool| {
+            vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE },
+            ]
+        };
+        let field = format!("Display name for {player_name}");
+
+        let first = frame(Vec::new());
+        let pos = centre(&first, &field);
+        frame(click(pos, true));
+        frame(click(pos, false));
+        frame(vec![Event::Text("My Player".into())]);
+        for pressed in [true, false] {
+            frame(vec![Event::Key {
+                key: Key::Enter,
+                physical_key: Some(Key::Enter),
+                pressed,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }]);
+        }
+        let after = frame(Vec::new());
+        assert!(after.widgets.iter().any(|w| w.name.starts_with("My Player, ")), "the row shows the new name");
+        assert_eq!(
+            settings.borrow().app_names,
+            vec![crate::audio::preferences::AppName { key: player.clone(), name: "My Player".into() }]
+        );
+
+        let reset = centre(&after, &format!("Reset the name of {player_name}"));
+        frame(click(reset, true));
+        frame(click(reset, false));
+        let cleared = frame(Vec::new());
+        assert!(settings.borrow().app_names.is_empty(), "Reset removes the custom name");
+        let names: Vec<&str> = cleared.widgets.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.iter().any(|n| n.starts_with(player_name)), "the row is back to the reported name: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("My Player")));
+    }
+
+    #[test]
+    fn pinned_output_cycle_buttons_are_named_and_fit_for_connected_and_missing_devices() {
+        let mut settings = Settings {
+            pinned_devices: vec![
+                crate::audio::preferences::PinnedDevice { id: "out".into(), name: LONG_DEVICE.into() },
+                crate::audio::preferences::PinnedDevice { id: "gone".into(), name: "Bluetooth Headphones".into() },
+            ],
+            ..Default::default()
+        };
+        let (width, frame) = render_with(&device_snapshot(), &mut settings, &[], true);
+        let widgets = named_widgets(&frame);
+        let has = |name: &str, disabled: bool| widgets.contains(&(name, disabled));
+        assert!(has(&format!("Cycle {LONG_DEVICE} earlier"), true), "the first pin can't go earlier: {widgets:?}");
+        assert!(has(&format!("Cycle {LONG_DEVICE} later"), false));
+        assert!(has("Cycle Bluetooth Headphones earlier", false), "{widgets:?}");
+        assert!(has("Cycle Bluetooth Headphones later", true), "the last pin can't go later");
+        assert_fits("cycle order", width, &frame);
     }
 
     fn device_snapshot() -> AudioSnapshot {
@@ -1158,7 +1941,7 @@ mod layout_tests {
                     .map(|i| {
                         let mut entry =
                             app(AppKey::Exe(format!(r"c:\apps\app_{i}.exe")), &format!("Application Number {i}"));
-                        entry.balance = Some(0.0);
+                        entry.balance = BalanceState::Uniform(0.0);
                         entry
                     })
                     .collect();

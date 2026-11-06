@@ -1,11 +1,14 @@
 # Architecture
 
-## Opt-in shortcuts, pins and presets
+## Opt-in shortcuts, pins and profiles
 
 `platform/hotkeys.rs` owns a blocking Win32 message thread. It registers only
-user-assigned chords and sends mute/relative-volume commands directly to the
-audio handle. It never touches the window: the show/hide shortcut is queued as
-a `HotkeyEvent` that the UI thread carries out in `App::logic`, so exit cannot
+user-assigned chords and sends audio commands (mute, relative volume, the next
+pinned output, an app's mute, volume or Solo) directly to the audio handle. A
+binding can carry a target: a pinned app (by `AppKey`) or a profile (by name).
+Validation allows one chord per action and target. It never touches the
+window: the show/hide and "activate profile" shortcuts are queued as
+`HotkeyEvent`s that the UI thread carries out in `App::logic`, so exit cannot
 deadlock on a cross-thread window call. Each binding is validated and
 registered on its own. An invalid, duplicate or Windows-rejected chord is
 reported as a failed binding (saved but not active, with the reason) while
@@ -21,10 +24,18 @@ conflict handling and real `SendInput` delivery stay in ignored desktop tests.
 identity/name/icon hints; a missing app becomes a disabled UI placeholder with
 no numeric value or meter. The `settings.json` schema is v4 and parses list
 items individually so one bad pin, preset or hotkey does not reset preferences.
+Fields added since (pinned outputs, wheel step, Solo, focus rules, microphone
+ducking, a profile's optional parts, a binding's target) are optional with
+defaults, so v4 files from 0.4 load unchanged and are written back without
+the new keys unless they are set.
 
-Presets are the explicit exception to never persisting volumes. Saving captures
-current app volume/mute only. Applying changes currently running sessions with
-the regular event context and one read after the command batch. The optional
+Profiles (stored as `presets`) are the explicit exception to never persisting
+volumes. Saving captures only the parts chosen: app volume/mute, each app's
+output device, the master level, and the default output and input. Applying a
+profile switches the default devices first, re-reads the sessions (Windows
+keeps app levels per device), then sets the master level, the app levels and
+the app devices, and reports what couldn't be applied (a disconnected device,
+an app not running). The optional
 automatic rule is conservative: it arms at configuration, tracks each running
 process instance by `(AppKey, pid, created)`, considers only a newly launched
 process instance with a new audio session, rejects observed external changes or
@@ -32,18 +43,113 @@ a nondefault initial state (anything other than `100%` and unmuted), and never
 repeats for the same process instance. Tracking by `(AppKey, pid, created)`
 avoids PID reuse and handles multi-instance launches or older processes that
 open audio late independently; no polling or startup-wide restore occurs.
-Live markers are never evicted: after 1,024 un-reclaimed instances the tracker
-latches saturated and skips unseen instances, and the latch stays set until the
-rules are re-armed or Glass Mixer restarts, even if confirmed exits later free
-slots. Instances skipped while saturated were never recorded, so clearing the
-latch automatically could requalify an untracked running process.
+Live markers are never evicted. A marker is released when its process's exit
+watch fires, and also by a reclaim pass that checks each marker with
+`OpenProcess` plus the creation time (catching exits that were never observed:
+no `SYNCHRONIZE` access, or sessions that ended before the process did, and PID
+reuse). Anything Windows won't confirm as exited counts as running. The pass
+runs during session refreshes, at most every 5 minutes, or every 10 seconds
+once 512 markers are held; there is no timer. If 1,024 live instances are
+tracked anyway, the tracker latches saturated and skips unseen instances. A
+reclaim pass that frees capacity clears the latch and moves the arming time to
+that moment, so no instance skipped while saturated (all started earlier) can
+qualify later; only launches after recovery do.
+
+## Solo, background lowering and microphone ducking
+
+`audio/attenuation.rs` holds a ledger of temporary reductions per session: the
+level before the first reduction and the level last written. Solo (every app
+but one, except System sounds), focus rules (an app while another app is in
+the foreground) and microphone ducking (chosen apps while the microphone is
+above a threshold) each say which reduction an app should have; the strongest
+applies. The engine reconciles in every snapshot pass, after the automatic
+preset rules. If a session's level differs from what was written, the user or
+another app changed it: the session is released and nothing is written to it
+again until all its reductions end. Reductions are undone before session sets
+are released (a removed device, an engine rebuild, exit). If Glass Mixer is
+killed while something is lowered, Windows keeps that level for the app.
+
+`platform/foreground.rs` runs only while a focus rule exists: an out-of-context
+`EVENT_SYSTEM_FOREGROUND` hook on its own message thread reads the window's
+process ID and sends it to the engine, which resolves the app. A change takes
+effect after focus has stayed put for 250 ms (`automation::FocusSettle`), so
+alt-tabbing doesn't bounce levels; Glass Mixer's own windows are ignored.
+Microphone ducking reads the default input's peak at 20 Hz only while it is on;
+a gate needs speech for the attack time to start and silence for the release
+time to end. The capture meter reports a level only while some app is using
+the microphone.
+
+## Per-app devices
+
+`audio/app_routing.rs` binds the undocumented WinRT factory
+`Windows.Media.Internal.AudioPolicyConfig` that Windows Settings uses for "App
+volume and device preferences". Its interface ID changed in Windows 10 21H2;
+both are tried at runtime, with the same explicit method layout (verified
+against EarTrumpet's binding, and by a test that checks the vtable slots). A
+preference is set for every process of an app; Windows stores it for the app,
+so later launches start on that device (verified on this machine). A null
+device resets one app; `ClearAllPersistedApplicationDefaultEndpoints` resets
+every app, so the UI offers it only as a separate, confirmed action. Running
+streams move only if the app follows the default device; apps that opened a
+specific device switch when they restart playback, and the row says so.
+
+The engine opens a session set for every active output, the default's first,
+so an app playing elsewhere stays visible and controllable. Sessions on other
+outputs are listed only while playing or when their app has none on the
+default output; System sounds is listed for the default output only.
+
+## Personalization and backup
+
+A name the user gives an app is stored per stable app identity (`app_names`, one
+per `AppKey`, 60 characters, 128 apps; transient apps known only by process ID
+can't be named). It is resolved before the name Windows reports and the session's
+name, and applies to the rows, the filter, the Solo notice, offline pinned rows
+and shortcut labels. It is applied when the field loses focus; an empty field or
+Reset restores the reported name. Pinned apps are listed in their saved order, so
+"Move up" and "Move down" swap neighbours in that list; the pinned outputs the
+cycle shortcut uses are likewise cycled in their saved order, and connected and
+missing pins can both be moved.
+
+`transfer.rs` exports the preferences as versioned JSON (`glass_mixer_export`
+and the settings, without the window position and size, which belong to the PC)
+and checks imports before anything changes. A file is refused, with a reason, if
+it is not text or JSON, over 1 MB, not an export or a settings file, or from a
+newer export format or settings version. It is read leniently, as every settings
+file is, but anything it could not read is listed (a list with unreadable
+entries, a value that fell back to its default) instead of being replaced
+silently. The Settings page shows what the file holds and the notes, and asks
+for confirmation. Confirming first saves the current settings to
+`exports/glass-mixer-before-import-<date>.json` (the newest 5 are kept); if that
+fails, nothing is imported. The import is applied at the start of the next frame,
+so the usual change handling runs (shortcuts, profiles, fonts, automation
+rules), and the window position of this PC is kept.
+
+## Diagnostic report
+
+`diagnostics.rs` builds a plain-text report from the app's own state: versions,
+the settings schema version, the renderer, the Windows build and appearance
+flags, the audio service status, device and session counts, device read errors,
+failed shortcuts, a settings summary (counts and choices), the last 30 warnings
+and errors the user was shown, and the last 80 log lines. It never contains
+audio, files or a name: app, device and profile names (from the snapshot, pins,
+rules, profiles and shortcut targets) and the user's profile folder, in plain
+text and in the escaped form the log uses, are replaced with `<app>`,
+`<device>`, `<profile>` and `%USERPROFILE%` before the text is written or
+copied. Names shorter than three characters, or inside a placeholder, are left
+alone so the replacement can't garble text. "Save diagnostic report" writes it
+to `diagnostics\` beside the log (the newest 10 are kept) and opens the folder; "Copy
+report" puts it on the clipboard. Nothing is sent anywhere, and no dependency or
+file dialog is involved.
 
 ## Additional endpoints and sound properties
 
+Device added, removed, state and property notifications are coalesced: the
+first one schedules a re-enumeration 50 ms later and the rest of the burst joins
+it. Default-device changes refresh immediately, and also cover anything pending.
 Opening Devices sends `LoadDevices`. The engine lazily opens non-default
 endpoints and owns each volume callback until the device disappears or the
 engine rebuilds. Device commands use endpoint IDs; fatal read errors rebuild
-the engine. The app session list remains scoped to the default output.
+the engine.
 Properties are read on structural/property notifications, never by a new timer.
 `audio/properties.rs` exposes read-only formats and qualified availability;
 unverified setters are replaced by Windows Settings shortcuts.
@@ -71,13 +177,16 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
         │ Msg::* (send only)
  Core Audio callbacks (service threads) · process-exit waits (thread pool) · power notifications
 
- icon-resolver thread (COM STA): shell image extraction, cached per (app, px)
+ icon-resolver thread (COM STA): shell image extraction, LRU per (file identity, px)
 ```
 
 | Module | Responsibility |
 | --- | --- |
-| `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping, balance math, tooltip text. |
-| `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, launch at login (registry), DWM backdrop, system preferences, fonts, and app icon resolution. |
+| `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping (an app's balance is `Uniform`, `Mixed` when its stereo sessions disagree, or `Unavailable`), balance math, tooltip text. |
+| `audio/attenuation.rs`, `automation.rs`, `app_routing.rs` | The attenuation ledger shared by Solo, foreground rules and microphone ducking (a level the user changes is never overwritten), those two automatic rules, and per-app output routing through the undocumented `AudioPolicyConfig` factory. |
+| `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, exit requests (`--exit`), launch at login (registry), DWM backdrop, system preferences, the foreground-window hook (`foreground.rs`), the embedded Polaris typeface (`fonts.rs`), and app icon resolution. |
+| `diagnostics.rs` | The diagnostic report: versions, states, counts and recent warnings, with app, device and profile names replaced; made locally, sent nowhere. |
+| `transfer.rs` | Settings export and import: versioned JSON, validated before anything changes, reporting what cannot be read. |
 | `ui/` | The design system (`theme.rs`), custom widgets (`widgets.rs`), the mixer view and the settings view. |
 | `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown top-level fields, atomic migration backups, and atomic writes. |
 | `app.rs` | Lifecycle. It wires everything together and owns the single shutdown path. |
@@ -93,6 +202,8 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Per-app volume, mute, balance | `ISimpleAudioVolume`, `IChannelAudioVolume` |
 | Peak meters | `IAudioMeterInformation` (polled at about 30 Hz, only while the window is visible; never with a software renderer, where each repaint is rasterized by the CPU) |
 | Default-device switching | Undocumented `IPolicyConfig` (`CPolicyConfigClient`) |
+| Per-app devices | Undocumented `Windows.Media.Internal.AudioPolicyConfig` factory (`RoGetActivationFactory`) |
+| Foreground app | `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)` |
 | App identity | `QueryFullProcessImageNameW`, `GetApplicationUserModelId`, version-resource `FileDescription` |
 | Process exit | `RegisterWaitForSingleObject` on the process handle (no polling) |
 | Icons | `IAudioSessionControl::GetIconPath` → AppsFolder shell item (packaged apps) → `IShellItemImageFactory` on the exe → generic tile |
@@ -144,11 +255,15 @@ unregisters it: `Engine`, `Endpoint`, `SessionSet`, `Session`,
   service unavailable" in the UI.
 - Resume from sleep schedules a rebuild after 1.5 s.
 - Transient errors retry only the structural refresh.
+- A session that can't be read while enumerating is skipped and logged;
+  the other sessions still refresh.
 
 **Idle cost.** While hidden, the engine thread blocks on its channel and
 the UI thread gets no frames, so CPU use is 0 ms over 10 s. While visible,
-it re-checks Windows theme and transparency every 2 s, and polls meters
-only while audio is playing.
+it re-checks Windows theme and transparency every 2 s and polls meters at
+about 30 Hz. A poll reuses its buffers, so silence or a steady level costs a
+few `GetPeakValue` calls and no allocation; only a change of more than 1 %
+publishes new levels (shared as an `Arc`) and repaints.
 
 **Toast lifetime follows visibility.** An in-window notice's countdown runs
 only while the window is shown. Hiding the window freezes the remaining time,
@@ -167,9 +282,31 @@ egui logical points; restoration tries each monitor's DPI and centers the
 window if more than one monitor could match. The saved size is retained only
 when the position can be validated on a monitor.
 
-**Icon caches.** Both UI textures and worker results are pruned for apps that
-disappear and pixel sizes replaced by a DPI change. Failed icon lookups can
-be retried on Refresh or when an app returns.
+**Typefaces.** `platform/fonts.rs` builds the egui font families from the
+Typeface setting. Salted Flutters Polaris (Regular for text, Semibold for names,
+labels and headings) is embedded with `include_bytes!` and `FontData::from_static`,
+so it needs no installation, no file at run time and no extra memory copy. Each
+chain is Polaris, then Segoe UI of the same weight when Windows has it, then
+egui's built-in fonts, so a glyph Polaris lacks is drawn by the next font and
+nothing disappears. The icon font (Segoe Fluent Icons or Segoe MDL2 Assets) is a
+separate family. The Windows typeface leaves Polaris out entirely. Changing the
+setting reinstalls the fonts once; there is no restart. The font's license
+requires that the files stay unmodified, that its metadata line stays in every
+style, and that `LICENSE.txt` accompanies redistribution: a test checks the first
+two, and the portable ZIP and the installer both carry `fonts\LICENSE.txt`.
+
+**Icon caches.** The worker keeps up to 96 extracted icons in an LRU keyed by
+what they came from: the executable's lower-cased path, size and modification
+time, the session's icon resource, the AUMID, and the pixel size. A relaunch
+of the same binary, or another app running it, reuses the extraction; an
+updated binary has a new size or time, so it is extracted again. Failures are
+never cached. Requests go through a queue of 16; when it is full the request
+is dropped without blocking the UI and made again on a later frame. The UI
+keeps textures for live apps plus the 32 most recently seen apps that left,
+and uploads a result only when its pixels differ from the texture it already
+has. Textures for an old pixel size (after a DPI change) and failed lookups of
+apps that left are dropped. Failed lookups can be retried on Refresh or when
+an app returns.
 
 **Glass verification.** `examples/glass_spike.rs` is the minimal test case
 that confirmed DWM backdrops render behind a transparent eframe/glow window.
@@ -178,9 +315,10 @@ The fallback uses a solid surface to avoid presenting a broken backdrop on
 machines where OpenGL cannot initialize.
 
 **Renderer fallback.** `main.rs` runs eframe with glow first. If that fails,
-it runs eframe again with wgpu, restricted to Direct3D 12 and Vulkan
-(`WGPU_BACKEND` can still override this for diagnostics). wgpu's OpenGL
-backend is deliberately excluded. It cannot help once OpenGL has failed, and
+it runs eframe again with wgpu, restricted to Direct3D 12 and Vulkan.
+`WGPU_BACKEND` can narrow that choice for diagnostics. wgpu is compiled with
+only those two backends; its OpenGL ES, WebGPU and Metal backends are not
+built. wgpu's OpenGL backend is deliberately excluded. It cannot help once OpenGL has failed, and
 it caused an intermittent exit deadlock: its instance owns a "wgpu-hal WGL
 Instance Thread" that loads the vendor OpenGL driver. When that thread exited
 during teardown, the NVIDIA 341.92 driver's `DllMain` (under the loader lock)

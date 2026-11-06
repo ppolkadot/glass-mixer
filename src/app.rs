@@ -5,6 +5,7 @@ use crate::audio::{AudioHandle, NoticeLevel};
 use crate::platform::backdrop::{self, Applied, Support};
 use crate::platform::exit_request::ExitListener;
 use crate::platform::fonts;
+use crate::platform::foreground::ForegroundWatch;
 use crate::platform::hotkeys::{HotkeyEditor, HotkeyEvent, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
@@ -89,7 +90,9 @@ impl ToastExpiry {
 
 /// Logs the renderer and graphics adapter in use. Returns whether frames are
 /// rendered in software (WARP, the "Microsoft Basic Render Driver").
-fn log_renderer(cc: &eframe::CreationContext<'_>) -> bool {
+/// Logs how the window is drawn; returns whether that is software rendering,
+/// and a description for the diagnostic report.
+fn log_renderer(cc: &eframe::CreationContext<'_>) -> (bool, String) {
     if let Some(state) = &cc.wgpu_render_state {
         let info = state.adapter.get_info();
         log::info!(
@@ -108,12 +111,12 @@ fn log_renderer(cc: &eframe::CreationContext<'_>) -> bool {
         if software {
             log::info!("software rendering: level meters are paused");
         }
-        software
+        (software, format!("wgpu fallback, {:?} on \"{}\" ({:?})", info.backend, info.name, info.device_type))
     } else {
         if cc.gl.is_some() {
             log::info!("renderer: OpenGL (glow)");
         }
-        false
+        (false, "OpenGL (glow)".to_owned())
     }
 }
 
@@ -174,6 +177,12 @@ pub struct MixerApp {
     mixer: mixer::MixerState,
     login: LoginState,
     toasts: Vec<Toast>,
+    confirm_route_reset: bool,
+    foreground: Option<ForegroundWatch>,
+    transfer_ui: settings_view::TransferUi,
+    /// Settings from a confirmed import, applied at the start of the next frame so
+    /// every part of the app picks up the change the way it does for any setting.
+    import_to_apply: Option<Settings>,
     exiting: bool,
     has_icon_font: bool,
     look: Look,
@@ -184,15 +193,18 @@ pub struct MixerApp {
     force_opaque: bool,
     /// Frames are drawn by the CPU (no graphics acceleration).
     software_renderer: bool,
+    renderer: String,
+    /// Warnings and errors shown to the user, for the diagnostic report.
+    recent_notices: std::collections::VecDeque<crate::diagnostics::RecentNotice>,
     #[cfg(debug_assertions)]
     dev_exit_at: Option<Instant>,
 }
 
 impl MixerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions) -> Self {
-        let software_renderer = log_renderer(cc);
+        let (software_renderer, renderer) = log_renderer(cc);
         let ctx = cc.egui_ctx.clone();
-        let has_icon_font = fonts::install(&ctx);
+        let has_icon_font = fonts::install(&ctx, opts.settings.typeface);
         let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
             RawWindowHandle::Win32(w) => Some(Hwnd(w.hwnd.get())),
             _ => None,
@@ -205,6 +217,7 @@ impl MixerApp {
 
         let audio = AudioHandle::start();
         audio.send(crate::audio::Command::SetPresetRules(opts.settings.presets.clone()));
+        send_audio_preferences(&audio, &opts.settings);
         {
             let ctx = ctx.clone();
             audio.add_listener(move || ctx.request_repaint());
@@ -311,6 +324,10 @@ impl MixerApp {
             mixer: mixer::MixerState::default(),
             login: startup::state(),
             toasts,
+            confirm_route_reset: false,
+            foreground: None,
+            transfer_ui: settings_view::TransferUi::default(),
+            import_to_apply: None,
             exiting: false,
             has_icon_font,
             look,
@@ -319,6 +336,8 @@ impl MixerApp {
             pending_start_hide: start_hidden,
             force_opaque: opts.force_opaque,
             software_renderer,
+            renderer,
+            recent_notices: std::collections::VecDeque::new(),
             #[cfg(debug_assertions)]
             dev_exit_at: std::env::var_os("GLASS_MIXER_DEV_PROFILE")
                 .and_then(|_| std::env::var("GLASS_MIXER_DEV_EXIT_AFTER_MS").ok())
@@ -329,6 +348,7 @@ impl MixerApp {
             app.toast(NoticeLevel::Warning, err);
         }
         app.refresh_look(&ctx);
+        app.update_foreground_watch();
         app
     }
 
@@ -418,11 +438,27 @@ impl MixerApp {
     }
 
     fn toast(&mut self, level: NoticeLevel, text: String) {
+        self.notify(crate::audio::Notice { level, text, announce: false });
+    }
+
+    /// Shows a notice in the window, and in the tray while hidden.
+    fn notify(&mut self, notice: crate::audio::Notice) {
+        let crate::audio::Notice { level, text, announce } = notice;
+        if level != NoticeLevel::Info {
+            self.recent_notices.push_back(crate::diagnostics::RecentNotice { level, text: text.clone() });
+            while self.recent_notices.len() > crate::diagnostics::MAX_NOTICES {
+                self.recent_notices.pop_front();
+            }
+        }
         if self.settings.hidden_notifications
             && self.hwnd.is_some_and(|h| !window::is_shown(h))
             && let Some(tray) = self.tray.as_mut()
         {
-            tray.notify(level, &text);
+            if announce {
+                tray.announce(&text);
+            } else {
+                tray.notify(level, &text);
+            }
         }
         let secs = match level {
             NoticeLevel::Info => 4,
@@ -458,6 +494,136 @@ impl MixerApp {
         }
     }
 
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs())
+    }
+
+    /// Writes the preferences to a file in the exports folder and shows the folder.
+    fn export_settings(&mut self) {
+        let dir = crate::transfer::exports_dir(self.store.path());
+        let text = crate::transfer::export(&self.settings, env!("CARGO_PKG_VERSION"));
+        match crate::transfer::save(&dir, crate::transfer::EXPORT_PREFIX, Self::unix_now(), &text) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Err(e) = window::open_folder(&dir) {
+                    log::warn!("couldn't open the exports folder: {e}");
+                }
+                self.toast(NoticeLevel::Info, format!("Settings exported: {name}"));
+            }
+            Err(e) => self.toast(NoticeLevel::Error, format!("Couldn't export the settings: {e}")),
+        }
+    }
+
+    /// Reads and checks the file named in the Settings page; shows what it holds.
+    fn check_import(&mut self) {
+        let path = std::path::PathBuf::from(self.transfer_ui.path.trim().trim_matches('"'));
+        self.transfer_ui.error = None;
+        self.transfer_ui.candidate = None;
+        match crate::transfer::read_import_file(&path) {
+            Ok(import) => {
+                let mut lines = crate::transfer::summary(&import.settings);
+                lines.extend(import.notes.iter().map(|note| format!("Not read: {note}")));
+                self.transfer_ui.candidate = Some((import.settings, lines));
+            }
+            Err(e) => self.transfer_ui.error = Some(e),
+        }
+    }
+
+    /// Confirmed: backs up the current settings, then queues the import. Without a
+    /// backup, nothing is replaced.
+    fn confirm_import(&mut self) {
+        let Some((imported, _)) = self.transfer_ui.candidate.clone() else { return };
+        let dir = crate::transfer::exports_dir(self.store.path());
+        let backup = crate::transfer::export(&self.settings, env!("CARGO_PKG_VERSION"));
+        match crate::transfer::save(&dir, crate::transfer::BACKUP_PREFIX, Self::unix_now(), &backup) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.import_to_apply = Some(crate::transfer::merge_keeping_this_pc(&self.settings, imported));
+                self.transfer_ui.candidate = None;
+                self.transfer_ui.path.clear();
+                self.toast(
+                    NoticeLevel::Info,
+                    format!("Settings imported. Your previous settings were saved as {name}."),
+                );
+            }
+            Err(e) => self.toast(
+                NoticeLevel::Error,
+                format!("Couldn't save a backup of your current settings, so nothing was imported: {e}"),
+            ),
+        }
+    }
+
+    fn diagnostic_report(&self) -> String {
+        let snapshot = self.audio.snapshot();
+        let hotkeys = self.hotkeys.as_ref().map(HotkeyService::status);
+        let notices: Vec<_> = self.recent_notices.iter().cloned().collect();
+        let log_tail = crate::diagnostics::read_log_tail(crate::diagnostics::log_lines());
+        let unix_seconds =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        crate::diagnostics::build(&crate::diagnostics::Inputs {
+            settings: &self.settings,
+            snapshot: &snapshot,
+            prefs: &self.prefs,
+            renderer: &self.renderer,
+            software_renderer: self.software_renderer,
+            hotkeys: hotkeys.as_ref(),
+            notices: &notices,
+            log_tail: &log_tail,
+            unix_seconds,
+        })
+    }
+
+    /// Writes the diagnostic report beside the logs and shows the folder.
+    fn save_diagnostic_report(&mut self) {
+        let Some(dir) = crate::diagnostics::reports_dir() else {
+            return self.toast(NoticeLevel::Error, "Couldn't find a folder for the diagnostic report.".into());
+        };
+        let report = self.diagnostic_report();
+        let unix_seconds =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        match crate::diagnostics::save(&report, &dir, unix_seconds) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Err(e) = window::open_folder(&dir) {
+                    log::warn!("couldn't open the diagnostics folder: {e}");
+                }
+                self.toast(NoticeLevel::Info, format!("Diagnostic report saved: {name}"));
+            }
+            Err(e) => self.toast(NoticeLevel::Error, format!("Couldn't save the diagnostic report: {e}")),
+        }
+    }
+
+    /// The foreground watcher runs only while a focus rule exists.
+    fn update_foreground_watch(&mut self) {
+        let wanted = !self.settings.focus_rules.is_empty() && !self.shut_down;
+        if wanted == self.foreground.is_some() {
+            return;
+        }
+        self.foreground = if wanted {
+            let audio = self.audio.clone();
+            match ForegroundWatch::start(move |pid| audio.send(crate::audio::Command::ForegroundChanged { pid })) {
+                Ok(watch) => Some(watch),
+                Err(e) => {
+                    self.toast(NoticeLevel::Error, format!("{e} Background lowering is unavailable."));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    }
+
+    /// Applies a saved profile by name (from its shortcut).
+    fn activate_profile(&mut self, name: &str) {
+        match self.settings.presets.iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
+            Some(profile) => self.audio.send(crate::audio::Command::ActivateProfile(profile.clone())),
+            None => self.toast(
+                NoticeLevel::Warning,
+                format!("The profile \"{name}\" no longer exists, so its shortcut does nothing."),
+            ),
+        }
+    }
+
     fn request_exit(&mut self, ctx: &egui::Context) {
         log::info!("exit requested");
         self.exiting = true;
@@ -479,6 +645,7 @@ impl MixerApp {
         }
         self.tray = None;
         self.hotkeys = None;
+        self.foreground = None;
         self.audio.shutdown();
         self.icons.shutdown();
         log::info!("shutdown complete");
@@ -555,6 +722,31 @@ impl MixerApp {
             self.toasts.remove(i);
         }
     }
+}
+
+/// Preferences the engine acts on by itself (shortcuts reach it directly).
+fn send_audio_preferences(audio: &AudioHandle, settings: &Settings) {
+    use crate::audio::{Command, MicDucking, attenuation::Reduction, automation::MicGateConfig};
+    audio.send(Command::SetPinnedOutputs(settings.pinned_devices.iter().map(|d| d.id.clone()).collect()));
+    audio.send(Command::SetSoloOptions { factor: settings.solo.factor(), mute: settings.solo.mute });
+    let keep = |percent: u8| f32::from(percent.min(90)) / 100.0;
+    audio.send(Command::SetFocusRules(
+        settings
+            .focus_rules
+            .iter()
+            .map(|rule| (rule.key.clone(), Reduction { factor: keep(rule.keep_percent), mute: rule.mute }))
+            .collect(),
+    ));
+    let mic = &settings.mic_ducking;
+    audio.send(Command::SetMicDucking((mic.enabled && !mic.targets.is_empty()).then(|| MicDucking {
+        gate: MicGateConfig {
+            threshold: f32::from(mic.threshold_percent.clamp(1, 60)) / 100.0,
+            attack: Duration::from_millis(u64::from(mic.attack_ms.clamp(20, 2000))),
+            release: Duration::from_millis(u64::from(mic.release_ms.clamp(100, 5000))),
+        },
+        reduction: Reduction { factor: keep(mic.keep_percent), mute: false },
+        targets: mic.targets.clone(),
+    })));
 }
 
 fn record_window_geometry(
@@ -641,6 +833,7 @@ impl eframe::App for MixerApp {
         for event in hotkey_events {
             match event {
                 HotkeyEvent::ToggleWindow => self.toggle_window(),
+                HotkeyEvent::ActivateProfile(name) => self.activate_profile(&name),
             }
         }
 
@@ -659,7 +852,7 @@ impl eframe::App for MixerApp {
             tray.update(&snapshot);
         }
         for n in self.audio.take_notices() {
-            self.toast(n.level, n.text);
+            self.notify(n);
         }
         if let Some(service) = &self.hotkeys {
             let errors = service.status().messages();
@@ -705,7 +898,15 @@ impl eframe::App for MixerApp {
         let snapshot = self.audio.snapshot();
         let meters = self.audio.meters();
         let before = self.settings.clone();
+        if let Some(imported) = self.import_to_apply.take() {
+            self.settings = imported;
+            self.mixer.forget_drafts();
+            self.hotkey_editor = HotkeyEditor::default();
+            ui.ctx().request_repaint();
+        }
         let mut errors = Vec::new();
+        let (mut save_report, mut copy_report) = (false, false);
+        let (mut export_now, mut check_now, mut import_now) = (false, false, false);
 
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
@@ -757,6 +958,9 @@ impl eframe::App for MixerApp {
                         support: self.support,
                         software_renderer: self.software_renderer,
                         can_switch_default: snapshot.can_switch_default,
+                        can_route_apps: snapshot.can_route_apps,
+                        confirm_route_reset: &mut self.confirm_route_reset,
+                        transfer: &mut self.transfer_ui,
                         audio: &self.audio,
                         icons: &mut self.icons,
                         settings_path: self.store.path(),
@@ -764,8 +968,14 @@ impl eframe::App for MixerApp {
                         hotkey_editor: &mut self.hotkey_editor,
                         errors: &mut errors,
                     };
-                    if let settings_view::Outcome::Back = settings_view::show(ui, &mut cx) {
-                        self.view = View::Mixer;
+                    match settings_view::show(ui, &mut cx) {
+                        settings_view::Outcome::Back => self.view = View::Mixer,
+                        settings_view::Outcome::SaveDiagnostics => save_report = true,
+                        settings_view::Outcome::CopyDiagnostics => copy_report = true,
+                        settings_view::Outcome::ExportSettings => export_now = true,
+                        settings_view::Outcome::CheckImport => check_now = true,
+                        settings_view::Outcome::ApplyImport => import_now = true,
+                        settings_view::Outcome::None => {}
                     }
                 }
                 View::Presets => crate::ui::presets::show(
@@ -783,6 +993,17 @@ impl eframe::App for MixerApp {
             if self.settings.presets != before.presets {
                 self.audio.send(crate::audio::Command::SetPresetRules(self.settings.presets.clone()));
             }
+            if self.settings.typeface != before.typeface {
+                fonts::install(ui.ctx(), self.settings.typeface);
+            }
+            if self.settings.pinned_devices != before.pinned_devices
+                || self.settings.solo != before.solo
+                || self.settings.focus_rules != before.focus_rules
+                || self.settings.mic_ducking != before.mic_ducking
+            {
+                send_audio_preferences(&self.audio, &self.settings);
+                self.update_foreground_watch();
+            }
             if (self.settings.hotkeys != before.hotkeys || self.settings.hotkey_step != before.hotkey_step)
                 && let Some(service) = &self.hotkeys
                 && let Err(e) = service.configure(&self.settings.hotkeys, self.settings.hotkey_step)
@@ -796,6 +1017,22 @@ impl eframe::App for MixerApp {
         }
         for e in errors {
             self.toast(NoticeLevel::Error, e);
+        }
+        if save_report {
+            self.save_diagnostic_report();
+        }
+        if copy_report {
+            ui.ctx().copy_text(self.diagnostic_report());
+            self.toast(NoticeLevel::Info, "Diagnostic report copied.".into());
+        }
+        if export_now {
+            self.export_settings();
+        }
+        if check_now {
+            self.check_import();
+        }
+        if import_now {
+            self.confirm_import();
         }
         self.draw_toasts(ui);
     }

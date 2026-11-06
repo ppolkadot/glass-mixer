@@ -1,6 +1,307 @@
 # Testing
 
-## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `41f656d`)
+> **Commit hashes.** On 2026-11-06 the repository history was rewritten to remove
+> co-author lines from commit messages. File contents did not change, but every commit
+> has a new hash, and the tags `v0.1.0`, `v0.3.0` and `v0.4.0` point to the new commits.
+> The documents cite the new hashes. GitHub Actions runs from before then still show the
+> old ones: `107a305` is now `ea9c816`, `e47b328` is `209e563`, `518cd33` is `2561aee`
+> and `41f656d` is `86fdb9b`.
+
+## Stage 6: release readiness (2026-11-06, `experiments`)
+
+Machine: Windows 11 build 26200, HDMI output active, one monitor at 100 %. See
+[VALIDATION_MATRIX.md](VALIDATION_MATRIX.md) for what this machine does and does
+not cover.
+
+- **Gate**, with every step's exit status checked: `cargo fmt --check`, `cargo
+  clippy --locked --all-targets -- -D warnings`, `cargo test --locked` (194 library
+  tests passed, 3 ignored, plus the binary and source-encoding tests), a release
+  build (23,137,280 bytes), the 12 real-device integration tests, and
+  `scripts/lifecycle.ps1` with OpenGL (hidden CPU 16 ms over 1 s, 47.7 MB private)
+  and `-Renderer wgpu` (109 ms on WARP, 285.8 MB private).
+- **Packaging:** `scripts/package.ps1` ran end to end: version check, release build,
+  notices, portable ZIP, installer, checksums, and `verify-package.ps1`, which
+  passed. Both packages are reported as **unsigned**: no certificate exists, so the
+  signing path has not been exercised. Negative tests showed the verifiers fail on a
+  wrong version, a missing file, a tampered checksum and `-RequireSigned` without a
+  signature.
+- **Installer lifecycle** (`scripts/installer-smoke.ps1`): a variant installer with
+  its own identity and the debug build, so the real installation could not be touched.
+  The final run passed all 32 checks: fresh install, upgrade over a running copy
+  (closed cleanly, one uninstall entry, new files), uninstall of a running copy
+  (asked to exit and did, everything removed, nothing left running), and the real
+  installation (launch-at-login, uninstall entry, executable hash, files, shortcuts,
+  processes) unchanged. An earlier run failed one check: the upgrade closed the copy
+  by terminating it. The installer now runs `--exit` from the installed folder before
+  replacing files, and the check passes. Not tested: upgrading from a 0.1.0 to 0.3.0
+  installation (those versions do not know `--exit`), and the installer built from the
+  release executable (the smoke test uses the debug build).
+- **Performance, 0.4.0 (`86fdb9b`) against this branch**, release builds in scratch
+  copies with their own settings folders and single-instance name, three runs each,
+  10 s of CPU after 4 s of settling:
+
+  | | 0.4.0 | 0.5.0 candidate |
+  | --- | --- | --- |
+  | Executable | 15.12 MB | 22.07 MB (the Polaris typeface is about 7 MB of it) |
+  | CPU, window visible, meters on (median) | 47 ms | 62 ms |
+  | CPU, hidden (median) | 0 ms | 0 ms |
+  | Working set, visible (median) | 68 MB | 69.7 MB |
+  | Working set, hidden (median) | 67.3 MB | 69.2 MB |
+  | Private memory, visible (median) | 50.5 MB | 50.6 MB |
+
+  The CPU difference is inside the spread of the runs (0 to 78 ms over 10 s). Time to
+  the first window handle was 552 ms and 389 ms on the cold first runs and about
+  30 ms afterwards; that is the first top-level window, not the first painted frame,
+  so it is not a startup benchmark. No clean-build times were measured.
+- **Not run:** the GitHub Actions workflows (`ci.yml`, `release.yml`) have not run on
+  GitHub; Windows 10; other hardware; the matrix in [VALIDATION_MATRIX.md](VALIDATION_MATRIX.md).
+
+## Stage 5, part 2: app names, ordering, and settings export and import (2026-11-06, `experiments`)
+
+Machine: Windows 11 build 26200, with only the HDMI output active.
+
+- Gate, with every step's exit status checked: `cargo fmt --check`, `cargo clippy
+  --locked --all-targets -- -D warnings`, `cargo test --locked` (194 library tests
+  passed, 3 ignored; 3 binary tests and the source encoding test passed; 12
+  hardware tests ignored), a release build (23,137,280 bytes), the 12 real-device
+  integration tests, and `scripts/lifecycle.ps1` with OpenGL (hidden CPU 31 ms
+  over 1 s) and `-Renderer wgpu` (328 ms on WARP, within its usual spread). The
+  first full run failed once, on a clippy style rule in one of the new tests; it
+  was fixed and the whole gate rerun.
+- New tests (17): custom names being trimmed, unique per app, limited to stable
+  apps and bounded; setting, changing and clearing a name and whether anything
+  changed; moving an item one place and refusing to move past the ends; the
+  rows showing the custom name, the rename and order controls being named and
+  disabled at the ends of the list, and fitting at minimum width; typing a name
+  and pressing Enter renaming the app, and Reset restoring the reported name;
+  the cycle-order buttons for connected and missing outputs; and in
+  `transfer.rs`: an export being versioned and free of the window position, an
+  export importing back unchanged, plain settings files and UTF-8 BOM and UTF-16
+  files being accepted, ten kinds of file being refused with a reason (empty,
+  not JSON, an array, no marker, no settings, no version, bad format number, not
+  text, over 1 MB), newer export formats and settings versions being refused,
+  unreadable values and list entries being reported rather than replaced
+  silently, the window position of this PC being kept, only the automatic
+  backups being pruned, and a path that is missing, a folder or too large being
+  refused before it is read; and the Backup section's buttons being named,
+  fitting, and each producing its outcome (Cancel discarding a checked import).
+- End to end with the real app in an isolated profile, driven by UI Automation and
+  guarded real keystrokes (the script refuses to type unless the Glass Mixer
+  window is in front and the path field has keyboard focus): Export wrote a
+  versioned file without a window position; a junk file was refused with
+  "isn't valid JSON" and nothing was offered for import; a good file was checked
+  and described ("1 renamed app", and a note that `hotkey_step` wasn't valid); on
+  confirmation a backup of the previous settings was written first, the saved
+  `settings.json` then held the imported theme, wheel step and renamed app, the
+  invalid `hotkey_step` 99 had become the default 5, and the import panel closed.
+- Not run: typing a custom name in the real window (the UI test types and presses
+  Enter in the real widget; the end-to-end run covered export and import only),
+  importing a file made on another PC, the new controls at 125, 150 and 200 %
+  scaling, and Windows 10. Per-app routing was not exercised because only one
+  output was active.
+
+## Stage 5, part 1: Polaris typeface and diagnostic report (2026-11-06, `experiments`)
+
+The interface typeface (Salted Flutters Polaris Regular and Semibold, embedded) and
+the diagnostic report (Settings > About). Machine: Windows 11 build 26200; only the
+HDMI output was active, because the headphones and microphone were unplugged that
+day.
+
+- Gate, with every step's exit status checked: `cargo fmt
+  --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test
+  --locked` (177 library tests passed, 3 ignored; 3 binary tests and the source
+  encoding test passed; 12 hardware tests ignored), a release build (22,979,072
+  bytes, 7.24 MB more than the 15,737,856 before the fonts), the 12 real-device
+  integration tests, and `scripts/lifecycle.ps1` with OpenGL (hidden CPU 0 ms
+  over 1 s) and `-Renderer wgpu` (188 ms on WARP, within its usual spread).
+- The first full run of this gate failed twice, and both were fixed: a `rustfmt`
+  difference, and `focused_offscreen_controls_scroll_into_the_settings_viewport`.
+  The latter judged the first Shift+Tab while the previous step's mouse-wheel
+  smooth-scroll was still animating (the harness advances only 10 ms per pass),
+  so the control near the page end looked off-screen. The test now lets that
+  animation finish first. Its Tab and Shift+Tab budgets rose from 45 to 90 key
+  presses because the page has grown to dozens more controls.
+- Font checks with fontTools on the files as bundled: Regular and Semibold are CFF
+  OpenType, `fsType` 0 (no embedding restriction), and carry the metadata line
+  "Salted Flutters Polaris - Created by ppoolar". They cover Portuguese accents,
+  `R$ € £ ¥ ¢`, typographic punctuation, arrows and `✓`; the only glyph missing
+  from the probe set was `✕` (U+2715), which the interface doesn't draw. Average
+  advance 0.544 em for Regular against 0.540 for Segoe UI, so layouts barely move;
+  line height is 1.19 em against 1.33. Finding for the font's author: in
+  `SaltedFluttersPolaris-Bold.otf`, `usWeightClass` is 600, the same as Semibold
+  (it should be 700). It has no effect on the embedded use here.
+- New tests: the family chains (Polaris, then Segoe UI, then egui's built-in
+  fonts; the icon font separate; the Windows typeface leaving Polaris out;
+  missing system fonts), the embedded files being OpenType and keeping the notice
+  and the unmodified license, every glyph of a Portuguese and symbols sample being
+  covered in both the regular and semibold chains, and the two typefaces really
+  laying out differently (so Polaris is actually used); the setting's default and
+  its recovery from a bad value; in `diagnostics.rs`: UTC dates (leap days
+  included), redaction (longest name first, case, plain and escaped paths, short
+  and placeholder-like names left alone), a report holding the facts and none of
+  the private names, unavailable services being reported, the log's tail, and
+  keeping the newest 10 reports without touching other files; and a click on each
+  new button producing its outcome. The existing layout, naming and keyboard tests
+  all pass under Polaris.
+- Visual: the real mixer window captured with Polaris (tabs, semibold app names,
+  regular status text, percentages) shows no clipping; a neutral preview window
+  (`examples/font_preview.rs`, no user data) shows the glyph sample in both
+  typefaces.
+- End to end with the real app in an isolated profile, driven by UI Automation:
+  Settings > Save diagnostic report wrote a 2,122-character report with every
+  section, and Copy report put the same sections on the clipboard. Neither
+  contained the names of the two apps and the output device on this PC, nor the
+  user folder.
+- Not run: the typeface at 125, 150 and 200 % Windows scaling (the harness and the
+  captures are at 100 %), Windows 10, and the installer and portable ZIP with the
+  new `fonts\LICENSE.txt` (the script and installer entries were edited but
+  `scripts/package.ps1` was not run).
+
+## Stability check before Stage 5 (2026-11-06, merge `107f2cb`)
+
+`experiments` held the 0.5.0 work (`a488137`) and an in-progress merge of the
+published 0.4.0 release; this checks the merged tree.
+
+- 163 library tests passed three times in a row; the 12 real-device tests passed
+  twice in a row; release build and lifecycle (both renderers) passed.
+- Today the per-app routing test passed without exercising anything: it needs two
+  active outputs and only HDMI was present. It ran for real on 2026-11-05, when
+  the headphones were connected.
+- Soak of the debug app for 10 s per sample with a silent helper session, in an
+  isolated profile: with no automation, a background-lowering rule, microphone
+  ducking, or both. Medians were about the same (roughly 60 to 160 ms of CPU
+  per 10 s); single samples of several seconds appeared in every mode, including
+  ones that poll nothing, and also on the unmodified build earlier, so they are
+  machine noise. No warnings, errors or panics in the log, and the settings were
+  intact afterwards.
+- New real-device test `lowered_levels_come_back_when_the_engine_shuts_down_or_rebuilds`:
+  with another app lowered, a rebuild ends Solo and restores its level, and a
+  shutdown leaves it restored for a fresh engine. Removing the restore in
+  `Engine::drop` makes it fail (checked, then reverted).
+
+<<<<<<< HEAD
+## Stages 3 and 4: controls, profiles, routing and ducking (2026-11-05, branch `stage3-4/features`)
+
+Pinned outputs and cycling, the wheel step, app and profile shortcuts, per-stream
+controls, Solo, profiles, per-app output devices (with sessions on every
+output), background lowering and microphone ducking. Run on the machine in
+`PROJECT_CONTEXT.md` section 4 (Windows 11 build 26200; outputs: headphones and
+HDMI; one microphone).
+
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`:
+  passed.
+- `cargo test --locked`: 157 library tests passed (31 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 12 hardware tests ignored. New tests
+  cover cycling with no, one or several pinned outputs (pin order, unpinned and
+  disconnected devices, devices returning), the settings fields with bad values,
+  the attenuation ledger (written once, undone, a user change kept, mute,
+  combined reductions, ended sessions), app and profile shortcuts resolving to
+  their commands, one shortcut per app, the unchanged saved format of a binding
+  without a target, the editor's slots, the per-app routing device-ID format and
+  vtable slots (25, 26, 27), profile capture of chosen parts and the preset
+  format, unique copy names and shortcuts following renamed or deleted
+  profiles, profile notices, the microphone gate (attack, release, pauses), focus
+  settling (alt-tab doesn't change anything), how Solo, focus rules and
+  microphone ducking combine, the foreground watcher starting and stopping
+  within 500 ms, the hook path not using audio, COM or blocking calls, the
+  output-device status wording, the confirmation before resetting all app
+  devices, and that every new control is named and fits at minimum width.
+- `cargo test --test audio_integration -- --ignored --test-threads=1`: all 11
+  passed on real devices. New: Solo halves another app (a silent helper),
+  restores it, and keeps a level set while it was lowered; app mute and
+  relative-volume commands; a focus rule lowers the helper while another
+  process is reported in front and restores it when the helper is reported in
+  front; and per-app routing. For routing, Windows reported the chosen device
+  (HDMI) at once; the helper's running stream did not move within 8 s, because
+  it opened a specific device; a second process of the same app, launched
+  afterwards, started on HDMI; resetting returned the preference to the system
+  default.
+- `cargo run --example routing_probe`: the per-app routing interface is
+  available on this build (the 21H2 interface ID).
+- Release build: 15,726,592 bytes. `scripts/lifecycle.ps1` passed with OpenGL
+  (hidden CPU 16 ms over 1 s) and `-Renderer wgpu` (281 ms on WARP, within its
+  usual spread).
+- Not run: the real foreground hook switching between real windows (the engine
+  path was tested with reported process IDs), microphone ducking with a live
+  voice (no capturing app was running; the gate is unit-tested), routing on
+  Windows 10 (the pre-21H2 interface ID), routing an elevated app, a shortcut
+  cycle with real tray balloons while hidden, and Windows 10 in general.
+
+## Stage 2 performance (2026-11-05, branch `stage2/performance`)
+
+Allocation-free meter polling, the icon extraction LRU with a bounded request
+queue, texture reuse, and wgpu built with only Direct3D 12 and Vulkan.
+
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`:
+  passed.
+- `cargo test --locked`: 126 library tests passed (8 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 8 hardware tests ignored. New tests
+  cover each app's loudest peak with every session read once and the map
+  reused, apps that left or went silent, the meter change threshold in both
+  directions, a relaunched app and a second app on the same binary reusing one
+  extraction, a separate extraction per pixel size, a modified executable being
+  extracted again, failures not being cached, a full request queue returning at
+  once and every dropped request resolving later, LRU eviction, identical icons
+  not being uploaded again while changed ones are, and keeping only the 32 most
+  recent icons of apps that left.
+- Build measurements, each a clean release build in its own target directory
+  on this machine:
+
+  | Configuration | Clean build | Incremental (one file) | Release exe | Crates |
+  | --- | --- | --- | --- | --- |
+  | Before (eframe `wgpu` feature) | 146 s | 50 s | 15,859,200 B | 199 |
+  | wgpu `dx12` + `vulkan` only (adopted) | 140 s | 51 s | 15,325,696 B | 197 |
+  | Same, plus `lto = "fat"` (not adopted) | 216 s | 113 s | 14,751,232 B | 197 |
+
+  The lockfile lost `khronos-egl` and three empty `wgpu-core-deps-*` crates; no
+  version changed. Fat LTO saves another 0.57 MB but more than doubles
+  incremental release builds with no measured runtime gain. `panic = "unwind"`
+  is kept: the panic hook and the `Drop`-based COM and registration cleanup
+  rely on unwinding.
+- `--renderer=wgpu` with a dev profile logged `renderer: wgpu fallback, Dx12 on
+  "Microsoft Basic Render Driver"` and exited with code 0.
+  `scripts/lifecycle.ps1` passed with OpenGL and with `-Renderer wgpu`. CPU in
+  the first second after hiding: OpenGL 0–31 ms; wgpu on WARP 78–484 ms, the
+  same spread as before the change (78–344 ms).
+- Silent-path meter CPU, debug builds, window visible with meters on, one
+  silent audio session, 10 s per sample, 8 alternating samples each: before
+  47–5,625 ms (median about 211 ms), after 16–1,312 ms (median about 86 ms).
+  Both have outliers of seconds from other activity on the machine, so this
+  suggests a reduction but doesn't prove one.
+- Not run: Explorer restart (tray-icon 0.26.1 re-adds the icon on
+  `TaskbarCreated`; it needs Explorer to be ended by hand), the wgpu fallback
+  on real Direct3D 12 or Vulkan hardware (this GPU has neither), and Windows 10.
+
+## Stage 1 correctness fixes (2026-11-05, branch `stage1/correctness`)
+
+Balance aggregation, process-marker reclaim and saturation recovery, skipping
+unreadable sessions, device-notification coalescing, and the hotkey test guard.
+
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`:
+  passed.
+- `cargo test --locked`: 118 library tests passed (12 new), 3 ignored; 3 binary
+  tests and 1 source-encoding test passed; 8 hardware tests ignored. New tests
+  cover uniform, mixed, mono-only and mono-plus-stereo balances, sessions
+  appearing and ending, aligning after an adjustment, the mixer showing the
+  right balance control for each state, 20,000 launches with unobserved exits
+  and constant PID reuse (never saturates, each launch qualifies once),
+  recovery from saturation without requalifying skipped or live processes,
+  unknown processes keeping their markers, the liveness check against the test
+  process and an exited child, and device-event bursts producing one refresh
+  without losing a late event. The hotkey "never touches `window::`" guard now
+  scans the whole module up to `mod tests`.
+- `cargo test --test audio_integration -- --ignored --test-threads=1`: all 7
+  passed on real devices (external change seen after 20 ms, new session after
+  61 ms, removal 20 ms after process exit).
+- `cargo run --example grouping_probe`: 4 sessions on the default output
+  (system sounds and three single-process apps), each with its own grouping
+  GUID. No multi-process app was running, so how Windows groups helper
+  processes is still unverified; grouping is unchanged.
+- Not run: a Bluetooth reconnect burst (the coalescing is unit-tested only), an
+  app with several stereo sessions at different balances on real hardware,
+  saturation over a real long-running session, and Windows 10.
+=======
+## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `86fdb9b`)
 
 The three review findings have focused regression coverage. New tests first
 failed against the unchanged implementation, then passed with the corrections:
@@ -38,12 +339,13 @@ the executable. PowerShell syntax and diff whitespace checks also passed.
 Local Rust checks used 1.99.1. Release publication is gated on hosted Windows
 checks, the Rust 1.95 minimum-version check, and dependency audit for the final
 source. The exact hosted runs are linked from the GitHub Release; the earlier
-run for `41f656d` covers only the audit baseline. Package hashes are in the
+run for `86fdb9b` covers only the audit baseline. Package hashes are in the
 [0.4.0 release record](releases/0.4.0.md).
 
 Not run in this correction pass: the installed upgrade/uninstall flow,
 Windows 10, and the hardware audio matrix. The live exit matrix checks process
 handling but does not replace an installed upgrade/uninstall test.
+>>>>>>> 7a1486f61c90b027c7cd53a88efec8e3bc9fb074
 
 ## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
 
@@ -101,15 +403,15 @@ Setup 6.7.3 produced both packages. The executable and installer report
 product version `0.3.0`; the portable archive contains the executable and
 README. Package hashes are in [`docs/releases/0.3.0.md`](releases/0.3.0.md).
 
-- [x] Hosted Windows CI for the exact 0.3.0 commit (`518cd33`): runs
+- [x] Hosted Windows CI for the exact 0.3.0 commit (`2561aee`): runs
   `#39106819443` (`experiments`) and `#39107297354` (`main`) passed.
 - Not run for this release candidate: live audio mutations, installer upgrade
   from 0.1.0, physical keyboard injection, Narrator, Windows 10, and varied
   hardware. Earlier beta results remain below.
 
-## Final review corrections (2026-10-18, branch `fix/beta2-review-corrections` on `e47b328`)
+## Final review corrections (2026-10-18, branch `fix/beta2-review-corrections` on `209e563`)
 
-This pass reviewed the pushed beta.2 commit `e47b328` and applied the final
+This pass reviewed the pushed beta.2 commit `209e563` and applied the final
 corrections: the Linux-only glib advisory is removed from `Cargo.lock`, hidden
 in-window warnings keep their remaining display time, the posted-message
 shortcut pressure test no longer depends on a global chord, the process
@@ -150,16 +452,16 @@ rebuilt local packages.
   changes, physical keyboard injection, Narrator, installer upgrade from
   0.1.0, and Windows 10. See the manual checklist below.
 
-## Second beta packaging (2026-10-18, commit `e47b328`)
+## Second beta packaging (2026-10-18, commit `209e563`)
 
 The 0.2.0-beta.2 source includes the follow-up review fixes below and releases
 the shortcut injector's error mutex before joining its worker on failure.
 Hosted GitHub Actions CI run `#39094235224` (`windows-latest`) passed for the
-pushed commit `e47b328`. The final review corrections on top of it are recorded
+pushed commit `209e563`. The final review corrections on top of it are recorded
 in the section above. Live audio changes, physical keyboard injection,
 Narrator, and installer upgrade from 0.1.0 remain unverified.
 
-Fresh checks on `experiments` for beta.2 (at `e47b328`):
+Fresh checks on `experiments` for beta.2 (at `209e563`):
 
 - `cargo fmt --check`, PowerShell syntax parsing, and `git diff --check`: passed.
 - `cargo test --locked`: 86 library tests passed, 3 ignored; 3 binary and 1
@@ -174,12 +476,12 @@ Fresh checks on `experiments` for beta.2 (at `e47b328`):
   commit alone; they were rerun on the corrected branch above, where the live
   Tab traversal was made foreground-independent.
 
-## Follow-up merge-review verification (2026-10-17, audit worktree on `107a305`)
+## Follow-up merge-review verification (2026-10-17, audit worktree on `ea9c816`)
 
 All checks in this section were run against the uncommitted worktree changes on
-top of commit `107a305` on branch `glass_mixer_audit` (`R1`–`R9` and follow-up
+top of commit `ea9c816` on branch `glass_mixer_audit` (`R1`–`R9` and follow-up
 findings `F1`–`F6`). Hosted GitHub Actions CI run `#38919273079` (`windows-latest`)
-validated committed `107a305` only; the uncommitted worktree changes recorded
+validated committed `ea9c816` only; the uncommitted worktree changes recorded
 here require a fresh hosted CI run once committed and pushed.
 
 - **Automated checks on the uncommitted worktree:**

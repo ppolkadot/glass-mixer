@@ -9,7 +9,9 @@
 
 pub mod app;
 pub mod audio;
+pub mod diagnostics;
 pub mod icon_art;
 pub mod platform;
 pub mod settings;
+pub mod transfer;
 pub mod ui;

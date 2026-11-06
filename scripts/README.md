@@ -9,7 +9,11 @@ Run these from Windows PowerShell in the repository root.
 | `capture-window.ps1` | Saves the selected Glass Mixer window to `target/window-capture.png` with `PrintWindow`. |
 | `verify-ui.ps1` | Launches an isolated debug instance, runs the read-only UI Automation check, and captures its window. |
 | `hotkey-smoke.ps1` | Starts an isolated debug instance with Ctrl+Alt+F23 bound to show/hide, sends the chord, and checks both hidden and visible states. `-Minimized` also tests opening from a hidden startup. |
-| `package.ps1` | Builds a release portable zip and, when Inno Setup is installed, an installer. Both include `LICENSE` and `THIRD-PARTY-NOTICES.txt`. |
+| `package.ps1` | Checks version consistency, builds a release portable zip and, when Inno Setup is installed, an installer, writes the SHA-256 checksums, and verifies the result. Both packages include `LICENSE` and `THIRD-PARTY-NOTICES.txt`. |
+| `check-version.ps1` | Checks that `Cargo.toml`, `Cargo.lock`, `assets/app.manifest`, the installer defaults and the `CHANGELOG.md` heading agree (`-Tag` for a release tag, `-Exe` for a built executable). |
+| `verify-package.ps1` | Opens the portable zip and the installer in `dist\` and checks their exact contents, versions, 64-bit build, embedded font notice, byte-exact licenses, signature state and checksums. `-WriteChecksums` writes `SHA256SUMS.txt`; `-RequireSigned` fails on unsigned files. |
+| `release-notes.ps1` | Writes a version's release notes from its `CHANGELOG.md` section, with the downloads and the signing status. |
+| `installer-smoke.ps1` | Builds two test installers under a different identity (separate install folder, uninstall entry and Start menu shortcut, built from the debug exe), then runs a fresh install, an upgrade over a running copy and an uninstall of a running copy, and proves the real installation unchanged. Needs Inno Setup 6 and a desktop session. `-KeepFiles` keeps the temporary folder. |
 | `third-party-notices.ps1` | Writes `THIRD-PARTY-NOTICES.txt` (`-OutFile`) from `cargo metadata`: every crate compiled into the Windows executable, with its license and the license files it ships. `package.ps1` runs it; CI checks that it succeeds. |
 
 The lifecycle, UI verification, and hotkey smoke scripts refresh the debug build before launching it. For direct UI Automation and capture, build and launch the app first:

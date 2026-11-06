@@ -1,6 +1,9 @@
 //! The audio engine thread: owns every Core Audio object, applies commands and
 //! publishes snapshots re-read from Windows.
 
+use super::app_routing::AppRouting;
+use super::attenuation::{Ledger, Level, Reduction};
+use super::automation::{FocusSettle, MicGate};
 use super::callbacks::{
     DeviceNotifier, EndpointVolumeNotifier, OWN_EVENT_CONTEXT, SessionCreatedNotifier, SessionEvents,
 };
@@ -33,7 +36,22 @@ use windows::core::{HSTRING, Interface};
 
 const METER_INTERVAL: Duration = Duration::from_millis(33);
 const RESUME_SETTLE: Duration = Duration::from_millis(1500);
+/// Device add/remove/state/property notifications arrive in bursts (a Bluetooth
+/// reconnect sends several); they are merged into one re-enumeration.
+const DEVICE_COALESCE: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// How often process markers are checked for exits that were never observed,
+/// piggybacked on session refreshes (there is no timer).
+const RECLAIM_INTERVAL: Duration = Duration::from_secs(300);
+/// The same check while the tracker is large or saturated.
+const RECLAIM_RETRY: Duration = Duration::from_secs(10);
+/// How long after a shortcut's device switch the resulting "Output switched"
+/// notice is still treated as its answer (and shown in the tray).
+const ANNOUNCE_WINDOW: Duration = Duration::from_secs(3);
+/// Focus has to stay on an app this long before focus rules react.
+const FOCUS_SETTLE: Duration = Duration::from_millis(250);
+/// How often the microphone level is read while microphone ducking is on.
+const MIC_INTERVAL: Duration = Duration::from_millis(50);
 
 type WinResult<T> = windows::core::Result<T>;
 
@@ -53,6 +71,33 @@ fn open_settings(uri: &str) -> Result<(), String> {
         Err("Couldn't open Windows Settings. Open Settings > System > Sound manually.".into())
     } else {
         Ok(())
+    }
+}
+
+/// A deadline set by the first event of a burst. Later events in the window
+/// don't extend it, so a steady stream still refreshes every window.
+#[derive(Default)]
+struct Coalesce {
+    due: Option<Instant>,
+}
+
+impl Coalesce {
+    fn note(&mut self, now: Instant, window: Duration) {
+        self.due.get_or_insert(now + window);
+    }
+
+    /// Whether the window has elapsed; resets it if so.
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.due.is_some_and(|t| now >= t);
+        if due {
+            self.due = None;
+        }
+        due
+    }
+
+    /// A refresh that already covers the pending events.
+    fn cancel(&mut self) {
+        self.due = None;
     }
 }
 
@@ -81,11 +126,20 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
         retry_at: Some(Instant::now()),
         backoff: Duration::from_millis(250),
         delayed_rebuild: None,
+        device_events: Coalesce::default(),
         last_meter_poll: Instant::now(),
-        last_meters: Meters::default(),
+        last_meters: Arc::default(),
+        meter_scratch: Meters::default(),
         was_unavailable: false,
         devices_loaded: false,
         preset_rules: Vec::new(),
+        pinned_outputs: Vec::new(),
+        solo_level: Reduction { factor: 0.2, mute: false },
+        focus_rules: Vec::new(),
+        focus: FocusSettle::default(),
+        mic: None,
+        mic_gate: MicGate::default(),
+        last_mic_poll: Instant::now(),
     };
 
     loop {
@@ -107,6 +161,7 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
             break;
         }
         runner.poll_meters();
+        runner.automation_tick();
     }
     // Unregisters every callback and releases COM objects before COM is uninitialized.
     runner.engine = None;
@@ -121,11 +176,21 @@ struct Runner {
     retry_at: Option<Instant>,
     backoff: Duration,
     delayed_rebuild: Option<Instant>,
+    device_events: Coalesce,
     last_meter_poll: Instant,
-    last_meters: Meters,
+    last_meters: Arc<Meters>,
+    /// Reused for every poll, so a steady set of sessions polls without allocating.
+    meter_scratch: Meters,
     was_unavailable: bool,
     devices_loaded: bool,
     preset_rules: Vec<super::preferences::VolumePreset>,
+    pinned_outputs: Vec<String>,
+    solo_level: Reduction,
+    focus_rules: Vec<(AppKey, Reduction)>,
+    focus: FocusSettle<AppKey>,
+    mic: Option<super::MicDucking>,
+    mic_gate: MicGate,
+    last_mic_poll: Instant,
 }
 
 impl Runner {
@@ -136,7 +201,9 @@ impl Runner {
             match msg {
                 Msg::Shutdown => return false,
                 Msg::Cmd(cmd) => push_coalesced(&mut commands, cmd),
-                Msg::DevicesChanged | Msg::DefaultDeviceChanged => self.dirty.devices = true,
+                Msg::DevicesChanged => self.device_events.note(Instant::now(), DEVICE_COALESCE),
+                // The default device decides which sessions are shown, so it is never delayed.
+                Msg::DefaultDeviceChanged => self.dirty.devices = true,
                 Msg::EndpointVolumeChanged | Msg::SessionValuesChanged => self.dirty.values = true,
                 Msg::SessionsChanged => self.dirty.sessions = true,
                 Msg::Resumed => {
@@ -154,6 +221,72 @@ impl Runner {
     }
 
     fn apply(&mut self, cmd: Command) {
+        match &cmd {
+            Command::SetPinnedOutputs(ids) => {
+                self.pinned_outputs.clone_from(ids);
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.pinned_outputs.clone_from(ids);
+                }
+                return;
+            }
+            Command::SetFocusRules(rules) => {
+                self.focus_rules.clone_from(rules);
+                if rules.is_empty() {
+                    self.focus.clear();
+                }
+                self.sync_automation();
+                return;
+            }
+            Command::ForegroundChanged { pid } => {
+                if let Some(engine) = self.engine.as_ref()
+                    && !self.focus_rules.is_empty()
+                {
+                    self.focus.report(engine.key_for_pid(*pid), Instant::now());
+                }
+                return;
+            }
+            Command::SetMicDucking(config) => {
+                self.mic.clone_from(config);
+                self.mic_gate.reset();
+                self.sync_automation();
+                return;
+            }
+            Command::SetSoloOptions { factor, mute } => {
+                self.solo_level = Reduction { factor: factor.clamp(0.0, 1.0), mute: *mute };
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.reductions.solo_level = self.solo_level;
+                    self.dirty.values = true;
+                }
+                return;
+            }
+            Command::CycleOutputDevice | Command::ToggleSolo { .. } | Command::EndSolo => {
+                let Some(engine) = self.engine.as_mut() else {
+                    self.shared.push_notice(NoticeLevel::Error, "The Windows audio service isn't available.");
+                    return;
+                };
+                let result = match &cmd {
+                    Command::CycleOutputDevice => engine.cycle_output(),
+                    Command::ToggleSolo { key } => engine.toggle_solo(key),
+                    _ => engine.end_solo(),
+                };
+                match result {
+                    Ok(Some(announcement)) => self.shared.push_announcement(announcement),
+                    Ok(None) => {}
+                    Err(err) => {
+                        if let ApplyError::Windows(_, e) = &err
+                            && is_fatal(e.code())
+                        {
+                            self.dirty.rebuild = true;
+                        }
+                        self.shared.push_notice(NoticeLevel::Error, err.to_string());
+                    }
+                }
+                self.dirty.values = true;
+                self.dirty.devices |= matches!(cmd, Command::CycleOutputDevice);
+                return;
+            }
+            _ => {}
+        }
         if let Command::SetPresetRules(presets) = &cmd {
             self.preset_rules = presets.clone();
             if let Some(engine) = self.engine.as_mut() {
@@ -161,16 +294,21 @@ impl Runner {
             }
             return;
         }
-        if let Command::ApplyPreset(preset) = &cmd {
+        if let Command::ApplyPreset(preset) | Command::ActivateProfile(preset) = &cmd {
             let Some(engine) = self.engine.as_mut() else {
-                self.shared.push_notice(NoticeLevel::Error, "Audio service unavailable; preset was not applied.");
+                self.shared.push_notice(NoticeLevel::Error, "Audio service unavailable; the profile was not applied.");
                 return;
             };
-            match engine.apply_preset(preset.clone()) {
+            match engine.apply_profile(preset, &self.shared) {
                 Ok(outcome) => {
                     self.dirty.values = true;
-                    let (level, text) = outcome.notice();
-                    self.shared.push_notice(level, text);
+                    self.dirty.devices |= outcome.devices_switched;
+                    let (level, text) = outcome.notice(&preset.name);
+                    if level == NoticeLevel::Info && matches!(cmd, Command::ActivateProfile(_)) {
+                        self.shared.push_announcement(text);
+                    } else {
+                        self.shared.push_notice(level, text);
+                    }
                 }
                 Err(err) => {
                     if let ApplyError::Windows(_, e) = &err
@@ -235,6 +373,9 @@ impl Runner {
             self.delayed_rebuild = None;
             self.dirty.rebuild = true;
         }
+        if self.device_events.take_due(now) {
+            self.dirty.devices = true;
+        }
         if self.dirty.rebuild {
             self.dirty = Dirty::default();
             self.engine = None;
@@ -249,7 +390,10 @@ impl Runner {
                 Ok(mut engine) => {
                     engine.devices_loaded = self.devices_loaded;
                     engine.set_preset_rules(self.preset_rules.clone());
+                    engine.pinned_outputs.clone_from(&self.pinned_outputs);
+                    engine.reductions.solo_level = self.solo_level;
                     self.engine = Some(engine);
+                    self.sync_automation();
                     self.retry_at = None;
                     self.dirty = Dirty { devices: true, sessions: true, values: true, rebuild: false };
                 }
@@ -265,6 +409,9 @@ impl Runner {
         }
         self.retry_at = None;
         let dirty = std::mem::take(&mut self.dirty);
+        if dirty.devices {
+            self.device_events.cancel();
+        }
         let engine = self.engine.as_mut().expect("engine present");
         let result = engine.refresh(dirty, &self.shared).and_then(|()| engine.snapshot(&self.shared));
         match result {
@@ -317,17 +464,26 @@ impl Runner {
         if let Some(t) = self.delayed_rebuild {
             consider(t);
         }
+        if let Some(t) = self.device_events.due {
+            consider(t);
+        }
         if self.engine.is_some() && self.shared.meters_wanted() {
             consider(self.last_meter_poll + METER_INTERVAL);
+        }
+        if let Some(t) = self.focus.due(FOCUS_SETTLE) {
+            consider(t);
+        }
+        if self.engine.is_some() && self.mic.is_some() {
+            consider(self.last_mic_poll + MIC_INTERVAL);
         }
         deadline.map(|d| d.saturating_duration_since(now))
     }
 
     fn poll_meters(&mut self) {
         if !self.shared.meters_wanted() {
-            if self.last_meters != Meters::default() {
-                self.last_meters = Meters::default();
-                self.shared.publish_meters(Meters::default());
+            if *self.last_meters != Meters::default() {
+                self.last_meters = Arc::default();
+                self.shared.publish_meters(self.last_meters.clone());
             }
             return;
         }
@@ -336,10 +492,43 @@ impl Runner {
         }
         self.last_meter_poll = Instant::now();
         let Some(engine) = self.engine.as_ref() else { return };
-        let meters = engine.meters();
-        if meters_differ(&meters, &self.last_meters) {
-            self.last_meters = meters.clone();
-            self.shared.publish_meters(meters);
+        engine.read_meters(&mut self.meter_scratch);
+        // Only a visible change allocates: the published copy that triggers a repaint.
+        if meters_differ(&self.meter_scratch, &self.last_meters) {
+            self.last_meters = Arc::new(self.meter_scratch.clone());
+            self.shared.publish_meters(self.last_meters.clone());
+        }
+    }
+}
+
+impl Runner {
+    /// Hands the current automation state to the engine and re-reads levels.
+    fn sync_automation(&mut self) {
+        let Some(engine) = self.engine.as_mut() else { return };
+        let r = &mut engine.reductions;
+        r.focus_rules.clone_from(&self.focus_rules);
+        r.foreground = self.focus.applied().cloned();
+        r.mic = self.mic.as_ref().map(|m| (m.reduction, m.targets.clone()));
+        r.mic_active = self.mic.is_some() && self.mic_gate.active();
+        self.dirty.values = true;
+    }
+
+    /// Settles focus changes and reads the microphone level for ducking.
+    fn automation_tick(&mut self) {
+        let now = Instant::now();
+        let mut changed = self.focus.settle(FOCUS_SETTLE, now);
+        if let (Some(mic), Some(engine)) = (&self.mic, &self.engine)
+            && now.duration_since(self.last_mic_poll) >= MIC_INTERVAL
+        {
+            self.last_mic_poll = now;
+            if self.mic_gate.update(&mic.gate, engine.input_peak(), now) {
+                log::debug!("microphone ducking {}", if self.mic_gate.active() { "started" } else { "ended" });
+                changed = true;
+            }
+        }
+        if changed {
+            self.sync_automation();
+            self.maintain();
         }
     }
 }
@@ -362,15 +551,35 @@ fn push_coalesced(commands: &mut Vec<Command>, cmd: Command) {
 
 fn meters_differ(a: &Meters, b: &Meters) -> bool {
     const EPS: f32 = 0.01;
-    if (a.output - b.output).abs() > EPS || (a.input - b.input).abs() > EPS {
-        return true;
+    let differ = |x: f32, y: f32| (x - y).abs() > EPS;
+    differ(a.output, b.output)
+        || differ(a.input, b.input)
+        || a.apps.iter().any(|(k, &x)| differ(x, b.apps.get(k).copied().unwrap_or(0.0)))
+        || b.apps.iter().any(|(k, &y)| !a.apps.contains_key(k) && differ(0.0, y))
+}
+
+/// Stores each app's loudest session peak in `apps`, reading every session
+/// once. Existing entries are reused, so a steady set of apps doesn't allocate;
+/// apps without a session are removed.
+fn merge_peaks<'a, S: 'a>(
+    apps: &mut HashMap<AppKey, f32>,
+    sessions: impl Iterator<Item = &'a S> + Clone,
+    key_of: impl Fn(&S) -> &AppKey,
+    mut peak_of: impl FnMut(&S) -> f32,
+) {
+    for v in apps.values_mut() {
+        *v = 0.0;
     }
-    let keys: HashSet<_> = a.apps.keys().chain(b.apps.keys()).collect();
-    keys.into_iter().any(|k| {
-        let x = a.apps.get(k).copied().unwrap_or(0.0);
-        let y = b.apps.get(k).copied().unwrap_or(0.0);
-        (x - y).abs() > EPS
-    })
+    for s in sessions.clone() {
+        let peak = peak_of(s);
+        match apps.get_mut(key_of(s)) {
+            Some(v) => *v = v.max(peak),
+            None => {
+                apps.insert(key_of(s).clone(), peak);
+            }
+        }
+    }
+    apps.retain(|k, _| sessions.clone().any(|s| key_of(s) == k));
 }
 
 #[derive(Debug)]
@@ -414,13 +623,67 @@ struct Engine {
     inputs: Vec<DeviceInfo>,
     output: Option<Endpoint>,
     input: Option<Endpoint>,
-    sessions: Option<SessionSet>,
+    /// Sessions of every active output, the default's first. Apps set to use
+    /// another device play there, and must stay visible and controllable.
+    sessions: Vec<SessionSet>,
     extra_endpoints: HashMap<String, Endpoint>,
     endpoint_errors: HashMap<String, String>,
     devices_loaded: bool,
     properties: HashMap<String, super::properties::DeviceProperties>,
     preset_rules: Vec<super::preferences::VolumePreset>,
     start_tracker: super::preferences::StartTracker,
+    last_reclaim: Instant,
+    pinned_outputs: Vec<String>,
+    /// Set by `cycle_output`, so the resulting switch is announced.
+    announce_output_until: Option<Instant>,
+    reductions: Reductions,
+    routing: Option<AppRouting>,
+    /// Each process's device preference as last read from (or written to)
+    /// Windows. Read once per process: Windows doesn't notify changes.
+    routes: HashMap<(u32, Option<u64>), Route>,
+}
+
+/// Solo (and, later, ducking) state: what should be lowered, and the ledger of
+/// what was written so it can be undone safely.
+struct Reductions {
+    solo: Option<AppKey>,
+    solo_level: Reduction,
+    focus_rules: Vec<(AppKey, Reduction)>,
+    /// The settled foreground app, `None` until one is known.
+    foreground: Option<AppKey>,
+    mic: Option<(Reduction, Vec<AppKey>)>,
+    mic_active: bool,
+    ledger: Ledger,
+}
+
+impl Reductions {
+    fn wanted(&self, key: &AppKey) -> Option<Reduction> {
+        // System sounds are short alerts; Solo leaves them alone.
+        let solo = self.solo.as_ref().filter(|solo| *solo != key && *key != AppKey::System).map(|_| self.solo_level);
+        let focus = self.background_reduction(key);
+        let mic = self
+            .mic
+            .as_ref()
+            .filter(|(_, targets)| self.mic_active && targets.contains(key))
+            .map(|(reduction, _)| *reduction);
+        [solo, focus, mic].into_iter().flatten().reduce(Reduction::combine)
+    }
+
+    /// The focus rule lowering `key` now, if another app is in the foreground.
+    fn background_reduction(&self, key: &AppKey) -> Option<Reduction> {
+        let foreground = self.foreground.as_ref()?;
+        if foreground == key {
+            return None;
+        }
+        self.focus_rules.iter().find(|(rule, _)| rule == key).map(|(_, reduction)| *reduction)
+    }
+
+    fn active(&self) -> bool {
+        self.solo.is_some()
+            || !self.ledger.is_empty()
+            || self.mic_active
+            || (self.foreground.is_some() && !self.focus_rules.is_empty())
+    }
 }
 
 impl Engine {
@@ -435,6 +698,13 @@ impl Engine {
                 None
             }
         };
+        let routing = match AppRouting::create() {
+            Ok(routing) => Some(routing),
+            Err(e) => {
+                log::warn!("per-app device routing unavailable: {e}");
+                None
+            }
+        };
         log::info!("audio engine initialized");
         Ok(Self {
             tx,
@@ -445,13 +715,27 @@ impl Engine {
             inputs: Vec::new(),
             output: None,
             input: None,
-            sessions: None,
+            sessions: Vec::new(),
             extra_endpoints: HashMap::new(),
             endpoint_errors: HashMap::new(),
             devices_loaded: false,
             properties: HashMap::new(),
             preset_rules: Vec::new(),
             start_tracker: super::preferences::StartTracker::new(current_filetime()),
+            last_reclaim: Instant::now(),
+            pinned_outputs: Vec::new(),
+            announce_output_until: None,
+            routing,
+            routes: HashMap::new(),
+            reductions: Reductions {
+                solo: None,
+                solo_level: Reduction { factor: 0.2, mute: false },
+                focus_rules: Vec::new(),
+                foreground: None,
+                mic: None,
+                mic_active: false,
+                ledger: Ledger::default(),
+            },
         })
     }
 
@@ -464,13 +748,16 @@ impl Engine {
 
             if self.output.as_ref().map(|e| &e.id) != out_id.as_ref() {
                 let had_output = self.output.is_some();
-                self.sessions = None;
                 self.output = None;
                 if let Some(id) = &out_id {
                     let ep = Endpoint::open(&self.enumerator, id, self.tx.clone())?;
-                    self.sessions = Some(SessionSet::open(&ep.device, self.tx.clone())?);
                     if had_output {
-                        shared.push_notice(NoticeLevel::Info, format!("Output switched to {}", ep.name));
+                        let text = format!("Output switched to {}", ep.name);
+                        if self.announce_output_until.take().is_some_and(|until| Instant::now() < until) {
+                            shared.push_announcement(text);
+                        } else {
+                            shared.push_notice(NoticeLevel::Info, text);
+                        }
                     }
                     self.output = Some(ep);
                 } else {
@@ -497,6 +784,7 @@ impl Engine {
             for d in &mut self.outputs {
                 d.is_default = out_id.as_ref() == Some(&d.id);
             }
+            self.open_session_sets(out_id.as_deref())?;
             for d in &mut self.inputs {
                 d.is_default = in_id.as_ref() == Some(&d.id);
             }
@@ -534,11 +822,16 @@ impl Engine {
                 }
             }
         }
-        if (dirty.sessions || dirty.devices)
-            && let Some(set) = self.sessions.as_mut()
-        {
-            for exited_pid in set.sync(&self.tx)? {
-                self.start_tracker.forget_exited_pid(exited_pid);
+        if dirty.sessions || dirty.devices {
+            for set in &mut self.sessions {
+                for exited_pid in set.sync(&self.tx)? {
+                    self.start_tracker.forget_exited_pid(exited_pid);
+                }
+            }
+            let wait = if self.start_tracker.wants_reclaim() { RECLAIM_RETRY } else { RECLAIM_INTERVAL };
+            if self.last_reclaim.elapsed() >= wait {
+                self.last_reclaim = Instant::now();
+                self.start_tracker.reclaim(current_filetime(), process::is_running);
             }
         }
         Ok(())
@@ -546,15 +839,28 @@ impl Engine {
 
     fn snapshot(&mut self, shared: &Shared) -> WinResult<AudioSnapshot> {
         self.apply_start_rules(shared)?;
+        self.apply_reductions(shared)?;
         let mut facts = Vec::new();
         let mut needs_sync = false;
-        if let Some(set) = &self.sessions {
+        let default_id = self.output.as_ref().map(|ep| ep.id.as_str());
+        let on_default: HashSet<&AppKey> = self
+            .sessions
+            .iter()
+            .filter(|set| Some(set.device_id.as_str()) == default_id)
+            .flat_map(|set| set.sessions.iter().map(|s| &s.key))
+            .collect();
+        for set in &self.sessions {
+            let is_default = Some(set.device_id.as_str()) == default_id;
             for s in &set.sessions {
                 if set.has_exited(s.pid) {
                     needs_sync = true;
                     continue;
                 }
-                match s.facts() {
+                match s.facts(&set.device_id) {
+                    // Other outputs show what plays there and apps set to use them;
+                    // their idle leftovers and System sounds would only add noise.
+                    Ok(Some(f))
+                        if !is_default && (f.key == AppKey::System || (!f.active && on_default.contains(&f.key))) => {}
                     Ok(Some(f)) => facts.push(f),
                     Ok(None) => needs_sync = true,
                     Err(e) if is_fatal(e.code()) => return Err(e),
@@ -584,36 +890,48 @@ impl Engine {
                 device_states.push(DeviceState { flow, info: d.clone(), state });
             }
         }
+        let mut apps = group_sessions(&facts);
+        self.read_routes(&mut apps);
+        let apps_keys: Vec<AppKey> = apps.iter().map(|a| a.key.clone()).collect();
         Ok(AudioSnapshot {
             status: ServiceStatus::Ok,
             output: self.output.as_ref().map(Endpoint::state).transpose()?,
             input: self.input.as_ref().map(Endpoint::state).transpose()?,
             outputs: self.outputs.clone(),
             inputs: self.inputs.clone(),
-            apps: group_sessions(&facts),
+            apps,
             device_states,
             properties: self.properties.clone(),
             can_switch_default: self.policy.is_some(),
+            solo: self.reductions.solo.clone(),
+            can_route_apps: self.routing.is_some(),
+            mic_ducking: self.reductions.mic_active,
+            background_lowered: apps_lowered_in_background(&self.reductions, &apps_keys),
         })
     }
 
-    fn meters(&self) -> Meters {
+    /// The default input's peak level, for microphone ducking.
+    fn input_peak(&self) -> f32 {
+        self.input.as_ref().and_then(|e| e.meter.as_ref()).and_then(|m| unsafe { m.GetPeakValue() }.ok()).unwrap_or(0.0)
+    }
+
+    /// The app identity of a process, as its sessions would have it.
+    fn key_for_pid(&self, pid: u32) -> AppKey {
+        if let Some(s) = self.sessions.iter().flat_map(|set| set.sessions.iter()).find(|s| s.pid == pid) {
+            return s.key.clone();
+        }
+        let info = process::open(pid).map(|handle| process::query(&handle)).unwrap_or_default();
+        app_key(&info, pid)
+    }
+
+    fn read_meters(&self, out: &mut Meters) {
         let peak = |m: &Option<IAudioMeterInformation>| {
             m.as_ref().and_then(|m| unsafe { m.GetPeakValue() }.ok()).unwrap_or(0.0)
         };
-        let mut apps: HashMap<AppKey, f32> = HashMap::new();
-        if let Some(set) = &self.sessions {
-            for s in &set.sessions {
-                let v = peak(&s.meter);
-                let e = apps.entry(s.key.clone()).or_insert(0.0);
-                *e = e.max(v);
-            }
-        }
-        Meters {
-            output: self.output.as_ref().map_or(0.0, |e| peak(&e.meter)),
-            input: self.input.as_ref().map_or(0.0, |e| peak(&e.meter)),
-            apps,
-        }
+        let sessions = self.sessions.iter().flat_map(|set| set.sessions.iter());
+        merge_peaks(&mut out.apps, sessions, |s: &Session| &s.key, |s| peak(&s.meter));
+        out.output = self.output.as_ref().map_or(0.0, |e| peak(&e.meter));
+        out.input = self.input.as_ref().map_or(0.0, |e| peak(&e.meter));
     }
 
     /// Applies a command. Returns whether device lists must be re-read.
@@ -633,7 +951,7 @@ impl Engine {
                 unsafe { ep.volume.SetMasterVolumeLevelScalar((current + delta).clamp(0.0, 1.0), ctx) }
                     .context(what)?;
             }
-            Command::ApplyPreset(_) | Command::SetPresetRules(_) => {}
+            Command::ApplyPreset(_) | Command::ActivateProfile(_) | Command::SetPresetRules(_) => {}
             Command::LoadDevices => {
                 self.devices_loaded = true;
                 return Ok(true);
@@ -705,6 +1023,60 @@ impl Engine {
                 })?;
                 self.mark_key_intervened(key);
             }
+            Command::SetStreamVolume { id, volume } => {
+                let session = self.stream(id)?;
+                unsafe { session.simple.SetMasterVolume(volume.clamp(0.0, 1.0), ctx) }
+                    .context(|| format!("Couldn't change the volume of a {} stream", session.name))?;
+                let key = session.key.clone();
+                self.mark_key_intervened(&key);
+            }
+            Command::SetStreamMute { id, muted } => {
+                let session = self.stream(id)?;
+                unsafe { session.simple.SetMute(*muted, ctx) }
+                    .context(|| format!("Couldn't change mute for a {} stream", session.name))?;
+                let key = session.key.clone();
+                self.mark_key_intervened(&key);
+            }
+            Command::SetAppOutput { key, device } => {
+                self.route_app(key, device.as_deref())?;
+                return Ok(true);
+            }
+            Command::ResetAllAppDevices => {
+                let routing = self.routing.as_ref().ok_or_else(|| {
+                    ApplyError::Message("Choosing a device per app isn't supported on this version of Windows.".into())
+                })?;
+                routing.clear_all().context(|| "Couldn't reset the app device preferences".into())?;
+                self.routes.clear();
+                return Ok(true);
+            }
+            Command::ToggleAppMute { key } => {
+                let all_muted = self
+                    .sessions
+                    .iter()
+                    .flat_map(|set| set.sessions.iter())
+                    .filter(|s| &s.key == key)
+                    .all(|s| unsafe { s.simple.GetMute() }.is_ok_and(|m| m.as_bool()));
+                self.for_app(key, "mute", |s| unsafe { s.simple.SetMute(!all_muted, ctx) })?;
+                self.mark_key_intervened(key);
+            }
+            Command::AdjustAppVolume { key, delta } => {
+                let current = self
+                    .sessions
+                    .iter()
+                    .flat_map(|set| set.sessions.iter())
+                    .filter(|s| &s.key == key)
+                    .filter_map(|s| unsafe { s.simple.GetMasterVolume() }.ok())
+                    .fold(0.0f32, f32::max);
+                let volume = (current + delta).clamp(0.0, 1.0);
+                self.for_app(key, "volume", |s| unsafe { s.simple.SetMasterVolume(volume, ctx) })?;
+                self.mark_key_intervened(key);
+            }
+            Command::SetFocusRules(_) | Command::ForegroundChanged { .. } | Command::SetMicDucking(_) => {}
+            Command::SetPinnedOutputs(_)
+            | Command::CycleOutputDevice
+            | Command::ToggleSolo { .. }
+            | Command::EndSolo
+            | Command::SetSoloOptions { .. } => {}
             Command::Refresh | Command::OpenSoundSettings | Command::OpenMonoSettings => {}
         }
         Ok(false)
@@ -715,13 +1087,74 @@ impl Engine {
         self.start_tracker.rearm(current_filetime());
     }
 
+    /// Applies a whole profile: default devices first (app levels are kept per
+    /// device, so the sessions are re-read on the new one), then the master
+    /// level, then the app levels.
+    fn apply_profile(
+        &mut self,
+        profile: &super::preferences::VolumePreset,
+        shared: &Shared,
+    ) -> Result<ProfileOutcome, ApplyError> {
+        let mut outcome = ProfileOutcome::default();
+        for (flow, choice) in [(Flow::Output, &profile.output_device), (Flow::Input, &profile.input_device)] {
+            let Some(choice) = choice else { continue };
+            let list = if flow == Flow::Output { &self.outputs } else { &self.inputs };
+            match list.iter().find(|d| d.id.eq_ignore_ascii_case(&choice.id)) {
+                None => outcome.notes.push(format!("{} isn't connected", choice.name)),
+                Some(device) if device.is_default => {}
+                Some(device) => {
+                    let Some(policy) = self.policy.as_ref() else {
+                        outcome.notes.push("switching the default device isn't supported here".into());
+                        continue;
+                    };
+                    let name = device.name.clone();
+                    policy.set_default(&device.id).context(|| format!("Couldn't switch to {name}"))?;
+                    outcome.devices_switched = true;
+                }
+            }
+        }
+        if outcome.devices_switched {
+            let dirty = Dirty { devices: true, sessions: true, ..Dirty::default() };
+            self.refresh(dirty, shared)
+                .context(|| "Profile partially applied; the new device couldn't be read".into())?;
+        }
+        if let Some(master) = profile.master {
+            match &self.output {
+                Some(ep) => unsafe {
+                    let what = || format!("Couldn't change the volume of {}", ep.name);
+                    ep.volume
+                        .SetMasterVolumeLevelScalar(master.volume.clamp(0.0, 1.0), &OWN_EVENT_CONTEXT)
+                        .context(what)?;
+                    ep.volume.SetMute(master.muted, &OWN_EVENT_CONTEXT).context(what)?;
+                    outcome.master = true;
+                },
+                None => outcome.notes.push("no output device for the master level".into()),
+            }
+        }
+        if !profile.entries.is_empty() {
+            outcome.apps = Some(self.apply_preset(profile.clone())?);
+        }
+        for entry in profile.entries.iter().filter(|e| e.output.is_some()) {
+            let Some(device) = &entry.output else { continue };
+            if self.processes_of(&entry.key).is_empty() {
+                continue;
+            }
+            if !self.outputs.iter().any(|d| d.id.eq_ignore_ascii_case(&device.id)) {
+                outcome.notes.push(format!("{} isn't connected for {}", device.name, entry.name));
+            } else if let Err(e) = self.route_app(&entry.key, Some(&device.id)) {
+                outcome.notes.push(format!("{}'s device ({e})", entry.name));
+            }
+        }
+        Ok(outcome)
+    }
+
     fn apply_preset(&mut self, preset: super::preferences::VolumePreset) -> Result<PresetOutcome, ApplyError> {
         let mut intervened = Vec::new();
         let outcome = {
-            let sessions: &[Session] = self.sessions.as_ref().map_or(&[], |set| &set.sessions);
+            let sessions: Vec<&Session> = self.sessions.iter().flat_map(|set| set.sessions.iter()).collect();
             execute_preset(
                 preset,
-                sessions,
+                &sessions,
                 |s| &s.key,
                 |s, volume, muted| unsafe {
                     s.simple.SetMasterVolume(volume, &OWN_EVENT_CONTEXT)?;
@@ -737,7 +1170,7 @@ impl Engine {
     }
 
     fn mark_key_intervened(&mut self, key: &AppKey) {
-        if let Some(set) = &self.sessions {
+        for set in &self.sessions {
             for session in set.sessions.iter().filter(|s| &s.key == key) {
                 if let Some(created) = set.processes.get(&session.pid).and_then(|p| p.started_at) {
                     self.start_tracker.note_process_intervention(key, session.pid, created);
@@ -750,13 +1183,11 @@ impl Engine {
         if self.preset_rules.is_empty() {
             return Ok(());
         }
-        let Some(set) = &self.sessions else {
-            return Ok(());
-        };
-        let candidates: Vec<StartCandidate<&Session>> = set
+        let candidates: Vec<StartCandidate<&Session>> = self
             .sessions
             .iter()
-            .map(|s| {
+            .flat_map(|set| set.sessions.iter().map(move |s| (set, s)))
+            .map(|(set, s)| {
                 let created = set.processes.get(&s.pid).and_then(|p| p.started_at);
                 let untouched = !s.changed.load(Ordering::Relaxed)
                     && unsafe {
@@ -784,6 +1215,219 @@ impl Engine {
             |msg| shared.push_notice(NoticeLevel::Error, msg),
         )
     }
+    /// Switches to the next connected pinned output. Returns an announcement
+    /// when nothing was switched; a switch is announced once Windows reports it.
+    fn cycle_output(&mut self) -> Result<Option<String>, ApplyError> {
+        use super::preferences::{CycleOutcome, next_pinned_output};
+        let next = match next_pinned_output(&self.pinned_outputs, &self.outputs) {
+            CycleOutcome::Switch(device) => device.clone(),
+            CycleOutcome::AlreadyDefault(device) => {
+                return Ok(Some(format!("{} is the only pinned output connected.", device.name)));
+            }
+            CycleOutcome::NothingPinned => {
+                return Ok(Some("Pin output devices in Devices to cycle through them.".into()));
+            }
+            CycleOutcome::NoneConnected => return Ok(Some("None of the pinned output devices is connected.".into())),
+        };
+        let policy = self.policy.as_ref().ok_or_else(|| {
+            ApplyError::Message("Switching the default device isn't supported on this system.".into())
+        })?;
+        policy.set_default(&next.id).context(|| format!("Couldn't switch to {}", next.name))?;
+        self.announce_output_until = Some(Instant::now() + ANNOUNCE_WINDOW);
+        Ok(None)
+    }
+
+    /// Sets (or resets) the output of every process of the app.
+    fn route_app(&mut self, key: &AppKey, device: Option<&str>) -> Result<(), ApplyError> {
+        let routing = self.routing.as_ref().ok_or_else(|| {
+            ApplyError::Message("Choosing a device per app isn't supported on this version of Windows.".into())
+        })?;
+        let processes = self.processes_of(key);
+        if processes.is_empty() {
+            return Err(ApplyError::Message(
+                "That app has no audio session right now; start it playing, then choose its device.".into(),
+            ));
+        }
+        let name = self.app_name(key).unwrap_or_else(|| "the app".into());
+        let mut set = 0;
+        let mut first_error = None;
+        for (pid, created) in processes {
+            match routing.set(pid, Flow::Output, device) {
+                Ok(()) => {
+                    set += 1;
+                    let route = device.map_or(Route::SystemDefault, |id| Route::Device(id.to_owned()));
+                    self.routes.insert((pid, created), route);
+                }
+                // A helper process may exit between listing and routing it.
+                Err(e) if created.is_none_or(|t| process::is_running(pid, t)) => {
+                    first_error.get_or_insert(e);
+                }
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(e) if set == 0 => Err(ApplyError::Windows(format!("Couldn't change the device of {name}"), e)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Every process with a session of the app, with its creation time when known.
+    fn processes_of(&self, key: &AppKey) -> Vec<(u32, Option<u64>)> {
+        let mut found: Vec<(u32, Option<u64>)> = Vec::new();
+        for set in &self.sessions {
+            for s in set.sessions.iter().filter(|s| &s.key == key && s.pid != 0) {
+                let created = set.processes.get(&s.pid).and_then(|p| p.started_at);
+                if !found.iter().any(|(pid, _)| *pid == s.pid) {
+                    found.push((s.pid, created));
+                }
+            }
+        }
+        found
+    }
+
+    /// Fills each app's device preference, querying Windows only for processes
+    /// not seen before. An app's first process that answers decides.
+    fn read_routes(&mut self, apps: &mut [AppEntry]) {
+        let Some(routing) = &self.routing else {
+            for app in apps.iter_mut() {
+                app.route = Route::Unknown;
+            }
+            return;
+        };
+        let live: Vec<(u32, Option<u64>)> =
+            apps.iter().filter(|a| a.key != AppKey::System).flat_map(|a| self.processes_of(&a.key)).collect();
+        self.routes.retain(|process, _| live.contains(process));
+        for app in apps.iter_mut() {
+            if app.key == AppKey::System {
+                continue;
+            }
+            let mut route = Route::Unknown;
+            for process in self.processes_of(&app.key) {
+                let known = self.routes.entry(process).or_insert_with(|| match routing.get(process.0, Flow::Output) {
+                    Ok(Some(id)) => Route::Device(id),
+                    Ok(None) => Route::SystemDefault,
+                    Err(e) => {
+                        log::debug!("couldn't read the device preference of process {}: {e}", process.0);
+                        Route::Unknown
+                    }
+                });
+                if *known != Route::Unknown {
+                    route = known.clone();
+                    break;
+                }
+            }
+            app.route = route;
+        }
+    }
+
+    fn stream(&self, id: &str) -> Result<&Session, ApplyError> {
+        self.sessions
+            .iter()
+            .flat_map(|set| set.sessions.iter())
+            .find(|s| s.instance_id == id)
+            .ok_or_else(|| ApplyError::Message("That audio stream has ended; the list has been refreshed.".into()))
+    }
+
+    fn app_name(&self, key: &AppKey) -> Option<String> {
+        self.sessions.iter().flat_map(|set| set.sessions.iter()).find(|s| &s.key == key).map(|s| s.name.clone())
+    }
+
+    fn toggle_solo(&mut self, key: &AppKey) -> Result<Option<String>, ApplyError> {
+        if self.reductions.solo.as_ref() == Some(key) {
+            return self.end_solo();
+        }
+        let name = self.app_name(key).ok_or_else(|| {
+            ApplyError::Message("That app has no audio session right now, so it can't be soloed.".into())
+        })?;
+        log::info!("solo started for {key:?}");
+        self.reductions.solo = Some(key.clone());
+        Ok(Some(format!("Solo: {name}")))
+    }
+
+    fn end_solo(&mut self) -> Result<Option<String>, ApplyError> {
+        let Some(key) = self.reductions.solo.take() else {
+            return Ok(None);
+        };
+        log::info!("solo ended for {key:?}");
+        let name = self.app_name(&key).unwrap_or_else(|| "the app".into());
+        Ok(Some(format!("Solo ended for {name}")))
+    }
+
+    /// Writes the reductions that should apply now and undoes those that ended.
+    fn apply_reductions(&mut self, shared: &Shared) -> WinResult<()> {
+        if let Some(key) = &self.reductions.solo
+            && !self.sessions.iter().flat_map(|set| set.sessions.iter()).any(|s| &s.key == key)
+        {
+            log::info!("solo ended: {key:?} has no audio session left");
+            self.reductions.solo = None;
+            shared.push_announcement("Solo ended: the app closed its audio.");
+        }
+        if !self.reductions.active() {
+            return Ok(());
+        }
+        for s in self.sessions.iter().flat_map(|set| set.sessions.iter()) {
+            let wanted = self.reductions.wanted(&s.key);
+            if wanted.is_none() && !self.reductions.ledger.contains(&s.instance_id) {
+                continue;
+            }
+            let current = match unsafe { s.simple.GetMasterVolume().and_then(|v| Ok((v, s.simple.GetMute()?))) } {
+                Ok((volume, muted)) => Level { volume, muted: muted.as_bool() },
+                Err(e) if is_fatal(e.code()) => return Err(e),
+                Err(e) => {
+                    log::debug!("couldn't read {} for a reduction: {e}", s.name);
+                    continue;
+                }
+            };
+            if let Some(target) = self.reductions.ledger.reconcile(&s.instance_id, current, wanted)
+                && let Err(e) = write_level(s, target)
+            {
+                if is_fatal(e.code()) {
+                    return Err(e);
+                }
+                log::warn!("couldn't change {} for a reduction: {e}", s.name);
+            }
+        }
+        let sessions = &self.sessions;
+        self.reductions
+            .ledger
+            .retain(|id| sessions.iter().flat_map(|set| set.sessions.iter()).any(|s| s.instance_id == id));
+        Ok(())
+    }
+
+    /// Puts back every level a reduction changed (when it is still the written
+    /// one), before the sessions are released.
+    fn release_reductions(&mut self) {
+        let sets: Vec<&SessionSet> = self.sessions.iter().collect();
+        release_in(&mut self.reductions.ledger, &sets);
+        self.reductions.ledger = Ledger::default();
+    }
+
+    /// Opens a session set for every active output (the default first) and
+    /// releases those of outputs that are gone.
+    fn open_session_sets(&mut self, default_id: Option<&str>) -> WinResult<()> {
+        let outputs = &self.outputs;
+        let (keep, gone): (Vec<SessionSet>, Vec<SessionSet>) = std::mem::take(&mut self.sessions)
+            .into_iter()
+            .partition(|set| outputs.iter().any(|d| d.id == set.device_id));
+        release_in(&mut self.reductions.ledger, &gone.iter().collect::<Vec<_>>());
+        drop(gone);
+        self.sessions = keep;
+        for d in &self.outputs {
+            if self.sessions.iter().any(|set| set.device_id == d.id) {
+                continue;
+            }
+            let opened = unsafe { self.enumerator.GetDevice(&HSTRING::from(d.id.as_str())) }
+                .and_then(|device| SessionSet::open(&device, d.id.clone(), self.tx.clone()));
+            match opened {
+                Ok(set) => self.sessions.push(set),
+                Err(e) if is_fatal(e.code()) => return Err(e),
+                Err(e) => log::warn!("couldn't open the sessions of {}: {e}", d.name),
+            }
+        }
+        self.sessions.sort_by_key(|set| Some(set.device_id.as_str()) != default_id);
+        Ok(())
+    }
+
     fn endpoint(&self, flow: Flow) -> Result<&Endpoint, ApplyError> {
         let ep = match flow {
             Flow::Output => self.output.as_ref(),
@@ -841,15 +1485,45 @@ impl PresetOutcome {
         if !self.failed.is_empty() {
             (
                 NoticeLevel::Error,
-                format!("Preset applied to {} app(s); couldn't change {}.", self.applied, self.failed.join(", ")),
+                format!("Profile applied to {} app(s); couldn't change {}.", self.applied, self.failed.join(", ")),
             )
         } else if self.applied == 0 {
-            (NoticeLevel::Warning, "None of the apps in that preset are running right now.".into())
+            (NoticeLevel::Warning, "None of the apps in that profile are running right now.".into())
         } else if self.missing > 0 {
-            (NoticeLevel::Info, format!("Preset applied to {} app(s) ({} not running).", self.applied, self.missing))
+            (NoticeLevel::Info, format!("Profile applied to {} app(s) ({} not running).", self.applied, self.missing))
         } else {
-            (NoticeLevel::Info, format!("Preset applied to {} app(s).", self.applied))
+            (NoticeLevel::Info, format!("Profile applied to {} app(s).", self.applied))
         }
+    }
+}
+
+/// What applying a whole profile did.
+#[derive(Debug, Default, PartialEq)]
+struct ProfileOutcome {
+    devices_switched: bool,
+    master: bool,
+    apps: Option<PresetOutcome>,
+    /// Parts that could not be applied, in plain words.
+    notes: Vec<String>,
+}
+
+impl ProfileOutcome {
+    fn notice(&self, name: &str) -> (NoticeLevel, String) {
+        let (mut level, mut text) = match &self.apps {
+            Some(apps) => apps.notice(),
+            None if self.devices_switched || self.master => (NoticeLevel::Info, format!("Profile {name} applied.")),
+            None => (NoticeLevel::Warning, format!("Nothing in profile {name} could be applied.")),
+        };
+        if self.apps.is_some() {
+            text = text.replacen("Profile", &format!("Profile {name}"), 1);
+        }
+        if !self.notes.is_empty() {
+            text = format!("{text} Not applied: {}.", self.notes.join("; "));
+            if level == NoticeLevel::Info {
+                level = NoticeLevel::Warning;
+            }
+        }
+        (level, text)
     }
 }
 
@@ -952,9 +1626,41 @@ fn execute_start_rules<I>(
     Ok(())
 }
 
+/// Restores the levels reductions changed in `sets` and forgets those sessions.
+fn release_in(ledger: &mut Ledger, sets: &[&SessionSet]) {
+    let mut failed = 0;
+    for s in sets.iter().flat_map(|set| set.sessions.iter()) {
+        if !ledger.contains(&s.instance_id) {
+            continue;
+        }
+        let current = unsafe { s.simple.GetMasterVolume().and_then(|v| Ok((v, s.simple.GetMute()?))) };
+        let Ok((volume, muted)) = current else {
+            failed += 1;
+            continue;
+        };
+        let current = Level { volume, muted: muted.as_bool() };
+        if let Some(base) = ledger.reconcile(&s.instance_id, current, None)
+            && write_level(s, base).is_err()
+        {
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        log::warn!("{failed} lowered session(s) could not be restored");
+    }
+}
+
+fn write_level(session: &Session, level: Level) -> WinResult<()> {
+    unsafe {
+        session.simple.SetMasterVolume(level.volume, &OWN_EVENT_CONTEXT)?;
+        session.simple.SetMute(level.muted, &OWN_EVENT_CONTEXT)
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.sessions = None;
+        self.release_reductions();
+        self.sessions.clear();
         self.output = None;
         self.input = None;
         self.extra_endpoints.clear();
@@ -1058,8 +1764,9 @@ impl Drop for Endpoint {
     }
 }
 
-/// Sessions of the default output device.
+/// Sessions of one output device.
 struct SessionSet {
+    device_id: String,
     manager: IAudioSessionManager2,
     notifier: IAudioSessionNotification,
     sessions: Vec<Session>,
@@ -1073,11 +1780,11 @@ struct ProcessEntry {
 }
 
 impl SessionSet {
-    fn open(device: &IMMDevice, tx: Sender<Msg>) -> WinResult<Self> {
+    fn open(device: &IMMDevice, device_id: String, tx: Sender<Msg>) -> WinResult<Self> {
         let manager: IAudioSessionManager2 = unsafe { device.Activate(CLSCTX_ALL, None)? };
         let notifier = SessionCreatedNotifier::create(tx.clone());
         unsafe { manager.RegisterSessionNotification(&notifier)? };
-        let mut set = Self { manager, notifier, sessions: Vec::new(), processes: HashMap::new() };
+        let mut set = Self { device_id, manager, notifier, sessions: Vec::new(), processes: HashMap::new() };
         // Enumerating after registering is required for creation notifications to be delivered.
         let _ = set.sync(&tx)?;
         Ok(set)
@@ -1098,12 +1805,24 @@ impl SessionSet {
         let count = unsafe { enumerator.GetCount()? };
         let mut seen = HashSet::new();
         for i in 0..count {
-            let control = unsafe { enumerator.GetSession(i)? };
-            let control: IAudioSessionControl2 = control.cast()?;
-            if unsafe { control.GetState()? } == AudioSessionStateExpired {
-                continue;
-            }
-            let instance_id = take_pwstr(unsafe { control.GetSessionInstanceIdentifier()? });
+            // One unreadable session must not hide every other one.
+            let read = (|| -> WinResult<Option<(IAudioSessionControl2, String)>> {
+                let control: IAudioSessionControl2 = unsafe { enumerator.GetSession(i)? }.cast()?;
+                if unsafe { control.GetState()? } == AudioSessionStateExpired {
+                    return Ok(None);
+                }
+                let instance_id = take_pwstr(unsafe { control.GetSessionInstanceIdentifier()? });
+                Ok(Some((control, instance_id)))
+            })();
+            let (control, instance_id) = match read {
+                Ok(Some(session)) => session,
+                Ok(None) => continue,
+                Err(e) if is_fatal(e.code()) => return Err(e),
+                Err(e) => {
+                    log::warn!("skipping unreadable audio session {i}: {e}");
+                    continue;
+                }
+            };
             if self.sessions.iter().any(|s| s.instance_id == instance_id) {
                 seen.insert(instance_id);
                 continue;
@@ -1197,13 +1916,7 @@ impl Session {
                 None => ProcessEntry { info: ProcessInfo::default(), watch: None, started_at: None },
             });
             let info = &entry.info;
-            let key = if let Some(aumid) = &info.aumid {
-                AppKey::Package(aumid.to_lowercase())
-            } else if let Some(path) = &info.exe_path {
-                AppKey::Exe(path.to_string_lossy().to_lowercase())
-            } else {
-                AppKey::Pid(pid)
-            };
+            let key = app_key(info, pid);
             let name = [
                 Some(display).filter(|d| !d.is_empty() && !d.starts_with('@')),
                 info.description.clone(),
@@ -1237,7 +1950,7 @@ impl Session {
     }
 
     /// Current values, or `None` if the session has expired.
-    fn facts(&self) -> WinResult<Option<SessionFacts>> {
+    fn facts(&self, device_id: &str) -> WinResult<Option<SessionFacts>> {
         unsafe {
             let state = self.control.GetState()?;
             if state == AudioSessionStateExpired {
@@ -1252,6 +1965,9 @@ impl Session {
                 _ => None,
             };
             Ok(Some(SessionFacts {
+                id: self.instance_id.clone(),
+                pid: self.pid,
+                device_id: device_id.to_owned(),
                 key: self.key.clone(),
                 name: self.name.clone(),
                 exe_path: self.exe_path.clone(),
@@ -1272,6 +1988,21 @@ impl Drop for Session {
             let _ = self.control.UnregisterAudioSessionNotification(&self.events);
         }
     }
+}
+
+/// How an app is identified: package, then executable path, then process ID.
+fn app_key(info: &ProcessInfo, pid: u32) -> AppKey {
+    if let Some(aumid) = &info.aumid {
+        AppKey::Package(aumid.to_lowercase())
+    } else if let Some(path) = &info.exe_path {
+        AppKey::Exe(path.to_string_lossy().to_lowercase())
+    } else {
+        AppKey::Pid(pid)
+    }
+}
+
+fn apps_lowered_in_background(reductions: &Reductions, apps: &[AppKey]) -> Vec<AppKey> {
+    apps.iter().filter(|key| reductions.background_reduction(key).is_some()).cloned().collect()
 }
 
 /// Resolves `@%SystemRoot%\System32\AudioSrv.Dll,-202`-style indirect strings.
@@ -1316,6 +2047,105 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_device_events_refreshes_once_and_late_events_are_not_lost() {
+        let window = DEVICE_COALESCE;
+        let t0 = Instant::now();
+        let mut c = Coalesce::default();
+        assert!(!c.take_due(t0), "nothing pending");
+        for ms in [0, 10, 30, 45] {
+            c.note(t0 + Duration::from_millis(ms), window);
+        }
+        assert_eq!(c.due, Some(t0 + window), "later events in the burst don't push the refresh out");
+        assert!(!c.take_due(t0 + Duration::from_millis(49)));
+        assert!(c.take_due(t0 + window), "one refresh for the whole burst");
+        assert!(!c.take_due(t0 + window * 2), "and only one");
+
+        // An event after the refresh started opens a new window instead of being dropped.
+        c.note(t0 + window + Duration::from_millis(5), window);
+        assert!(c.take_due(t0 + window * 2 + Duration::from_millis(5)));
+
+        // A refresh for another reason (such as a default-device change) covers pending events.
+        c.note(t0, window);
+        c.cancel();
+        assert!(!c.take_due(t0 + window));
+    }
+
+    #[test]
+    fn peaks_take_each_apps_loudest_session_and_drop_apps_that_left() {
+        let (a, b, c) = (AppKey::Pid(1), AppKey::Pid(2), AppKey::Pid(3));
+        let mut apps = HashMap::new();
+        let first = [(a.clone(), 0.2), (b.clone(), 0.5), (a.clone(), 0.7)];
+        let mut reads = 0;
+        merge_peaks(
+            &mut apps,
+            first.iter(),
+            |s| &s.0,
+            |s| {
+                reads += 1;
+                s.1
+            },
+        );
+        assert_eq!(reads, 3, "every session is read exactly once");
+        assert_eq!(apps, HashMap::from([(a.clone(), 0.7), (b.clone(), 0.5)]));
+
+        let capacity = apps.capacity();
+        merge_peaks(&mut apps, [(c.clone(), 0.1), (a.clone(), 0.0)].iter(), |s| &s.0, |s| s.1);
+        assert_eq!(apps, HashMap::from([(a.clone(), 0.0), (c, 0.1)]), "b left; a went silent");
+        assert_eq!(apps.capacity(), capacity, "the map is reused, not rebuilt");
+
+        merge_peaks(&mut apps, [].iter() as std::slice::Iter<(AppKey, f32)>, |s| &s.0, |s| s.1);
+        assert!(apps.is_empty());
+    }
+
+    #[test]
+    fn profile_notices_name_the_profile_and_what_was_not_applied() {
+        let apps = PresetOutcome { applied: 2, missing: 0, failed: Vec::new() };
+        let full = ProfileOutcome { devices_switched: true, master: true, apps: Some(apps), notes: Vec::new() };
+        assert_eq!(full.notice("Gaming"), (NoticeLevel::Info, "Profile Gaming applied to 2 app(s).".into()));
+        let devices_only = ProfileOutcome { devices_switched: true, ..ProfileOutcome::default() };
+        assert_eq!(devices_only.notice("Media"), (NoticeLevel::Info, "Profile Media applied.".into()));
+        let missing =
+            ProfileOutcome { master: true, notes: vec!["Headset isn't connected".into()], ..Default::default() };
+        assert_eq!(
+            missing.notice("Work"),
+            (NoticeLevel::Warning, "Profile Work applied. Not applied: Headset isn't connected.".into())
+        );
+        assert_eq!(ProfileOutcome::default().notice("Empty").0, NoticeLevel::Warning);
+    }
+
+    #[test]
+    fn solo_focus_and_microphone_reductions_combine_per_app() {
+        let (game, chat, music) =
+            (AppKey::Exe("game.exe".into()), AppKey::Exe("chat.exe".into()), AppKey::Exe("music.exe".into()));
+        let half = Reduction { factor: 0.5, mute: false };
+        let quiet = Reduction { factor: 0.2, mute: false };
+        let mut r = Reductions {
+            solo: None,
+            solo_level: quiet,
+            focus_rules: vec![(game.clone(), half)],
+            foreground: None,
+            mic: Some((Reduction { factor: 0.3, mute: false }, vec![music.clone()])),
+            mic_active: false,
+            ledger: Ledger::default(),
+        };
+        assert_eq!(r.wanted(&game), None, "nothing is lowered before the foreground app is known");
+        r.foreground = Some(chat.clone());
+        assert_eq!(r.wanted(&game), Some(half), "the game is in the background");
+        r.foreground = Some(game.clone());
+        assert_eq!(r.wanted(&game), None, "back in front");
+        assert_eq!(r.wanted(&music), None, "the microphone is quiet");
+        r.mic_active = true;
+        assert_eq!(r.wanted(&music).map(|x| x.factor), Some(0.3));
+        assert_eq!(r.wanted(&chat), None, "only the microphone targets are lowered");
+        r.solo = Some(chat.clone());
+        r.foreground = Some(chat.clone());
+        assert_eq!(r.wanted(&game).map(|x| x.factor), Some(0.2), "Solo and the focus rule: the stronger applies");
+        assert_eq!(r.wanted(&chat), None, "the soloed app isn't lowered");
+        assert_eq!(r.wanted(&AppKey::System), None, "System sounds is left alone");
+        assert_eq!(apps_lowered_in_background(&r, &[game.clone(), music]), vec![game]);
+    }
+
+    #[test]
     fn meter_difference_threshold() {
         let mut a = Meters::default();
         let b = Meters::default();
@@ -1323,6 +2153,11 @@ mod tests {
         a.apps.insert(AppKey::Pid(1), 0.005);
         assert!(!meters_differ(&a, &b));
         a.apps.insert(AppKey::Pid(1), 0.2);
+        assert!(meters_differ(&a, &b));
+        assert!(meters_differ(&b, &a), "an app only in the second set counts too");
+        a.apps.insert(AppKey::Pid(1), 0.0);
+        assert!(!meters_differ(&a, &b), "a silent app equals a missing one");
+        a.output = 0.5;
         assert!(meters_differ(&a, &b));
     }
 
@@ -1337,10 +2172,11 @@ mod tests {
             name: "Work".into(),
             apply_on_start: false,
             entries: vec![
-                PresetEntry { key: a.clone(), name: "Alpha".into(), volume: 0.3, muted: false },
-                PresetEntry { key: b.clone(), name: "Beta".into(), volume: 0.5, muted: true },
-                PresetEntry { key: c.clone(), name: "Gamma".into(), volume: 0.8, muted: false },
+                PresetEntry { key: a.clone(), name: "Alpha".into(), volume: 0.3, muted: false, output: None },
+                PresetEntry { key: b.clone(), name: "Beta".into(), volume: 0.5, muted: true, output: None },
+                PresetEntry { key: c.clone(), name: "Gamma".into(), volume: 0.8, muted: false, output: None },
             ],
+            ..Default::default()
         };
         let live = [a.clone(), b.clone()];
         let mut intervened = Vec::new();
@@ -1360,7 +2196,10 @@ mod tests {
             "Beta must be applied and Gamma counted as missing despite Alpha failing"
         );
         assert_eq!(intervened, vec![b.clone()]);
-        assert_eq!(outcome.notice(), (NoticeLevel::Error, "Preset applied to 1 app(s); couldn't change Alpha.".into()));
+        assert_eq!(
+            outcome.notice(),
+            (NoticeLevel::Error, "Profile applied to 1 app(s); couldn't change Alpha.".into())
+        );
 
         let fatal = execute_preset(
             preset,
@@ -1382,7 +2221,14 @@ mod tests {
         let rules = vec![VolumePreset {
             name: "Auto".into(),
             apply_on_start: true,
-            entries: vec![PresetEntry { key: app.clone(), name: "Player".into(), volume: 0.4, muted: false }],
+            entries: vec![PresetEntry {
+                key: app.clone(),
+                name: "Player".into(),
+                volume: 0.4,
+                muted: false,
+                output: None,
+            }],
+            ..Default::default()
         }];
         let mut tracker = StartTracker::new(100);
         // Newer process (160, pid 20) appears before older process (150, pid 10) in the input slice,

@@ -77,6 +77,83 @@ pub enum Density {
     Compact,
 }
 
+/// Lowers an app while another app is in the foreground (opt-in, per pinned app).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusRule {
+    pub key: crate::audio::AppKey,
+    pub name: String,
+    /// Percent of its own volume the app keeps in the background, 0 to 90.
+    #[serde(default = "default_focus_keep")]
+    pub keep_percent: u8,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+fn default_focus_keep() -> u8 {
+    30
+}
+
+/// Lowers chosen apps while the microphone picks up speech. Off by default.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MicDuckingSettings {
+    pub enabled: bool,
+    /// Microphone peak level that counts as speech, in percent.
+    pub threshold_percent: u8,
+    /// How long speech must last before ducking starts.
+    pub attack_ms: u16,
+    /// How long silence must last before levels come back.
+    pub release_ms: u16,
+    /// Percent of their own volume the targets keep, 0 to 90.
+    pub keep_percent: u8,
+    pub targets: Vec<crate::audio::AppKey>,
+}
+
+impl Default for MicDuckingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_percent: 10,
+            attack_ms: 150,
+            release_ms: 1200,
+            keep_percent: 30,
+            targets: Vec::new(),
+        }
+    }
+}
+
+/// How Solo quiets the other apps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoloSettings {
+    /// Percent of their own volume the other apps keep, 0 to 90.
+    pub keep_percent: u8,
+    /// Mute the other apps instead of lowering them.
+    pub mute: bool,
+}
+
+impl Default for SoloSettings {
+    fn default() -> Self {
+        Self { keep_percent: 20, mute: false }
+    }
+}
+
+impl SoloSettings {
+    /// The multiplier applied to other apps' volume (ignored when muting).
+    pub fn factor(self) -> f32 {
+        f32::from(self.keep_percent.min(90)) / 100.0
+    }
+}
+
+/// The interface typeface: the bundled Salted Flutters Polaris, or Windows' Segoe UI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Typeface {
+    #[default]
+    Polaris,
+    System,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
     pub x: f32,
@@ -124,6 +201,8 @@ pub struct Settings {
     #[serde(deserialize_with = "lenient")]
     pub density: Density,
     #[serde(deserialize_with = "lenient")]
+    pub typeface: Typeface,
+    #[serde(deserialize_with = "lenient")]
     pub start_minimized: bool,
     #[serde(deserialize_with = "lenient_true")]
     pub close_to_tray: bool,
@@ -143,6 +222,21 @@ pub struct Settings {
     pub hotkeys: Vec<crate::platform::hotkeys::HotkeyBinding>,
     #[serde(deserialize_with = "lenient_step")]
     pub hotkey_step: u8,
+    /// Volume change per mouse-wheel notch over a volume slider, in percent.
+    #[serde(deserialize_with = "lenient_wheel_step")]
+    pub wheel_step: u8,
+    /// Output devices the "cycle output" shortcut switches between, in order.
+    #[serde(deserialize_with = "read_pinned_devices")]
+    pub pinned_devices: Vec<crate::audio::preferences::PinnedDevice>,
+    #[serde(deserialize_with = "lenient")]
+    pub solo: SoloSettings,
+    /// Names the user gave apps, shown instead of the ones Windows reports.
+    #[serde(deserialize_with = "read_app_names")]
+    pub app_names: Vec<crate::audio::preferences::AppName>,
+    #[serde(deserialize_with = "read_focus_rules")]
+    pub focus_rules: Vec<FocusRule>,
+    #[serde(deserialize_with = "lenient")]
+    pub mic_ducking: MicDuckingSettings,
     #[serde(deserialize_with = "lenient")]
     pub window: Option<WindowGeometry>,
     /// Version 1 stored egui logical points; version 2 stores screen pixels.
@@ -161,6 +255,7 @@ impl Default for Settings {
             backdrop: Backdrop::Acrylic,
             accent: Accent::Violet,
             density: Density::Comfortable,
+            typeface: Typeface::Polaris,
             start_minimized: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -171,6 +266,12 @@ impl Default for Settings {
             presets: Vec::new(),
             hotkeys: Vec::new(),
             hotkey_step: 5,
+            wheel_step: 2,
+            pinned_devices: Vec::new(),
+            solo: SoloSettings::default(),
+            app_names: Vec::new(),
+            focus_rules: Vec::new(),
+            mic_ducking: MicDuckingSettings::default(),
             window: None,
             window_position_physical: false,
             extra: serde_json::Map::new(),
@@ -217,6 +318,36 @@ fn read_hotkeys<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::platform::
     list_items(d)
 }
 
+fn read_pinned_devices<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::audio::preferences::PinnedDevice>, D::Error> {
+    Ok(crate::audio::preferences::normalize_pinned_devices(list_items(d)?))
+}
+
+fn read_focus_rules<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<FocusRule>, D::Error> {
+    let mut seen = std::collections::HashSet::new();
+    Ok(list_items::<_, FocusRule>(d)?
+        .into_iter()
+        .filter_map(|mut rule| {
+            rule.key = crate::audio::preferences::normalized_key(&rule.key)?;
+            (rule.key != crate::audio::AppKey::System && seen.insert(rule.key.clone())).then(|| {
+                rule.keep_percent = rule.keep_percent.min(90);
+                rule
+            })
+        })
+        .take(64)
+        .collect())
+}
+
+fn read_app_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::audio::preferences::AppName>, D::Error> {
+    Ok(crate::audio::preferences::normalize_app_names(list_items(d)?))
+}
+
+fn lenient_wheel_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<u8>(value).ok().filter(|v| (1..=20).contains(v)).unwrap_or(2))
+}
+
 fn lenient_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value::<u8>(value).ok().filter(|v| (1..=20).contains(v)).unwrap_or(5))
@@ -224,7 +355,7 @@ fn lenient_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
 
 /// Decodes a settings file: UTF-8 with or without a byte-order mark, or UTF-16
 /// with one, as Notepad and PowerShell write when the file is edited by hand.
-fn decode_text(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, String> {
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
         let (units, odd) = rest.as_chunks::<2>();
         if !odd.is_empty() {
@@ -550,6 +681,54 @@ mod tests {
             assert!(geometry_changed(Some(saved), true, moved), "{moved:?} should be saved");
         }
         assert!(geometry_changed(Some(saved), false, saved), "a version-1 (logical point) file is rewritten once");
+    }
+
+    #[test]
+    fn the_typeface_defaults_to_polaris_and_survives_a_bad_value() {
+        let old: Settings = serde_json::from_str(r#"{"version":4,"theme":"dark"}"#).unwrap();
+        assert_eq!(old.typeface, Typeface::Polaris);
+        let windows: Settings = serde_json::from_str(r#"{"typeface":"system"}"#).unwrap();
+        assert_eq!(windows.typeface, Typeface::System);
+        let bad: Settings = serde_json::from_str(r#"{"typeface":"comic","theme":"light"}"#).unwrap();
+        assert_eq!((bad.typeface, bad.theme), (Typeface::Polaris, ThemeMode::Light), "only the bad field resets");
+        assert!(serde_json::to_string(&windows).unwrap().contains(r#""typeface":"system""#));
+    }
+
+    #[test]
+    fn new_fields_default_when_missing_and_recover_from_bad_values() {
+        let old: Settings = serde_json::from_str(r#"{"version":4,"theme":"dark"}"#).unwrap();
+        assert_eq!((old.wheel_step, old.solo, old.pinned_devices.len()), (2, SoloSettings::default(), 0));
+        let text = serde_json::json!({
+            "version": 4,
+            "wheel_step": 50,
+            "solo": {"keep_percent": "loud", "mute": true},
+            "pinned_devices": [
+                {"id": "{0.0.0.00000000}.{a}", "name": "Headset"},
+                {"id": "{0.0.0.00000000}.{A}", "name": "Duplicate"},
+                {"name": "no id"}
+            ]
+        })
+        .to_string();
+        let s: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(s.wheel_step, 2, "out-of-range wheel steps fall back to the default");
+        assert_eq!(s.solo, SoloSettings::default(), "one bad solo field resets only the solo settings");
+        assert_eq!(s.pinned_devices.len(), 1);
+        assert_eq!(s.pinned_devices[0].name, "Headset");
+        assert_eq!(SoloSettings { keep_percent: 200, mute: false }.factor(), 0.9, "never louder than 90 %");
+        let rules = serde_json::json!({
+            "focus_rules": [
+                {"key": {"exe": "C:\\Games\\GAME.EXE"}, "name": "Game", "keep_percent": 250},
+                {"key": {"exe": "c:\\games\\game.exe"}, "name": "Duplicate"},
+                {"key": "system", "name": "System sounds"},
+                {"key": {"pid": 4}, "name": "Transient"}
+            ],
+            "mic_ducking": {"enabled": true, "targets": [{"exe": "c:\\music.exe"}]}
+        });
+        let s: Settings = serde_json::from_str(&rules.to_string()).unwrap();
+        assert_eq!(s.focus_rules.len(), 1, "duplicates, System sounds and process IDs are dropped");
+        assert_eq!(s.focus_rules[0].keep_percent, 90);
+        assert!(s.mic_ducking.enabled);
+        assert_eq!(s.mic_ducking.attack_ms, 150, "missing fields keep their defaults");
     }
 
     #[test]

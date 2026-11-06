@@ -69,6 +69,61 @@ pub enum Activity {
     Idle,
 }
 
+/// The left/right balance of an app row, aggregated over its stereo sessions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BalanceState {
+    /// Every stereo session has this balance, within [`BALANCE_TOLERANCE`].
+    Uniform(f32),
+    /// Stereo sessions disagree. Setting a balance aligns all of them.
+    Mixed,
+    /// No session exposes two channels.
+    Unavailable,
+}
+
+/// Balances closer than this are shown as one value; the slider can't resolve less.
+pub const BALANCE_TOLERANCE: f32 = 0.01;
+
+impl BalanceState {
+    /// Aggregates per-session balances, where `None` is a session without stereo channels.
+    pub fn aggregate(balances: impl IntoIterator<Item = Option<f32>>) -> Self {
+        let mut range: Option<(f32, f32)> = None;
+        for b in balances.into_iter().flatten() {
+            range = Some(range.map_or((b, b), |(lo, hi)| (lo.min(b), hi.max(b))));
+        }
+        match range {
+            None => Self::Unavailable,
+            Some((lo, hi)) if hi - lo <= BALANCE_TOLERANCE => Self::Uniform((lo + hi) / 2.0),
+            Some(_) => Self::Mixed,
+        }
+    }
+}
+
+/// The output device Windows uses for an app.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Route {
+    /// The app follows the system default output.
+    #[default]
+    SystemDefault,
+    /// The app is set to use this output (endpoint ID), connected or not.
+    Device(String),
+    /// Windows doesn't say: per-app routing is unsupported, or the app's
+    /// process couldn't be queried (for example an elevated app).
+    Unknown,
+}
+
+/// One audio session of an app row, for the expanded per-stream controls.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamEntry {
+    /// The session instance identifier; commands address the stream by it.
+    pub id: String,
+    pub pid: u32,
+    /// The output device the stream plays on.
+    pub device_id: String,
+    pub volume: f32,
+    pub muted: bool,
+    pub activity: Activity,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppEntry {
     pub key: AppKey,
@@ -82,7 +137,10 @@ pub struct AppEntry {
     pub muted: bool,
     pub activity: Activity,
     pub session_count: usize,
-    pub balance: Option<f32>,
+    pub balance: BalanceState,
+    /// The sessions behind this row, in the order Windows lists them.
+    pub streams: Vec<StreamEntry>,
+    pub route: Route,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -106,6 +164,14 @@ pub struct AudioSnapshot {
     pub properties: HashMap<String, super::properties::DeviceProperties>,
     /// Whether the (undocumented) default-device switching interface is available.
     pub can_switch_default: bool,
+    /// The app in Solo; every other app is lowered.
+    pub solo: Option<AppKey>,
+    /// Whether apps can be set to use a specific output device.
+    pub can_route_apps: bool,
+    /// Microphone ducking is lowering its target apps right now.
+    pub mic_ducking: bool,
+    /// Apps lowered right now because another app is in the foreground.
+    pub background_lowered: Vec<AppKey>,
 }
 
 impl AudioSnapshot {
@@ -136,6 +202,9 @@ pub struct Meters {
 /// Per-session facts gathered by the engine, before grouping into [`AppEntry`] rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionFacts {
+    pub id: String,
+    pub pid: u32,
+    pub device_id: String,
     pub key: AppKey,
     pub name: String,
     pub exe_path: Option<PathBuf>,
@@ -144,6 +213,7 @@ pub struct SessionFacts {
     pub volume: f32,
     pub muted: bool,
     pub active: bool,
+    /// `None` when the session doesn't expose exactly two channels.
     pub balance: Option<f32>,
 }
 
@@ -151,23 +221,30 @@ pub struct SessionFacts {
 /// then by name (case-insensitive), so rows don't jump around as state changes.
 ///
 /// For a group, the displayed volume is the loudest session's volume, and the
-/// group is "muted" only if every session is muted. Commands are applied to all
-/// sessions of the group, so they converge after the first change.
+/// group is "muted" only if every session is muted. The balance is
+/// [`BalanceState::Mixed`] when stereo sessions disagree. Commands are applied
+/// to all sessions of the group, so they converge after the first change.
 pub fn group_sessions(sessions: &[SessionFacts]) -> Vec<AppEntry> {
     let mut groups: Vec<AppEntry> = Vec::new();
     let mut index: HashMap<&AppKey, usize> = HashMap::new();
     for s in sessions {
+        let stream = StreamEntry {
+            id: s.id.clone(),
+            pid: s.pid,
+            device_id: s.device_id.clone(),
+            volume: s.volume,
+            muted: s.muted,
+            activity: if s.active { Activity::Playing } else { Activity::Idle },
+        };
         if let Some(&i) = index.get(&s.key) {
             let g = &mut groups[i];
+            g.streams.push(stream);
             g.volume = g.volume.max(s.volume);
             g.muted &= s.muted;
             if s.active {
                 g.activity = Activity::Playing;
             }
             g.session_count += 1;
-            if g.balance.is_none() {
-                g.balance = s.balance;
-            }
             if g.icon_resource.is_none() {
                 g.icon_resource.clone_from(&s.icon_resource);
             }
@@ -186,9 +263,14 @@ pub fn group_sessions(sessions: &[SessionFacts]) -> Vec<AppEntry> {
                 muted: s.muted,
                 activity: if s.active { Activity::Playing } else { Activity::Idle },
                 session_count: 1,
-                balance: s.balance,
+                balance: BalanceState::Unavailable,
+                streams: vec![stream],
+                route: Route::SystemDefault,
             });
         }
+    }
+    for g in &mut groups {
+        g.balance = BalanceState::aggregate(sessions.iter().filter(|s| s.key == g.key).map(|s| s.balance));
     }
     groups.sort_by(|a, b| {
         let sys = |e: &AppEntry| e.key != AppKey::System;
@@ -292,6 +374,9 @@ mod tests {
 
     fn facts(key: AppKey, name: &str, volume: f32, muted: bool, active: bool) -> SessionFacts {
         SessionFacts {
+            id: format!("{key:?}/{name}/{volume}"),
+            pid: 0,
+            device_id: "out".into(),
             key,
             name: name.into(),
             exe_path: None,
@@ -322,6 +407,84 @@ mod tests {
         assert!(!apps[1].muted, "muted only if all sessions are muted");
         assert_eq!(apps[1].activity, Activity::Playing);
         assert_eq!(apps[2].name, "Spotify");
+    }
+
+    fn with_balance(key: &AppKey, balance: Option<f32>) -> SessionFacts {
+        SessionFacts { balance, ..facts(key.clone(), "App", 1.0, false, true) }
+    }
+
+    fn balance_of(sessions: &[SessionFacts]) -> BalanceState {
+        let apps = group_sessions(sessions);
+        assert_eq!(apps.len(), 1);
+        apps[0].balance
+    }
+
+    #[test]
+    fn identical_session_balances_are_uniform() {
+        let k = AppKey::Pid(1);
+        assert_eq!(
+            balance_of(&[with_balance(&k, Some(-0.4)), with_balance(&k, Some(-0.4))]),
+            BalanceState::Uniform(-0.4)
+        );
+        match balance_of(&[with_balance(&k, Some(0.200)), with_balance(&k, Some(0.205))]) {
+            BalanceState::Uniform(b) => assert!((b - 0.2025).abs() < 1e-6),
+            other => panic!("differences below the tolerance must be uniform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn differing_session_balances_are_mixed_not_the_first_sessions_value() {
+        let k = AppKey::Pid(1);
+        assert_eq!(balance_of(&[with_balance(&k, Some(0.5)), with_balance(&k, Some(-0.5))]), BalanceState::Mixed);
+        assert_eq!(
+            balance_of(&[with_balance(&k, Some(0.0)), with_balance(&k, Some(0.0)), with_balance(&k, Some(0.3))]),
+            BalanceState::Mixed
+        );
+    }
+
+    #[test]
+    fn mono_sessions_neither_hide_nor_contradict_stereo_balance() {
+        let k = AppKey::Pid(1);
+        assert_eq!(balance_of(&[with_balance(&k, None), with_balance(&k, Some(0.6))]), BalanceState::Uniform(0.6));
+        assert_eq!(balance_of(&[with_balance(&k, Some(0.6)), with_balance(&k, None)]), BalanceState::Uniform(0.6));
+        assert_eq!(balance_of(&[with_balance(&k, None), with_balance(&k, None)]), BalanceState::Unavailable);
+        assert_eq!(balance_of(&[with_balance(&k, None)]), BalanceState::Unavailable);
+    }
+
+    #[test]
+    fn balance_follows_sessions_as_they_come_and_go() {
+        let (k, other) = (AppKey::Pid(1), AppKey::Pid(2));
+        let a = with_balance(&k, Some(0.2));
+        let b = with_balance(&k, Some(-0.5));
+        assert_eq!(balance_of(&[a.clone(), b.clone()]), BalanceState::Mixed);
+        assert_eq!(balance_of(std::slice::from_ref(&a)), BalanceState::Uniform(0.2), "the disagreeing session ended");
+        assert_eq!(balance_of(&[a.clone(), with_balance(&k, Some(0.2))]), BalanceState::Uniform(0.2));
+        let apps = group_sessions(&[a, with_balance(&other, Some(-1.0)), b]);
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps.iter().find(|e| e.key == k).unwrap().balance, BalanceState::Mixed);
+        assert_eq!(
+            apps.iter().find(|e| e.key == other).unwrap().balance,
+            BalanceState::Uniform(-1.0),
+            "another app's sessions are never mixed in"
+        );
+    }
+
+    #[test]
+    fn a_deliberate_adjustment_aligns_every_stereo_session() {
+        let k = AppKey::Pid(1);
+        let before = [with_balance(&k, Some(0.3)), with_balance(&k, Some(-0.6)), with_balance(&k, None)];
+        assert_eq!(balance_of(&before), BalanceState::Mixed);
+        // What the engine writes for `SetAppBalance` and reads back: stereo sessions
+        // get the same channel levels, sessions without two channels are skipped.
+        let (l, r) = channels_from_balance(0.1);
+        let after: Vec<_> = before
+            .iter()
+            .map(|s| SessionFacts { balance: s.balance.map(|_| balance_from_channels(l, r)), ..s.clone() })
+            .collect();
+        match balance_of(&after) {
+            BalanceState::Uniform(b) => assert!((b - 0.1).abs() < 1e-5),
+            other => panic!("expected a uniform balance after the adjustment, got {other:?}"),
+        }
     }
 
     #[test]

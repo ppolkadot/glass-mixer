@@ -24,6 +24,7 @@ pub mod glyph {
     pub const SPEAKER: char = '\u{E7F5}';
     pub const WARNING: char = '\u{E7BA}';
     pub const CHECK: char = '\u{E73E}';
+    pub const SOLO: char = '\u{E7F6}';
 
     pub fn volume(volume: f32, muted: bool) -> char {
         if muted {
@@ -82,15 +83,44 @@ pub struct Slider<'a> {
     pub muted: bool,
     pub meter: Option<f32>,
     pub width: f32,
+    /// Value change per mouse-wheel notch.
+    pub wheel_step: f32,
 }
 
 impl<'a> Slider<'a> {
     pub fn volume(value: &'a mut f32, label: &'a str, width: f32) -> Self {
-        Self { value, min: 0.0, max: 1.0, origin: 0.0, label, a11y_scale: 100.0, muted: false, meter: None, width }
+        Self {
+            value,
+            min: 0.0,
+            max: 1.0,
+            origin: 0.0,
+            label,
+            a11y_scale: 100.0,
+            muted: false,
+            meter: None,
+            width,
+            wheel_step: 0.02,
+        }
     }
 
     pub fn balance(value: &'a mut f32, label: &'a str, width: f32) -> Self {
-        Self { value, min: -1.0, max: 1.0, origin: 0.0, label, a11y_scale: 100.0, muted: false, meter: None, width }
+        Self {
+            value,
+            min: -1.0,
+            max: 1.0,
+            origin: 0.0,
+            label,
+            a11y_scale: 100.0,
+            muted: false,
+            meter: None,
+            width,
+            wheel_step: 0.04,
+        }
+    }
+
+    /// Sets the wheel step from a percentage (the "Mouse wheel step" setting).
+    pub fn wheel_percent(self, percent: u8) -> Self {
+        Self { wheel_step: f32::from(percent.clamp(1, 20)) / 100.0, ..self }
     }
 
     pub fn show(self, ui: &mut Ui, p: &Palette) -> Response {
@@ -158,7 +188,7 @@ impl<'a> Slider<'a> {
                 }
             });
             if response.hovered() {
-                // One wheel notch = 2 steps. The list must not scroll while adjusting.
+                // The list must not scroll while adjusting.
                 let notches: f32 = ui.input(|i| {
                     i.raw
                         .events
@@ -174,7 +204,7 @@ impl<'a> Slider<'a> {
                         .sum()
                 });
                 if notches != 0.0 {
-                    new = snap(new + notches * small * 2.0, small);
+                    new = snap(new + notches * self.wheel_step, small);
                 }
                 ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
             }

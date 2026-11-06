@@ -24,29 +24,37 @@ use windows::Win32::{
     },
 };
 
-use crate::audio::{AudioHandle, Command};
+use crate::audio::{AppKey, AudioHandle, Command};
 
 const CONFIGURE_MESSAGE: u32 = WM_APP + 71;
 /// How long shutdown waits for the worker before detaching it.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
-/// A window action requested by a shortcut. The UI thread performs it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// An action requested by a shortcut that needs the UI thread's state (the
+/// window, or the saved profiles). The UI thread performs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
     ToggleWindow,
+    /// Apply the profile with this name.
+    ActivateProfile(String),
 }
 
 /// A binding that is saved but not active, with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailedBinding {
     pub action: HotkeyAction,
+    pub target: Option<HotkeyTarget>,
     pub chord: String,
     pub reason: String,
 }
 
 impl FailedBinding {
     pub fn message(&self) -> String {
-        format!("{} ({}): {}", self.action.label(), self.chord, self.reason)
+        format!("{} ({}): {}", self.slot().label(), self.chord, self.reason)
+    }
+
+    fn slot(&self) -> Slot {
+        Slot { action: self.action, target: self.target.clone() }
     }
 }
 
@@ -284,7 +292,12 @@ impl Registrations {
             }
             match register(self.next_id, binding.clone(), chord) {
                 Ok(registration) => self.active.push(registration),
-                Err(reason) => failed.push(FailedBinding { action: binding.action, chord: binding.chord, reason }),
+                Err(reason) => failed.push(FailedBinding {
+                    action: binding.action,
+                    target: binding.target,
+                    chord: binding.chord,
+                    reason,
+                }),
             }
         }
         self.step = step.clamp(1, 100);
@@ -302,12 +315,26 @@ impl Registrations {
             return None;
         }
         let delta = self.step as f32 / 100.0;
-        Some(match registration.binding.action {
+        let binding = &registration.binding;
+        let app = || match &binding.target {
+            Some(HotkeyTarget::App { key, .. }) => Some(key.clone()),
+            _ => None,
+        };
+        Some(match binding.action {
             HotkeyAction::ToggleOutputMute => Resolved::Audio(Command::ToggleOutputMute),
             HotkeyAction::ToggleInputMute => Resolved::Audio(Command::ToggleInputMute),
             HotkeyAction::VolumeUp => Resolved::Audio(Command::AdjustOutputVolume { delta }),
             HotkeyAction::VolumeDown => Resolved::Audio(Command::AdjustOutputVolume { delta: -delta }),
             HotkeyAction::ToggleWindow => Resolved::Window(HotkeyEvent::ToggleWindow),
+            HotkeyAction::CycleOutputDevice => Resolved::Audio(Command::CycleOutputDevice),
+            HotkeyAction::AppMute => Resolved::Audio(Command::ToggleAppMute { key: app()? }),
+            HotkeyAction::AppVolumeUp => Resolved::Audio(Command::AdjustAppVolume { key: app()?, delta }),
+            HotkeyAction::AppVolumeDown => Resolved::Audio(Command::AdjustAppVolume { key: app()?, delta: -delta }),
+            HotkeyAction::AppSolo => Resolved::Audio(Command::ToggleSolo { key: app()? }),
+            HotkeyAction::ActivateProfile => match &binding.target {
+                Some(HotkeyTarget::Profile { name }) => Resolved::Window(HotkeyEvent::ActivateProfile(name.clone())),
+                _ => return None,
+            },
         })
     }
 }
@@ -382,6 +409,8 @@ fn run(
     context.request_repaint();
 }
 
+/// What a shortcut does. The `App*` actions and `ActivateProfile` need a
+/// [`HotkeyTarget`]; the others must not have one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HotkeyAction {
     ToggleOutputMute,
@@ -389,11 +418,26 @@ pub enum HotkeyAction {
     VolumeUp,
     VolumeDown,
     ToggleWindow,
+    CycleOutputDevice,
+    AppMute,
+    AppVolumeUp,
+    AppVolumeDown,
+    AppSolo,
+    ActivateProfile,
 }
 
 impl HotkeyAction {
-    pub const ALL: [Self; 5] =
-        [Self::ToggleOutputMute, Self::ToggleInputMute, Self::VolumeUp, Self::VolumeDown, Self::ToggleWindow];
+    /// The actions without a target, in the order the editor lists them.
+    pub const ALL: [Self; 6] = [
+        Self::ToggleOutputMute,
+        Self::ToggleInputMute,
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::ToggleWindow,
+        Self::CycleOutputDevice,
+    ];
+    /// The actions available for each pinned app.
+    pub const FOR_APP: [Self; 4] = [Self::AppMute, Self::AppVolumeUp, Self::AppVolumeDown, Self::AppSolo];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -402,14 +446,110 @@ impl HotkeyAction {
             Self::VolumeUp => "Volume up",
             Self::VolumeDown => "Volume down",
             Self::ToggleWindow => "Show / hide mixer",
+            Self::CycleOutputDevice => "Next pinned output device",
+            Self::AppMute => "Mute / unmute",
+            Self::AppVolumeUp => "Volume up",
+            Self::AppVolumeDown => "Volume down",
+            Self::AppSolo => "Solo on / off",
+            Self::ActivateProfile => "Activate",
         }
     }
+
+    fn needs_app(self) -> bool {
+        Self::FOR_APP.contains(&self)
+    }
+}
+
+/// The app or profile a targeted shortcut acts on. The name is for display;
+/// apps are matched by key and profiles by name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyTarget {
+    App { key: AppKey, name: String },
+    Profile { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyBinding {
     pub action: HotkeyAction,
     pub chord: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<HotkeyTarget>,
+}
+
+/// One assignable shortcut: an action, and the app or profile it targets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Slot {
+    pub action: HotkeyAction,
+    pub target: Option<HotkeyTarget>,
+}
+
+impl Slot {
+    pub fn label(&self) -> String {
+        match &self.target {
+            None => self.action.label().to_owned(),
+            Some(HotkeyTarget::App { name, .. }) => format!("{name}: {}", self.action.label()),
+            Some(HotkeyTarget::Profile { name }) => format!("Activate profile {name}"),
+        }
+    }
+
+    fn of(binding: &HotkeyBinding) -> Self {
+        Self { action: binding.action, target: binding.target.clone() }
+    }
+
+    fn is_well_formed(&self) -> bool {
+        match &self.target {
+            None => HotkeyAction::ALL.contains(&self.action),
+            Some(HotkeyTarget::App { .. }) => self.action.needs_app(),
+            Some(HotkeyTarget::Profile { .. }) => self.action == HotkeyAction::ActivateProfile,
+        }
+    }
+}
+
+/// Every slot the editor offers: the global actions, four per pinned app, one
+/// per profile, and any saved binding whose app or profile is gone (so it can
+/// still be cleared).
+pub fn slots(
+    pins: &[crate::audio::preferences::PinnedApp],
+    app_names: &[crate::audio::preferences::AppName],
+    profiles: &[crate::audio::preferences::VolumePreset],
+    bindings: &[HotkeyBinding],
+) -> Vec<Slot> {
+    let mut slots: Vec<Slot> = HotkeyAction::ALL.iter().map(|&action| Slot { action, target: None }).collect();
+    for pin in pins {
+        for action in HotkeyAction::FOR_APP {
+            let name = crate::audio::preferences::custom_name(app_names, &pin.key).unwrap_or(&pin.name);
+            let target = HotkeyTarget::App { key: pin.key.clone(), name: name.to_owned() };
+            slots.push(Slot { action, target: Some(target) });
+        }
+    }
+    for profile in profiles {
+        slots.push(Slot {
+            action: HotkeyAction::ActivateProfile,
+            target: Some(HotkeyTarget::Profile { name: profile.name.clone() }),
+        });
+    }
+    for binding in bindings {
+        let slot = Slot::of(binding);
+        let known = slots.iter().any(|s| same_slot(s, &slot));
+        if !known && slot.is_well_formed() {
+            slots.push(slot);
+        }
+    }
+    slots
+}
+
+/// Apps are the same target whatever their display name; profiles compare by name ignoring case.
+fn same_slot(a: &Slot, b: &Slot) -> bool {
+    a.action == b.action
+        && match (&a.target, &b.target) {
+            (None, None) => true,
+            (Some(HotkeyTarget::App { key: x, .. }), Some(HotkeyTarget::App { key: y, .. })) => x == y,
+            (Some(HotkeyTarget::Profile { name: x }), Some(HotkeyTarget::Profile { name: y })) => {
+                x.eq_ignore_ascii_case(y)
+            }
+            _ => false,
+        }
 }
 
 /// Bindings split into those that can be registered and those that cannot.
@@ -418,14 +558,24 @@ struct Validated {
     rejected: Vec<FailedBinding>,
 }
 
-/// Validates each binding on its own. When two bindings share an action or a
+/// Validates each binding on its own. When two bindings share a slot or a
 /// chord, the earlier one wins and the later one is rejected.
 fn validate_bindings(bindings: &[HotkeyBinding]) -> Validated {
     let mut valid: Vec<(HotkeyBinding, Chord)> = Vec::new();
     let mut rejected = Vec::new();
     for binding in bindings {
-        let reject = |reason: String| FailedBinding { action: binding.action, chord: binding.chord.clone(), reason };
-        if valid.iter().any(|(other, _)| other.action == binding.action) {
+        let reject = |reason: String| FailedBinding {
+            action: binding.action,
+            target: binding.target.clone(),
+            chord: binding.chord.clone(),
+            reason,
+        };
+        let slot = Slot::of(binding);
+        if !slot.is_well_formed() {
+            rejected.push(reject("this action needs a matching app or profile.".into()));
+            continue;
+        }
+        if valid.iter().any(|(other, _)| same_slot(&Slot::of(other), &slot)) {
             rejected.push(reject("choose only one shortcut for this action.".into()));
             continue;
         }
@@ -435,7 +585,7 @@ fn validate_bindings(bindings: &[HotkeyBinding]) -> Validated {
                     rejected.push(reject(format!(
                         "{} is also assigned to {}. Choose a different chord.",
                         binding.chord,
-                        other.action.label()
+                        Slot::of(other).label()
                     )));
                 } else {
                     valid.push((binding.clone(), chord));
@@ -516,28 +666,27 @@ fn parse_chord(value: &str) -> Result<Chord, String> {
 
 #[derive(Default)]
 pub struct HotkeyEditor {
-    drafts: std::collections::HashMap<HotkeyAction, String>,
-    initialized: bool,
+    drafts: std::collections::HashMap<Slot, String>,
+    initialized: std::collections::HashSet<Slot>,
     error: Option<String>,
 }
 
-fn primary_chord_for_action(
-    action: HotkeyAction,
+fn primary_chord_for_slot(
+    slot: &Slot,
     bindings: &[HotkeyBinding],
     validated: &Validated,
     status: &HotkeyStatus,
 ) -> Option<String> {
-    if let Some(active) = status
-        .active
-        .iter()
-        .find(|b| b.action == action && bindings.iter().any(|raw| raw.action == action && raw.chord == b.chord))
+    let in_slot = |b: &HotkeyBinding| same_slot(&Slot::of(b), slot);
+    if let Some(active) =
+        status.active.iter().find(|b| in_slot(b) && bindings.iter().any(|raw| in_slot(raw) && raw.chord == b.chord))
     {
         return Some(active.chord.clone());
     }
-    if let Some((valid, _)) = validated.valid.iter().find(|(b, _)| b.action == action) {
+    if let Some((valid, _)) = validated.valid.iter().find(|(b, _)| in_slot(b)) {
         return Some(valid.chord.clone());
     }
-    bindings.iter().find(|b| b.action == action).map(|b| b.chord.clone())
+    bindings.iter().find(|b| in_slot(b)).map(|b| b.chord.clone())
 }
 
 impl HotkeyEditor {
@@ -547,15 +696,17 @@ impl HotkeyEditor {
         bindings: &mut Vec<HotkeyBinding>,
         step: &mut u8,
         service: &HotkeyService,
+        slots: &[Slot],
     ) {
         let status = service.status();
-        if self.show_with_status(ui, bindings, step, &status)
+        if self.show_slots(ui, bindings, step, &status, slots)
             && let Err(error) = service.configure(bindings, *step)
         {
             self.error = Some(error);
         }
     }
 
+    /// The editor for the global actions only.
     pub fn show_with_status(
         &mut self,
         ui: &mut egui::Ui,
@@ -563,14 +714,26 @@ impl HotkeyEditor {
         step: &mut u8,
         status: &HotkeyStatus,
     ) -> bool {
+        let slots: Vec<Slot> = HotkeyAction::ALL.iter().map(|&action| Slot { action, target: None }).collect();
+        self.show_slots(ui, bindings, step, status, &slots)
+    }
+
+    /// Returns whether Retry was clicked.
+    pub fn show_slots(
+        &mut self,
+        ui: &mut egui::Ui,
+        bindings: &mut Vec<HotkeyBinding>,
+        step: &mut u8,
+        status: &HotkeyStatus,
+        slots: &[Slot],
+    ) -> bool {
         let validated = validate_bindings(bindings);
-        if !self.initialized {
-            for action in HotkeyAction::ALL {
-                if let Some(chord) = primary_chord_for_action(action, bindings, &validated, status) {
-                    self.drafts.entry(action).or_insert(chord);
-                }
+        for slot in slots {
+            if self.initialized.insert(slot.clone())
+                && let Some(chord) = primary_chord_for_slot(slot, bindings, &validated, status)
+            {
+                self.drafts.entry(slot.clone()).or_insert(chord);
             }
-            self.initialized = true;
         }
         let mut retry_clicked = false;
         ui.label("No shortcuts are assigned by default. Type a chord such as Ctrl+Alt+M, then Bind. Windows may reject keys used by another app.");
@@ -578,20 +741,53 @@ impl HotkeyEditor {
             let label = ui.label("Volume step");
             crate::ui::widgets::scroll_on_focus(ui.add(egui::DragValue::new(step).range(1..=20).suffix("%")))
                 .labelled_by(label.id)
-                .on_hover_text("Output volume change for each volume shortcut, 1 to 20 percent");
+                .on_hover_text("Volume change for each volume shortcut, 1 to 20 percent");
         });
-        for action in HotkeyAction::ALL {
-            ui.push_id(action, |ui| {
-                let current =
-                    primary_chord_for_action(action, bindings, &validated, status).unwrap_or_else(|| "Off".into());
-                let label = ui.label(format!("{} — {current}", action.label()));
+        let (global, targeted): (Vec<&Slot>, Vec<&Slot>) = slots.iter().partition(|s| s.target.is_none());
+        for slot in global {
+            self.slot_row(ui, bindings, status, &validated, slot);
+        }
+        if !targeted.is_empty() {
+            let header =
+                egui::CollapsingHeader::new(format!("App and profile shortcuts ({})", targeted.len())).show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Pin an app in the Mixer or save a profile to add its shortcuts.")
+                                .small(),
+                        )
+                        .wrap(),
+                    );
+                    for slot in targeted {
+                        self.slot_row(ui, bindings, status, &validated, slot);
+                    }
+                });
+            crate::ui::widgets::scroll_on_focus(header.header_response);
+        }
+        self.footer(ui, status, &mut retry_clicked);
+        retry_clicked
+    }
+
+    fn slot_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        bindings: &mut Vec<HotkeyBinding>,
+        status: &HotkeyStatus,
+        validated: &Validated,
+        slot: &Slot,
+    ) {
+        let in_slot = |b: &HotkeyBinding| same_slot(&Slot::of(b), slot);
+        let title = slot.label();
+        {
+            ui.push_id(slot, |ui| {
+                let current = primary_chord_for_slot(slot, bindings, validated, status).unwrap_or_else(|| "Off".into());
+                let label = ui.label(format!("{title} — {current}"));
                 if current != "Off" {
-                    let is_active = status.active.iter().any(|b| b.action == action && b.chord == current);
+                    let is_active = status.active.iter().any(|b| in_slot(b) && b.chord == current);
                     let mut consumed_primary_failure = false;
                     let state = if is_active {
                         "Active".to_owned()
                     } else if let Some(failure) =
-                        status.failed.iter().find(|f| f.action == action && f.chord == current)
+                        status.failed.iter().find(|f| same_slot(&f.slot(), slot) && f.chord == current)
                     {
                         consumed_primary_failure = true;
                         format!("Not active: {}", failure.reason)
@@ -602,7 +798,7 @@ impl HotkeyEditor {
                     };
                     ui.add(egui::Label::new(egui::RichText::new(state).small()).wrap());
                     let mut skipped_primary = false;
-                    for extra in status.failed.iter().filter(|f| f.action == action) {
+                    for extra in status.failed.iter().filter(|f| same_slot(&f.slot(), slot)) {
                         if consumed_primary_failure && !skipped_primary && extra.chord == current {
                             skipped_primary = true;
                             continue;
@@ -617,21 +813,25 @@ impl HotkeyEditor {
                     }
                 }
                 ui.horizontal(|ui| {
-                    let draft = self.drafts.entry(action).or_default();
+                    let draft = self.drafts.entry(slot.clone()).or_default();
                     crate::ui::widgets::scroll_on_focus(
                         ui.add(egui::TextEdit::singleline(draft).hint_text("Ctrl+Alt+M").desired_width(140.0)),
                     )
                     .labelled_by(label.id)
-                    .on_hover_text(format!("Shortcut for {}", action.label()));
+                    .on_hover_text(format!("Shortcut for {title}"));
                     // Short visible text keeps the row narrow; the accessible name names the action.
                     let bind = crate::ui::widgets::scroll_on_focus(ui.button("Bind"));
-                    crate::ui::widgets::set_name(ui, &bind, &format!("Bind {}", action.label()));
-                    if bind.on_hover_text(format!("Bind {}", action.label())).clicked() {
+                    crate::ui::widgets::set_name(ui, &bind, &format!("Bind {title}"));
+                    if bind.on_hover_text(format!("Bind {title}")).clicked() {
                         let mut proposed = bindings.clone();
-                        proposed.retain(|b| b.action != action);
-                        proposed.push(HotkeyBinding { action, chord: draft.trim().to_string() });
+                        proposed.retain(|b| !in_slot(b));
+                        proposed.push(HotkeyBinding {
+                            action: slot.action,
+                            chord: draft.trim().to_string(),
+                            target: slot.target.clone(),
+                        });
                         // Another action's invalid entry must not block this one.
-                        match validate_bindings(&proposed).rejected.into_iter().find(|f| f.action == action) {
+                        match validate_bindings(&proposed).rejected.into_iter().find(|f| same_slot(&f.slot(), slot)) {
                             None => {
                                 *bindings = proposed;
                                 self.error = None;
@@ -642,15 +842,18 @@ impl HotkeyEditor {
                     let clear = crate::ui::widgets::scroll_on_focus(
                         ui.add_enabled(current != "Off", egui::Button::new("Clear")),
                     );
-                    crate::ui::widgets::set_name(ui, &clear, &format!("Clear {}", action.label()));
-                    if clear.on_hover_text(format!("Clear {}", action.label())).clicked() {
-                        bindings.retain(|b| b.action != action);
-                        self.drafts.remove(&action);
+                    crate::ui::widgets::set_name(ui, &clear, &format!("Clear {title}"));
+                    if clear.on_hover_text(format!("Clear {title}")).clicked() {
+                        bindings.retain(|b| !in_slot(b));
+                        self.drafts.remove(slot);
                         self.error = None;
                     }
                 });
             });
         }
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui, status: &HotkeyStatus, retry_clicked: &mut bool) {
         if let Some(error) = &self.error {
             ui.label(format!("Shortcut error: {error}"));
         }
@@ -674,11 +877,10 @@ impl HotkeyEditor {
             .on_hover_text("Try to register every shortcut that is not active")
             .clicked()
             {
-                retry_clicked = true;
+                *retry_clicked = true;
             }
         }
         ui.label(format!("{} active shortcut(s)", status.active.len()));
-        retry_clicked
     }
 }
 
@@ -687,7 +889,7 @@ mod tests {
     use super::*;
 
     fn binding(action: HotkeyAction, chord: &str) -> HotkeyBinding {
-        HotkeyBinding { action, chord: chord.into() }
+        HotkeyBinding { action, chord: chord.into(), target: None }
     }
 
     #[test]
@@ -778,13 +980,108 @@ mod tests {
         }
     }
 
+    fn app_target(path: &str, name: &str) -> Option<HotkeyTarget> {
+        Some(HotkeyTarget::App { key: AppKey::Exe(path.into()), name: name.into() })
+    }
+
+    fn targeted(action: HotkeyAction, chord: &str, target: Option<HotkeyTarget>) -> HotkeyBinding {
+        HotkeyBinding { action, chord: chord.into(), target }
+    }
+
+    fn resolve_one(binding: HotkeyBinding, step: u8) -> Option<Resolved> {
+        let chord = parse_chord(&binding.chord).unwrap();
+        let registrations =
+            Registrations { active: vec![Registration { id: 7, binding, chord, synthetic: true }], next_id: 7, step };
+        registrations.resolve(7, lparam(chord))
+    }
+
+    #[test]
+    fn app_profile_and_device_shortcuts_resolve_to_their_commands() {
+        let discord = AppKey::Exe(r"c:\apps\discord.exe".into());
+        let target = app_target(r"c:\apps\discord.exe", "Discord");
+        let cases = [
+            (HotkeyAction::AppMute, Resolved::Audio(Command::ToggleAppMute { key: discord.clone() })),
+            (HotkeyAction::AppVolumeUp, Resolved::Audio(Command::AdjustAppVolume { key: discord.clone(), delta: 0.1 })),
+            (
+                HotkeyAction::AppVolumeDown,
+                Resolved::Audio(Command::AdjustAppVolume { key: discord.clone(), delta: -0.1 }),
+            ),
+            (HotkeyAction::AppSolo, Resolved::Audio(Command::ToggleSolo { key: discord })),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(resolve_one(targeted(action, "Ctrl+Alt+D", target.clone()), 10), Some(expected), "{action:?}");
+        }
+        let profile = Some(HotkeyTarget::Profile { name: "Gaming".into() });
+        assert_eq!(
+            resolve_one(targeted(HotkeyAction::ActivateProfile, "Ctrl+Alt+G", profile), 5),
+            Some(Resolved::Window(HotkeyEvent::ActivateProfile("Gaming".into())))
+        );
+        assert_eq!(
+            resolve_one(binding(HotkeyAction::CycleOutputDevice, "Ctrl+Alt+O"), 5),
+            Some(Resolved::Audio(Command::CycleOutputDevice))
+        );
+        assert_eq!(
+            resolve_one(targeted(HotkeyAction::AppMute, "Ctrl+Alt+D", None), 5),
+            None,
+            "an app action without its app does nothing"
+        );
+    }
+
+    #[test]
+    fn targeted_bindings_are_one_per_app_and_need_a_matching_target() {
+        let a = app_target("a.exe", "A");
+        let checked = validate_bindings(&[
+            targeted(HotkeyAction::AppMute, "Ctrl+Alt+1", a.clone()),
+            targeted(HotkeyAction::AppMute, "Ctrl+Alt+2", app_target("b.exe", "B")),
+            targeted(HotkeyAction::AppMute, "Ctrl+Alt+3", app_target("a.exe", "A renamed")),
+            targeted(HotkeyAction::AppMute, "Ctrl+Alt+4", None),
+            targeted(HotkeyAction::VolumeUp, "Ctrl+Alt+5", a.clone()),
+            targeted(HotkeyAction::ActivateProfile, "Ctrl+Alt+6", a),
+        ]);
+        let valid: Vec<_> = checked.valid.iter().map(|(b, _)| b.chord.as_str()).collect();
+        assert_eq!(valid, ["Ctrl+Alt+1", "Ctrl+Alt+2"], "the same action for two apps is fine");
+        let reasons: Vec<_> = checked.rejected.iter().map(|f| (f.chord.as_str(), f.reason.as_str())).collect();
+        assert_eq!(reasons[0], ("Ctrl+Alt+3", "choose only one shortcut for this action."), "same app, new name");
+        assert!(reasons[1..].iter().all(|(_, r)| r.contains("matching app or profile")), "{reasons:?}");
+        assert!(checked.rejected[0].message().starts_with("A renamed: Mute / unmute (Ctrl+Alt+3)"));
+    }
+
+    #[test]
+    fn bindings_without_a_target_keep_their_saved_format() {
+        let old: HotkeyBinding = serde_json::from_str(r#"{"action":"VolumeUp","chord":"Ctrl+Alt+F23"}"#).unwrap();
+        assert_eq!(old, binding(HotkeyAction::VolumeUp, "Ctrl+Alt+F23"));
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"action":"VolumeUp","chord":"Ctrl+Alt+F23"}"#);
+        let app = targeted(HotkeyAction::AppSolo, "Ctrl+Alt+S", app_target(r"c:\x.exe", "X"));
+        let round: HotkeyBinding = serde_json::from_str(&serde_json::to_string(&app).unwrap()).unwrap();
+        assert_eq!(round, app);
+    }
+
+    #[test]
+    fn the_editor_offers_pinned_apps_profiles_and_orphaned_bindings() {
+        use crate::audio::preferences::{PinnedApp, VolumePreset};
+        let pin = PinnedApp { key: AppKey::Exe("a.exe".into()), name: "A".into(), exe_path: None, aumid: None };
+        let profile =
+            VolumePreset { name: "Work".into(), entries: Vec::new(), apply_on_start: false, ..Default::default() };
+        let orphan = targeted(HotkeyAction::AppSolo, "Ctrl+Alt+S", app_target("gone.exe", "Gone"));
+        let all = slots(&[pin], &[], &[profile], std::slice::from_ref(&orphan));
+        let labels: Vec<_> = all.iter().map(Slot::label).collect();
+        assert_eq!(labels.len(), HotkeyAction::ALL.len() + 4 + 1 + 1);
+        assert!(labels.contains(&"A: Solo on / off".to_owned()));
+        assert!(labels.contains(&"Activate profile Work".to_owned()));
+        assert!(labels.contains(&"Gone: Solo on / off".to_owned()), "an unpinned app's shortcut can still be cleared");
+    }
+
     #[test]
     fn window_shortcut_is_queued_for_the_ui_thread_not_performed() {
         let chord = parse_chord("Ctrl+Alt+F23").unwrap();
         let registrations = registrations_for(HotkeyAction::ToggleWindow, "Ctrl+Alt+F23", 5);
         assert_eq!(registrations.resolve(7, lparam(chord)), Some(Resolved::Window(HotkeyEvent::ToggleWindow)));
         // Nothing in this module can touch a window: it does not import `platform::window`.
-        assert!(!include_str!("hotkeys.rs").split("#[cfg(test)]").next().unwrap().contains("window::"));
+        // Everything before the test module is checked, including test-only seams.
+        let source = include_str!("hotkeys.rs");
+        let (module, _) = source.split_once("\nmod tests {").expect("test module marker");
+        assert!(module.contains("RegisterHotKey("), "the scan must cover the worker, not stop early");
+        assert!(!module.contains("window::"));
     }
 
     #[test]
@@ -1163,6 +1460,7 @@ mod tests {
         let mut failed = checked.rejected;
         failed.push(FailedBinding {
             action: HotkeyAction::ToggleOutputMute,
+            target: None,
             chord: "Ctrl+Alt+M".into(),
             reason: "Windows could not register this shortcut; another app may already use it.".into(),
         });

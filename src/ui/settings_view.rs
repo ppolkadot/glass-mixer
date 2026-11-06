@@ -7,13 +7,32 @@ use crate::platform::backdrop::Support;
 use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
-use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode};
+use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode, Typeface};
 use egui::{Align, Align2, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, ViewportCommand};
 use std::path::Path;
 
 pub enum Outcome {
     None,
     Back,
+    /// Write the diagnostic report to a file and show the folder.
+    SaveDiagnostics,
+    /// Put the diagnostic report on the clipboard.
+    CopyDiagnostics,
+    /// Write the preferences to an export file.
+    ExportSettings,
+    /// Read and check the file named in [`TransferUi::path`].
+    CheckImport,
+    /// The checked import in [`TransferUi::candidate`] was confirmed.
+    ApplyImport,
+}
+
+/// What the Backup and restore section shows: the path typed, and a checked import
+/// waiting for confirmation (the settings it holds, and lines describing them).
+#[derive(Default)]
+pub struct TransferUi {
+    pub path: String,
+    pub candidate: Option<(Settings, Vec<String>)>,
+    pub error: Option<String>,
 }
 
 pub struct SettingsCtx<'a> {
@@ -25,6 +44,10 @@ pub struct SettingsCtx<'a> {
     /// Frames are drawn by the CPU, so level meters are paused.
     pub software_renderer: bool,
     pub can_switch_default: bool,
+    pub can_route_apps: bool,
+    /// The "reset all app devices" confirmation is showing.
+    pub confirm_route_reset: &'a mut bool,
+    pub transfer: &'a mut TransferUi,
     pub audio: &'a AudioHandle,
     pub icons: &'a mut IconService,
     pub settings_path: &'a Path,
@@ -54,12 +77,19 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
         section(ui, &look, "Audio", |ui| audio(ui, cx));
         section(ui, &look, "Global shortcuts", |ui| {
             if let Some(service) = cx.hotkeys {
-                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service);
+                let slots = crate::platform::hotkeys::slots(
+                    &cx.settings.pinned_apps,
+                    &cx.settings.app_names,
+                    &cx.settings.presets,
+                    &cx.settings.hotkeys,
+                );
+                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service, &slots);
             } else {
                 ui.label("Global shortcuts are unavailable in this session.");
             }
         });
-        section(ui, &look, "About", |ui| about(ui, cx));
+        section(ui, &look, "Backup and restore", |ui| backup(ui, cx, &mut outcome));
+        section(ui, &look, "About", |ui| about(ui, cx, &mut outcome));
     });
     outcome
 }
@@ -105,6 +135,14 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             swatch(ui, &look, &mut s.accent, *accent);
         }
     });
+    labeled(ui, &look, "Typeface", |ui| {
+        segmented(ui, &look, &mut s.typeface, &[(Typeface::Polaris, "Polaris"), (Typeface::System, "Windows")], 210.0);
+    });
+    ui.label(
+        RichText::new("Polaris is the bundled Salted Flutters Polaris. Windows uses Segoe UI.")
+            .small()
+            .color(look.p.text_muted),
+    );
     labeled(ui, &look, "Density", |ui| {
         segmented(
             ui,
@@ -206,6 +244,34 @@ fn behavior(ui: &mut Ui, cx: &mut SettingsCtx) {
 
 fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
     let look = *cx.look;
+    let s = &mut *cx.settings;
+    // Preset steps, or "Custom" for any other value the field below sets.
+    let mut preset = if [1, 2, 5].contains(&s.wheel_step) { s.wheel_step } else { 0 };
+    labeled(ui, &look, "Mouse wheel step", |ui| {
+        let custom = ui.add_enabled(preset == 0, egui::DragValue::new(&mut s.wheel_step).range(1..=20).suffix("%"));
+        widgets::set_name(ui, &custom, "Custom mouse wheel step");
+        widgets::scroll_on_focus(custom).on_hover_text("Any step from 1 to 20 percent");
+        if segmented(ui, &look, &mut preset, &[(1, "1%"), (2, "2%"), (5, "5%"), (0, "Custom")], 200.0) {
+            s.wheel_step = if preset == 0 { 3 } else { preset };
+        }
+    });
+    ui.label(RichText::new("Volume change per wheel notch over a volume slider.").small().color(look.p.text_muted));
+    let mut keep = s.solo.keep_percent.min(90);
+    labeled(ui, &look, "Solo keeps other apps at", |ui| {
+        let field = ui.add_enabled(!s.solo.mute, egui::DragValue::new(&mut keep).range(0..=90).suffix("%"));
+        widgets::set_name(ui, &field, "Solo keeps other apps at this percent of their volume");
+        widgets::scroll_on_focus(field);
+    });
+    s.solo.keep_percent = keep;
+    toggle_row(
+        ui,
+        &look,
+        &mut s.solo.mute,
+        "Solo mutes other apps",
+        Some(
+            "Mute other apps instead of lowering them. Their own levels come back when Solo ends, unless you changed them meanwhile.",
+        ),
+    );
     ui.horizontal(|ui| {
         if widgets::scroll_on_focus(ui.button("Refresh audio devices"))
             .on_hover_text("Reconnect to all devices and audio sessions")
@@ -220,6 +286,10 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
             .small()
             .color(look.p.text_muted),
     );
+    mic_ducking(ui, cx);
+    if cx.can_route_apps {
+        app_device_reset(ui, cx);
+    }
     if !cx.can_switch_default {
         ui.label(
             RichText::new(
@@ -231,12 +301,168 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
     }
 }
 
-fn about(ui: &mut Ui, cx: &mut SettingsCtx) {
+/// Opt-in: lower chosen pinned apps while the microphone picks up speech.
+fn mic_ducking(ui: &mut Ui, cx: &mut SettingsCtx) {
+    let look = *cx.look;
+    let s = &mut *cx.settings;
+    let mic = &mut s.mic_ducking;
+    toggle_row(
+        ui,
+        &look,
+        &mut mic.enabled,
+        "Microphone ducking",
+        Some(
+            "Lower the apps chosen below while you talk. Only the microphone level is read; nothing is recorded. It works while an app is using the microphone.",
+        ),
+    );
+    if !mic.enabled {
+        return;
+    }
+    let field = |ui: &mut Ui, label: &str, value: &mut u16, range: std::ops::RangeInclusive<u16>, suffix: &str| {
+        labeled(ui, &look, label, |ui| {
+            let drag = ui.add(egui::DragValue::new(value).range(range).suffix(suffix));
+            widgets::set_name(ui, &drag, label);
+            widgets::scroll_on_focus(drag);
+        });
+    };
+    let mut threshold = u16::from(mic.threshold_percent);
+    field(ui, "Speech level", &mut threshold, 1..=60, "%");
+    mic.threshold_percent = threshold as u8;
+    field(ui, "Start after", &mut mic.attack_ms, 20..=2000, " ms");
+    field(ui, "Restore after silence of", &mut mic.release_ms, 100..=5000, " ms");
+    let mut keep = u16::from(mic.keep_percent);
+    field(ui, "Lowered apps keep", &mut keep, 0..=90, "%");
+    mic.keep_percent = keep as u8;
+    if s.pinned_apps.is_empty() {
+        ui.label(
+            RichText::new("Pin apps in the Mixer to choose which ones are lowered.").small().color(look.p.text_muted),
+        );
+    }
+    for pin in &s.pinned_apps {
+        let mut chosen = mic.targets.contains(&pin.key);
+        let check = widgets::scroll_on_focus(ui.checkbox(&mut chosen, format!("Lower {} while you talk", pin.name)));
+        if check.changed() {
+            if chosen {
+                mic.targets.push(pin.key.clone());
+            } else {
+                mic.targets.retain(|k| *k != pin.key);
+            }
+        }
+    }
+}
+
+/// Backup and restore: export the preferences to a file, or check a file and import it.
+/// Nothing is replaced without the user confirming what the file holds.
+fn backup(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
+    let look = *cx.look;
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Export your preferences (not the window position) to a file, and import them on this or another PC. An import is checked first and shows what it contains, and your current settings are saved to a backup file before they are replaced.",
+            )
+            .small()
+            .color(look.p.text_muted),
+        )
+        .wrap(),
+    );
+    if widgets::scroll_on_focus(ui.button("Export settings")).clicked() {
+        *outcome = Outcome::ExportSettings;
+    }
+    ui.horizontal(|ui| {
+        let label = ui.label("Import from");
+        let width = (ui.available_width() - 90.0).clamp(80.0, 260.0);
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut cx.transfer.path)
+                .hint_text("Path of an exported .json file")
+                .desired_width(width),
+        );
+        widgets::set_name(ui, &field, "Path of the settings file to import");
+        widgets::scroll_on_focus(field).labelled_by(label.id);
+        let ready = !cx.transfer.path.trim().is_empty();
+        if widgets::scroll_on_focus(ui.add_enabled(ready, egui::Button::new("Check file"))).clicked() {
+            *outcome = Outcome::CheckImport;
+        }
+    });
+    if let Some(error) = &cx.transfer.error {
+        ui.add(egui::Label::new(RichText::new(error).color(look.p.danger)).wrap());
+    }
+    let mut cancel = false;
+    if let Some((_, lines)) = &cx.transfer.candidate {
+        ui.label(RichText::new("This file contains").font(semibold(13.0)));
+        for line in lines {
+            ui.add(egui::Label::new(RichText::new(line).small()).wrap());
+        }
+        ui.horizontal_wrapped(|ui| {
+            if widgets::scroll_on_focus(ui.button("Import and replace my settings")).clicked() {
+                *outcome = Outcome::ApplyImport;
+            }
+            cancel = widgets::scroll_on_focus(ui.button("Cancel")).clicked();
+        });
+    }
+    if cancel {
+        cx.transfer.candidate = None;
+    }
+}
+
+/// Windows can only reset every app's device choice at once, so this is a
+/// separate, confirmed action; a single app is reset from its row in the Mixer.
+fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
+    let look = *cx.look;
+    if !*cx.confirm_route_reset {
+        if widgets::scroll_on_focus(ui.button("Reset all app devices…"))
+            .on_hover_text("Make every app follow the system default output and input again")
+            .clicked()
+        {
+            *cx.confirm_route_reset = true;
+        }
+        return;
+    }
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "This resets the device choice of every app on this PC, including choices made in Windows Settings. To reset one app, choose System default in its row instead.",
+            )
+            .color(look.p.text),
+        )
+        .wrap(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        let confirm = widgets::scroll_on_focus(ui.button("Reset all apps"));
+        widgets::set_name(ui, &confirm, "Confirm: reset the device choice of all apps");
+        if confirm.clicked() {
+            cx.audio.send(Command::ResetAllAppDevices);
+            *cx.confirm_route_reset = false;
+        }
+        if widgets::scroll_on_focus(ui.button("Cancel")).clicked() {
+            *cx.confirm_route_reset = false;
+        }
+    });
+}
+
+fn about(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
     let look = *cx.look;
     ui.label(RichText::new(format!("Glass Mixer {}", env!("CARGO_PKG_VERSION"))).font(semibold(14.0)));
     ui.label(
         RichText::new("Works offline. No telemetry, analytics or network access.").small().color(look.p.text_muted),
     );
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "For a bug report: a diagnostic report lists versions, states, counts and recent warnings. App, device and profile names and your user folder are hidden, and nothing is sent anywhere.",
+            )
+            .small()
+            .color(look.p.text_muted),
+        )
+        .wrap(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        if widgets::scroll_on_focus(ui.button("Save diagnostic report")).clicked() {
+            *outcome = Outcome::SaveDiagnostics;
+        }
+        if widgets::scroll_on_focus(ui.button("Copy report")).clicked() {
+            *outcome = Outcome::CopyDiagnostics;
+        }
+    });
     let dir = cx.settings_path.parent().map(Path::to_path_buf);
     // A long profile path must wrap inside the card, not run past the window edge.
     ui.add(
@@ -268,7 +494,11 @@ mod tests {
         let width = window_width - 2.0 * look.m.pad;
         let service = HotkeyService::start_with(|_| {}, harness.ctx.clone()).unwrap();
         let mut settings = Settings {
-            hotkeys: vec![HotkeyBinding { action: HotkeyAction::ToggleOutputMute, chord: "Ctrl+Alt+nonsense".into() }],
+            hotkeys: vec![HotkeyBinding {
+                action: HotkeyAction::ToggleOutputMute,
+                chord: "Ctrl+Alt+nonsense".into(),
+                target: None,
+            }],
             ..Default::default()
         };
         service.configure(&settings.hotkeys, settings.hotkey_step).unwrap();
@@ -290,6 +520,9 @@ mod tests {
                 support: Support::Full,
                 software_renderer: false,
                 can_switch_default: true,
+                can_route_apps: true,
+                confirm_route_reset: &mut false,
+                transfer: &mut TransferUi::default(),
                 audio: &audio,
                 icons: &mut icons,
                 settings_path: &path,
@@ -300,6 +533,231 @@ mod tests {
             show(ui, &mut cx);
         });
         (width, frame)
+    }
+
+    #[test]
+    fn resetting_every_app_device_needs_a_confirmation_that_fits() {
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors, mut settings) = (LoginState::Disabled, Vec::new(), Settings::default());
+        let path = std::path::PathBuf::from(r"C:\settings.json");
+        let mut confirm = false;
+        let mut render = |confirm: &mut bool, settings: &mut Settings| {
+            harness.run(width, 3000.0, |ui| {
+                let mut cx = SettingsCtx {
+                    look: &look,
+                    settings,
+                    login: &mut login,
+                    glass: GlassStatus::TransparencyOff,
+                    support: Support::Full,
+                    software_renderer: false,
+                    can_switch_default: true,
+                    can_route_apps: true,
+                    confirm_route_reset: &mut *confirm,
+                    transfer: &mut TransferUi::default(),
+                    audio: &audio,
+                    icons: &mut icons,
+                    settings_path: &path,
+                    hotkeys: None,
+                    hotkey_editor: &mut editor,
+                    errors: &mut errors,
+                };
+                show(ui, &mut cx);
+            })
+        };
+        let names = |f: &crate::ui::test_support::Frame| f.widgets.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+        let first = render(&mut confirm, &mut settings);
+        assert!(names(&first).iter().any(|n| n == "Reset all app devices…"));
+        assert!(!names(&first).iter().any(|n| n.starts_with("Confirm")), "nothing is reset without a second step");
+        confirm = true;
+        settings.mic_ducking.enabled = true;
+        settings.pinned_apps.push(crate::audio::preferences::PinnedApp {
+            key: crate::audio::AppKey::Exe("music.exe".into()),
+            name: "Music".into(),
+            exe_path: None,
+            aumid: None,
+        });
+        let second = render(&mut confirm, &mut settings);
+        for expected in [
+            "Speech level",
+            "Start after",
+            "Restore after silence of",
+            "Lowered apps keep",
+            "Lower Music while you talk",
+        ] {
+            assert!(names(&second).iter().any(|n| n == expected), "missing {expected}: {:?}", names(&second));
+        }
+        assert!(
+            names(&second).iter().any(|n| n == "Confirm: reset the device choice of all apps"),
+            "{:?}",
+            names(&second)
+        );
+        let clipped = crate::ui::test_support::past_right_edge(&second.widgets, width);
+        assert!(clipped.is_empty(), "{clipped:?}");
+    }
+
+    #[test]
+    fn the_diagnostic_buttons_ask_for_a_saved_or_copied_report() {
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors, mut settings) = (LoginState::Disabled, Vec::new(), Settings::default());
+        let path = std::path::PathBuf::from(r"C:\settings.json");
+        let seen = std::cell::RefCell::new(Vec::<&str>::new());
+        let mut render = |events: Vec<egui::Event>| {
+            harness.run_with_events(width, 3000.0, events, |ui| {
+                let mut cx = SettingsCtx {
+                    look: &look,
+                    settings: &mut settings,
+                    login: &mut login,
+                    glass: GlassStatus::TransparencyOff,
+                    support: Support::Full,
+                    software_renderer: false,
+                    can_switch_default: true,
+                    can_route_apps: true,
+                    confirm_route_reset: &mut false,
+                    transfer: &mut TransferUi::default(),
+                    audio: &audio,
+                    icons: &mut icons,
+                    settings_path: &path,
+                    hotkeys: None,
+                    hotkey_editor: &mut editor,
+                    errors: &mut errors,
+                };
+                match show(ui, &mut cx) {
+                    Outcome::SaveDiagnostics => seen.borrow_mut().push("save"),
+                    Outcome::CopyDiagnostics => seen.borrow_mut().push("copy"),
+                    Outcome::Back => seen.borrow_mut().push("back"),
+                    Outcome::ExportSettings | Outcome::CheckImport | Outcome::ApplyImport => {
+                        seen.borrow_mut().push("transfer")
+                    }
+                    Outcome::None => {}
+                }
+            })
+        };
+        let frame = render(Vec::new());
+        assert!(unnamed(&frame.widgets).is_empty());
+        let click = |name: &str, frame: &crate::ui::test_support::Frame| {
+            let bounds = frame.widgets.iter().find(|w| w.name == name).and_then(|w| w.bounds).expect(name);
+            bounds.center()
+        };
+        for (name, expected) in [("Save diagnostic report", "save"), ("Copy report", "copy")] {
+            let pos = click(name, &frame);
+            for pressed in [true, false] {
+                render(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            assert_eq!(seen.borrow().last().copied(), Some(expected), "clicking {name}: {:?}", seen.borrow());
+        }
+        assert_eq!(*seen.borrow(), ["save", "copy"], "nothing else was triggered");
+    }
+
+    #[test]
+    fn the_backup_section_exports_checks_confirms_and_cancels_with_named_buttons_that_fit() {
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let look = harness.look;
+        let width = MIN_WIDTH - 2.0 * look.m.pad;
+        let (audio, mut icons, mut editor) =
+            (AudioHandle::detached(), IconService::detached(), HotkeyEditor::default());
+        let (mut login, mut errors, mut settings) = (LoginState::Disabled, Vec::new(), Settings::default());
+        let path = std::path::PathBuf::from(r"C:\settings.json");
+        let transfer = std::cell::RefCell::new(TransferUi {
+            path: r"C:\Users\Someone\Documents\glass-mixer-settings-20261106-120000.json".into(),
+            candidate: Some((
+                Settings::default(),
+                vec![
+                    "2 pinned app(s), 1 renamed app(s), 1 pinned output(s)".into(),
+                    "Not read: wheel_step: the value isn't valid, so the default is used.".into(),
+                ],
+            )),
+            error: Some("The file isn't valid JSON (expected value at line 1 column 1).".into()),
+        });
+        let seen = std::cell::RefCell::new(Vec::<&str>::new());
+        let mut render = |events: Vec<egui::Event>| {
+            harness.run_with_events(width, 3000.0, events, |ui| {
+                let mut cx = SettingsCtx {
+                    look: &look,
+                    settings: &mut settings,
+                    login: &mut login,
+                    glass: GlassStatus::TransparencyOff,
+                    support: Support::Full,
+                    software_renderer: false,
+                    can_switch_default: true,
+                    can_route_apps: true,
+                    confirm_route_reset: &mut false,
+                    transfer: &mut transfer.borrow_mut(),
+                    audio: &audio,
+                    icons: &mut icons,
+                    settings_path: &path,
+                    hotkeys: None,
+                    hotkey_editor: &mut editor,
+                    errors: &mut errors,
+                };
+                match show(ui, &mut cx) {
+                    Outcome::ExportSettings => seen.borrow_mut().push("export"),
+                    Outcome::CheckImport => seen.borrow_mut().push("check"),
+                    Outcome::ApplyImport => seen.borrow_mut().push("apply"),
+                    _ => {}
+                }
+            })
+        };
+        let frame = render(Vec::new());
+        assert!(unnamed(&frame.widgets).is_empty(), "{:?}", unnamed(&frame.widgets));
+        let names: Vec<&str> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
+        for expected in [
+            "Export settings",
+            "Check file",
+            "Path of the settings file to import",
+            "Import and replace my settings",
+            "Cancel",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        // The text inside the path field is clipped by the field; only real controls must stay inside.
+        let outside: Vec<_> = past_right_edge(&frame.widgets, width)
+            .into_iter()
+            .filter(|w| w.role != egui::accesskit::Role::TextRun)
+            .collect();
+        assert!(outside.is_empty(), "{outside:?}");
+        assert!(frame.content_right <= width + 0.5, "content reaches {}", frame.content_right);
+
+        let press = |render: &mut dyn FnMut(Vec<egui::Event>) -> crate::ui::test_support::Frame, pos: egui::Pos2| {
+            for pressed in [true, false] {
+                render(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+        };
+        let centre =
+            |name: &str| frame.widgets.iter().find(|w| w.name == name).and_then(|w| w.bounds).expect(name).center();
+        for (name, expected) in
+            [("Export settings", "export"), ("Check file", "check"), ("Import and replace my settings", "apply")]
+        {
+            press(&mut render, centre(name));
+            assert_eq!(seen.borrow().last().copied(), Some(expected), "clicking {name}: {:?}", seen.borrow());
+        }
+        assert!(transfer.borrow().candidate.is_some(), "only Cancel discards a checked import");
+        press(&mut render, centre("Cancel"));
+        assert!(transfer.borrow().candidate.is_none(), "Cancel discards it");
+        assert_eq!(*seen.borrow(), ["export", "check", "apply"], "nothing else was triggered");
     }
 
     #[test]
@@ -358,6 +816,9 @@ mod tests {
                         support: Support::Full,
                         software_renderer: false,
                         can_switch_default: true,
+                        can_route_apps: true,
+                        confirm_route_reset: &mut false,
+                        transfer: &mut TransferUi::default(),
                         audio: &audio,
                         icons: &mut icons,
                         settings_path: &path,
@@ -382,7 +843,7 @@ mod tests {
 
                 // Tab forward to Open settings folder; every focused control must stay inside the viewport.
                 let mut reached_open_folder = false;
-                for _ in 0..45 {
+                for _ in 0..90 {
                     let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::NONE, |ui| {
                         let mut cx = SettingsCtx {
                             look: &look,
@@ -392,6 +853,9 @@ mod tests {
                             support: Support::Full,
                             software_renderer: false,
                             can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -429,6 +893,9 @@ mod tests {
                             support: Support::Full,
                             software_renderer: false,
                             can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,
@@ -467,6 +934,9 @@ mod tests {
                                 support: Support::Full,
                                 software_renderer: false,
                                 can_switch_default: true,
+                                can_route_apps: true,
+                                confirm_route_reset: &mut false,
+                                transfer: &mut TransferUi::default(),
                                 audio: &audio,
                                 icons: &mut icons,
                                 settings_path: &path,
@@ -489,9 +959,35 @@ mod tests {
                     "manual wheel scroll while focused must not be fought by scroll_on_focus (before={before_wheel}, after={after_wheel})"
                 );
 
+                // Let the wheel's smooth-scroll animation finish (the harness advances 10 ms per
+                // pass), so the first Shift+Tab is judged on focus scrolling alone.
+                for _ in 0..30 {
+                    harness.run(width, height, |ui| {
+                        let mut cx = SettingsCtx {
+                            look: &look,
+                            settings: &mut settings,
+                            login: &mut login,
+                            glass: GlassStatus::TransparencyOff,
+                            support: Support::Full,
+                            software_renderer: false,
+                            can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
+                            audio: &audio,
+                            icons: &mut icons,
+                            settings_path: &path,
+                            hotkeys: Some(&service),
+                            hotkey_editor: &mut editor,
+                            errors: &mut errors,
+                        };
+                        show(ui, &mut cx);
+                    });
+                }
+
                 // Shift+Tab backward all the way to the top Theme control.
                 let mut reached_system_theme = false;
-                for _ in 0..45 {
+                for _ in 0..90 {
                     let frame = harness.send_key(width, height, Key::Tab, egui::Modifiers::SHIFT, |ui| {
                         let mut cx = SettingsCtx {
                             look: &look,
@@ -501,6 +997,9 @@ mod tests {
                             support: Support::Full,
                             software_renderer: false,
                             can_switch_default: true,
+                            can_route_apps: true,
+                            confirm_route_reset: &mut false,
+                            transfer: &mut TransferUi::default(),
                             audio: &audio,
                             icons: &mut icons,
                             settings_path: &path,

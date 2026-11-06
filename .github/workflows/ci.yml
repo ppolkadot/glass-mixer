@@ -2,7 +2,8 @@ name: Rust CI
 
 # Runs on pushes to the long-lived branches and on every pull request, so a
 # PR into main (or any other branch) is always validated. Run it by hand from
-# the Actions tab with "Run workflow" when needed.
+# the Actions tab with "Run workflow" when needed. Releases are built by
+# release.yml.
 on:
   push:
     branches: [main, experiments, 'codex/**']
@@ -21,9 +22,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Hosted runners are Windows Server images, not Windows 10 or 11 client, so
+  # this validates the build, lints and unit tests on two Windows generations
+  # (Server 2022, build 20348, and the latest image). Anything that needs a real
+  # audio device, a desktop session or a client edition is a manual check; see
+  # docs/TESTING.md.
   windows:
-    runs-on: windows-latest
+    name: Windows (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -41,6 +52,11 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
             if ($errors) { throw "Syntax error in $($_.Name): $errors" }
           }
+      # A branch in development may have an Unreleased changelog section; a release
+      # (release.yml) may not.
+      - name: Version consistency
+        shell: pwsh
+        run: ./scripts/check-version.ps1 -AllowUnreleased
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       # Hardware, desktop-input and global-shortcut tests are #[ignore]d and do
@@ -52,6 +68,34 @@ jobs:
       - name: Third-party notices
         shell: pwsh
         run: ./scripts/third-party-notices.ps1 -OutFile target/THIRD-PARTY-NOTICES.txt
+
+  # Builds the portable ZIP and the installer exactly as a release does (unsigned),
+  # verifies them, and keeps them for a week so a pull request's package can be tried.
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: windows
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+      - name: Package and verify
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glass-mixer-packages
+          path: |
+            dist/glass-mixer-*-portable.zip
+            dist/glass-mixer-*-setup.exe
+            dist/glass-mixer-*-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
 
   # The oldest Rust that Cargo.toml's `rust-version` promises must still build it.
   msrv:
