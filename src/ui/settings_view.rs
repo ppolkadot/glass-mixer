@@ -16,9 +16,7 @@ pub enum Outcome {
     Back,
     /// Write the diagnostic report to a file and show the folder.
     SaveDiagnostics,
-    /// Put the diagnostic report on the clipboard.
     CopyDiagnostics,
-    /// Write the preferences to an export file.
     ExportSettings,
     /// Read and check the file named in [`TransferUi::path`].
     CheckImport,

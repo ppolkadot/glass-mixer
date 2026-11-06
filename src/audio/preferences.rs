@@ -120,7 +120,6 @@ pub fn normalize_app_names(names: Vec<AppName>) -> Vec<AppName> {
         .collect()
 }
 
-/// The name the user gave `key`, if any.
 pub fn custom_name<'a>(names: &'a [AppName], key: &AppKey) -> Option<&'a str> {
     let key = normalized_key(key)?;
     names.iter().find(|n| n.key == key).map(|n| n.name.as_str())
@@ -166,7 +165,6 @@ pub fn move_item<T>(items: &mut [T], index: usize, delta: isize) -> bool {
 /// What cycling the default output through the pinned devices does.
 #[derive(Debug, PartialEq)]
 pub enum CycleOutcome<'a> {
-    /// Make this device the default.
     Switch(&'a super::DeviceInfo),
     /// The only connected pinned device is already the default.
     AlreadyDefault(&'a super::DeviceInfo),
@@ -231,7 +229,6 @@ pub struct PresetEntry {
     pub output: Option<DeviceChoice>,
 }
 
-/// The master output level a profile sets.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MasterLevel {
     pub volume: f32,

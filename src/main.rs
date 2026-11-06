@@ -211,7 +211,6 @@ fn init_logging() {
     let dir = log_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("glass-mixer.log");
-    // Keep the log small: start fresh when it grows past 1 MB.
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
         let _ = std::fs::rename(&path, dir.join("glass-mixer.old.log"));
     }

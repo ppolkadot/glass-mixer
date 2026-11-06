@@ -24,7 +24,6 @@ pub struct Palette {
     pub track: Color32,
     pub accent: Color32,
     pub accent_soft: Color32,
-    /// Text drawn on an accent fill.
     pub on_accent: Color32,
     pub danger: Color32,
     pub playing: Color32,

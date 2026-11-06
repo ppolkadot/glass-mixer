@@ -115,7 +115,6 @@ try {
     $before = Get-RealState
     Write-Host ("  Real installation present: {0}; running copies: {1}" -f $before.UninstallKey, $(if ($before.Processes) { $before.Processes.Split(',').Count } else { 0 }))
 
-    # ---- Build the variant ----
     # No 2>&1: in Windows PowerShell 5.1 redirected native stderr becomes a terminating error.
     cargo build --locked --quiet
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
@@ -152,7 +151,6 @@ try {
     }
     Write-Host '  Variant installers built.'
 
-    # ---- 1. Fresh install ----
     Write-Host 'Fresh install:'
     $install = Install-Variant (Join-Path $outDir 'smoke-1.exe') 'install-1.log'
     Check 'the installer exits with 0' ($install.ExitCode -eq 0) "exit $($install.ExitCode)"
@@ -166,7 +164,6 @@ try {
     Check 'the Start menu shortcut exists' (Test-Path -LiteralPath (Join-Path $programs 'Glass Mixer Smoke Test.lnk'))
     Check 'no copy was started by a silent install' (@(Get-Process glass-mixer -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir\*" }).Count -eq 0)
 
-    # ---- 2. Upgrade over a running copy ----
     Write-Host 'Upgrade while the application is running:'
     $app = Start-SmokeApp
     $up = Wait-Until { (Read-AppLog) -match 'audio engine initialized' }
@@ -188,7 +185,6 @@ try {
     Check 'launch at login still points at the installed copy' ((Get-ItemProperty -LiteralPath $runKey -Name GlassMixerSmoke -ErrorAction SilentlyContinue).GlassMixerSmoke -eq ('"{0}\glass-mixer.exe" --minimized' -f $installDir))
     Check 'no process was left behind' (@(Get-Process glass-mixer -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir\*" }).Count -eq 0)
 
-    # ---- 3. Uninstall of a running copy ----
     Write-Host 'Uninstall while the application is running:'
     Remove-Item -LiteralPath (Join-Path $profileDir 'logs') -Recurse -Force -ErrorAction SilentlyContinue
     $app = Start-SmokeApp
@@ -207,7 +203,6 @@ try {
     Check 'the Start menu shortcut is gone' (-not (Test-Path -LiteralPath (Join-Path $programs 'Glass Mixer Smoke Test.lnk')))
     Check 'no process was left behind' (@(Get-Process glass-mixer -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir\*" }).Count -eq 0)
 
-    # ---- The real installation must be exactly as it was ----
     Write-Host 'The real installation:'
     $after = Get-RealState
     foreach ($property in $before.PSObject.Properties.Name) {

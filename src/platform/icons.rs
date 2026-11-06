@@ -308,7 +308,6 @@ fn worker(
     let _com = ComGuard::apartment();
     let mut cache: Lru<ExtractKey, IconResult> = Lru::new(CACHE_CAPACITY);
     for req in rx {
-        // Requests still queued at shutdown are dropped.
         if stop.load(Ordering::Relaxed) {
             break;
         }

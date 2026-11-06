@@ -27,7 +27,6 @@ pub fn render_app_icon(size: u32, muted: bool) -> Vec<u8> {
                     let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
                     let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
 
-                    // Rounded-square background.
                     let d = sd_round_box(x - s / 2.0, y - s / 2.0, s / 2.0, s / 2.0, corner);
                     if d > 0.0 {
                         continue;
@@ -39,7 +38,6 @@ pub fn render_app_icon(size: u32, muted: bool) -> Vec<u8> {
                         lerp(c0[2] as f32, c1[2] as f32, t) / 255.0,
                     ];
 
-                    // Three fader bars.
                     for (cx, top) in bars {
                         let cx = cx * s;
                         let top = top * s;
@@ -50,7 +48,6 @@ pub fn render_app_icon(size: u32, muted: bool) -> Vec<u8> {
                         }
                     }
 
-                    // Mute slash.
                     if muted {
                         let dl = sd_segment(x, y, 0.22 * s, 0.22 * s, 0.78 * s, 0.78 * s);
                         if dl <= 0.055 * s {

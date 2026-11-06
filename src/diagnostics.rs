@@ -167,7 +167,6 @@ fn yes(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-/// The report text.
 pub fn build(i: &Inputs) -> String {
     let profile = std::env::var("USERPROFILE").ok();
     build_with_profile(i, profile.as_deref())

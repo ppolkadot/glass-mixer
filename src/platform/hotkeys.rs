@@ -35,7 +35,6 @@ const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
     ToggleWindow,
-    /// Apply the profile with this name.
     ActivateProfile(String),
 }
 
@@ -247,7 +246,6 @@ fn synthetic_registration(id: i32, binding: HotkeyBinding, chord: Chord) -> Resu
     Ok(Registration { id, binding, chord, synthetic: true })
 }
 
-/// What a pressed shortcut asks for.
 #[derive(Debug, PartialEq)]
 enum Resolved {
     Audio(Command),
@@ -304,7 +302,6 @@ impl Registrations {
         failed
     }
 
-    /// Maps a `WM_HOTKEY` message to its action.
     fn resolve(&self, id: usize, lparam: isize) -> Option<Resolved> {
         let registration = self.active.iter().find(|r| r.id as usize == id)?;
         // Ignore a queued message belonging to an old registration if an ID
@@ -436,7 +433,6 @@ impl HotkeyAction {
         Self::ToggleWindow,
         Self::CycleOutputDevice,
     ];
-    /// The actions available for each pinned app.
     pub const FOR_APP: [Self; 4] = [Self::AppMute, Self::AppVolumeUp, Self::AppVolumeDown, Self::AppSolo];
 
     pub fn label(self) -> &'static str {
@@ -552,7 +548,6 @@ fn same_slot(a: &Slot, b: &Slot) -> bool {
         }
 }
 
-/// Bindings split into those that can be registered and those that cannot.
 struct Validated {
     valid: Vec<(HotkeyBinding, Chord)>,
     rejected: Vec<FailedBinding>,
@@ -1531,7 +1526,6 @@ mod tests {
             "summary banner must distinguish retryable conflicts from invalid/duplicate entries: {labels:?}"
         );
 
-        // Pending state shows Registering… and disables Retry.
         let pending_status =
             HotkeyStatus { active: Vec::new(), failed: status.failed.clone(), pending: true, errors: Vec::new() };
         let pending_frame = harness.run(360.0, 720.0, |ui| {
@@ -1542,7 +1536,6 @@ mod tests {
             pending_frame.widgets.iter().find(|w| w.name == "Retry failed shortcuts").expect("Retry button");
         assert!(retry_btn.disabled, "Retry button must be disabled while registration is pending");
 
-        // Cleared state disables Clear buttons and shows Off.
         bindings.clear();
         let cleared_status = HotkeyStatus::default();
         let cleared_frame = harness.run(360.0, 720.0, |ui| {

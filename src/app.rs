@@ -57,7 +57,6 @@ struct Toast {
 /// Visible display time for a toast. The countdown runs only while the window
 /// is shown, so a toast queued while hidden is displayed in full later.
 struct ToastExpiry {
-    /// Visible time left before the toast disappears.
     remaining: Duration,
     /// When the toast should disappear; `None` while the countdown is paused.
     due: Option<Instant>,
@@ -89,9 +88,8 @@ impl ToastExpiry {
 }
 
 /// Logs the renderer and graphics adapter in use. Returns whether frames are
-/// rendered in software (WARP, the "Microsoft Basic Render Driver").
-/// Logs how the window is drawn; returns whether that is software rendering,
-/// and a description for the diagnostic report.
+/// rendered in software (WARP, the "Microsoft Basic Render Driver"), and a
+/// description for the diagnostic report.
 fn log_renderer(cc: &eframe::CreationContext<'_>) -> (bool, String) {
     if let Some(state) = &cc.wgpu_render_state {
         let info = state.adapter.get_info();
@@ -191,7 +189,6 @@ pub struct MixerApp {
     /// Started with `--minimized`: hide once eframe has shown the (cloaked) window.
     pending_start_hide: bool,
     force_opaque: bool,
-    /// Frames are drawn by the CPU (no graphics acceleration).
     software_renderer: bool,
     renderer: String,
     /// Warnings and errors shown to the user, for the diagnostic report.
@@ -613,7 +610,6 @@ impl MixerApp {
         };
     }
 
-    /// Applies a saved profile by name (from its shortcut).
     fn activate_profile(&mut self, name: &str) {
         match self.settings.presets.iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
             Some(profile) => self.audio.send(crate::audio::Command::ActivateProfile(profile.clone())),
