@@ -47,7 +47,7 @@ Status:
 
 - **v0.1.0 is functional and released.** The core requirements are
   implemented and checked on one Windows 11 machine.
-- **0.3.0 is released** (GitHub release `v0.3.0`, commit `518cd33`, which
+- **0.3.0 is released** (GitHub release `v0.3.0`, commit `2561aee`, which
   passed hosted Windows CI runs `#39106819443` and `#39107297354`). It carries
   the 0.2.0 beta features: independent device controls, sound-property
   readouts, opt-in global shortcuts, pins, presets, tray notifications and the
@@ -786,9 +786,9 @@ results are in `TESTING.md`. At that point no hosted CI run, hardware audio
 test, installer upgrade or Windows 10 test had been done for the beta; later
 runs are recorded below.
 
-### Follow-up review verification (2026-10-17, uncommitted worktree on `107a305`)
+### Follow-up review verification (2026-10-17, uncommitted worktree on `ea9c816`)
 
-Commit `107a305` passed hosted GitHub Actions CI (`windows-latest`, run
+Commit `ea9c816` passed hosted GitHub Actions CI (`windows-latest`, run
 `#38919273079`). Subsequent follow-up review fixes in the uncommitted working
 tree (`R1`–`R9` and `F1`–`F6`) were verified locally on the section 4 machine:
 formatting, PowerShell parser checks, clippy with warnings denied, the expanded
@@ -798,9 +798,9 @@ under OpenGL and forced `wgpu`, including strict off-screen-to-visible `Tab`
 traversal in Settings). Exact commands and results are in `TESTING.md`; a fresh
 hosted CI run is required once the working tree changes are committed and pushed.
 
-### Final review corrections verification (2026-10-18, branch `fix/beta2-review-corrections` on `e47b328`)
+### Final review corrections verification (2026-10-18, branch `fix/beta2-review-corrections` on `209e563`)
 
-The reviewed commit `e47b328` passed hosted GitHub Actions CI (`windows-latest`,
+The reviewed commit `209e563` passed hosted GitHub Actions CI (`windows-latest`,
 run `#39094235224`). The final corrections on top of it were verified locally on
 the section 4 machine: formatting, PowerShell parser checks, clippy with warnings
 denied, the expanded test suite (90 library tests passed with 3 ignored, 3 binary
@@ -995,7 +995,7 @@ Usage and optional signing are in `scripts/README.md`.
 ### Suggested next steps, in priority order
 
 0. Keep hosted CI green for `experiments` on push or pull request before
-   merging (commits `107a305` and `e47b328` passed the hosted runs
+   merging (commits `ea9c816` and `209e563` passed the hosted runs
    `#38919273079` and `#39094235224` on `windows-latest`; re-run after pushing
    the review corrections).
 1. Validate the expanded UI and device lifecycle on additional hardware.

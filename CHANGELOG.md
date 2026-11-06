@@ -331,8 +331,8 @@ locally; this branch has not been merged into `main`.
 
 Checked locally on Windows 11 Pro 25H2 (build 26200), NVIDIA GeForce GT 340,
 one HDMI output and no microphone. Hosted GitHub Actions CI run `#38919273079`
-covered the earlier committed base `107a305`; the pushed beta.2 commit
-`e47b328` passed run `#39094235224` on `windows-latest`. The final review
+covered the earlier committed base `ea9c816`; the pushed beta.2 commit
+`209e563` passed run `#39094235224` on `windows-latest`. The final review
 corrections documented above were verified locally and need their own hosted
 run after push (details in `docs/TESTING.md`).
 

@@ -1,5 +1,12 @@
 # Testing
 
+> **Commit hashes.** On 2026-11-06 the repository history was rewritten to remove
+> co-author lines from commit messages. File contents did not change, but every commit
+> has a new hash, and the tags `v0.1.0`, `v0.3.0` and `v0.4.0` point to the new commits.
+> The documents cite the new hashes. GitHub Actions runs from before then still show the
+> old ones: `107a305` is now `ea9c816`, `e47b328` is `209e563`, `518cd33` is `2561aee`
+> and `41f656d` is `86fdb9b`.
+
 ## Stage 6: release readiness (2026-11-06, `experiments`)
 
 Machine: Windows 11 build 26200, HDMI output active, one monitor at 100 %. See
@@ -29,7 +36,7 @@ not cover.
   replacing files, and the check passes. Not tested: upgrading from a 0.1.0 to 0.3.0
   installation (those versions do not know `--exit`), and the installer built from the
   release executable (the smoke test uses the debug build).
-- **Performance, 0.4.0 (`41f656d`) against this branch**, release builds in scratch
+- **Performance, 0.4.0 (`86fdb9b`) against this branch**, release builds in scratch
   copies with their own settings folders and single-instance name, three runs each,
   10 s of CPU after 4 s of settling:
 
@@ -150,9 +157,9 @@ day.
   new `fonts\LICENSE.txt` (the script and installer entries were edited but
   `scripts/package.ps1` was not run).
 
-## Stability check before Stage 5 (2026-11-06, merge `37a72d2`)
+## Stability check before Stage 5 (2026-11-06, merge `107f2cb`)
 
-`experiments` held the 0.5.0 work (`19a7f86`) and an in-progress merge of the
+`experiments` held the 0.5.0 work (`a488137`) and an in-progress merge of the
 published 0.4.0 release; this checks the merged tree.
 
 - 163 library tests passed three times in a row; the 12 real-device tests passed
@@ -294,7 +301,7 @@ unreadable sessions, device-notification coalescing, and the hotkey test guard.
   app with several stereo sessions at different balances on real hardware,
   saturation over a real long-running session, and Windows 10.
 =======
-## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `41f656d`)
+## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `86fdb9b`)
 
 The three review findings have focused regression coverage. New tests first
 failed against the unchanged implementation, then passed with the corrections:
@@ -332,7 +339,7 @@ the executable. PowerShell syntax and diff whitespace checks also passed.
 Local Rust checks used 1.99.1. Release publication is gated on hosted Windows
 checks, the Rust 1.95 minimum-version check, and dependency audit for the final
 source. The exact hosted runs are linked from the GitHub Release; the earlier
-run for `41f656d` covers only the audit baseline. Package hashes are in the
+run for `86fdb9b` covers only the audit baseline. Package hashes are in the
 [0.4.0 release record](releases/0.4.0.md).
 
 Not run in this correction pass: the installed upgrade/uninstall flow,
@@ -396,15 +403,15 @@ Setup 6.7.3 produced both packages. The executable and installer report
 product version `0.3.0`; the portable archive contains the executable and
 README. Package hashes are in [`docs/releases/0.3.0.md`](releases/0.3.0.md).
 
-- [x] Hosted Windows CI for the exact 0.3.0 commit (`518cd33`): runs
+- [x] Hosted Windows CI for the exact 0.3.0 commit (`2561aee`): runs
   `#39106819443` (`experiments`) and `#39107297354` (`main`) passed.
 - Not run for this release candidate: live audio mutations, installer upgrade
   from 0.1.0, physical keyboard injection, Narrator, Windows 10, and varied
   hardware. Earlier beta results remain below.
 
-## Final review corrections (2026-10-18, branch `fix/beta2-review-corrections` on `e47b328`)
+## Final review corrections (2026-10-18, branch `fix/beta2-review-corrections` on `209e563`)
 
-This pass reviewed the pushed beta.2 commit `e47b328` and applied the final
+This pass reviewed the pushed beta.2 commit `209e563` and applied the final
 corrections: the Linux-only glib advisory is removed from `Cargo.lock`, hidden
 in-window warnings keep their remaining display time, the posted-message
 shortcut pressure test no longer depends on a global chord, the process
@@ -445,16 +452,16 @@ rebuilt local packages.
   changes, physical keyboard injection, Narrator, installer upgrade from
   0.1.0, and Windows 10. See the manual checklist below.
 
-## Second beta packaging (2026-10-18, commit `e47b328`)
+## Second beta packaging (2026-10-18, commit `209e563`)
 
 The 0.2.0-beta.2 source includes the follow-up review fixes below and releases
 the shortcut injector's error mutex before joining its worker on failure.
 Hosted GitHub Actions CI run `#39094235224` (`windows-latest`) passed for the
-pushed commit `e47b328`. The final review corrections on top of it are recorded
+pushed commit `209e563`. The final review corrections on top of it are recorded
 in the section above. Live audio changes, physical keyboard injection,
 Narrator, and installer upgrade from 0.1.0 remain unverified.
 
-Fresh checks on `experiments` for beta.2 (at `e47b328`):
+Fresh checks on `experiments` for beta.2 (at `209e563`):
 
 - `cargo fmt --check`, PowerShell syntax parsing, and `git diff --check`: passed.
 - `cargo test --locked`: 86 library tests passed, 3 ignored; 3 binary and 1
@@ -469,12 +476,12 @@ Fresh checks on `experiments` for beta.2 (at `e47b328`):
   commit alone; they were rerun on the corrected branch above, where the live
   Tab traversal was made foreground-independent.
 
-## Follow-up merge-review verification (2026-10-17, audit worktree on `107a305`)
+## Follow-up merge-review verification (2026-10-17, audit worktree on `ea9c816`)
 
 All checks in this section were run against the uncommitted worktree changes on
-top of commit `107a305` on branch `glass_mixer_audit` (`R1`–`R9` and follow-up
+top of commit `ea9c816` on branch `glass_mixer_audit` (`R1`–`R9` and follow-up
 findings `F1`–`F6`). Hosted GitHub Actions CI run `#38919273079` (`windows-latest`)
-validated committed `107a305` only; the uncommitted worktree changes recorded
+validated committed `ea9c816` only; the uncommitted worktree changes recorded
 here require a fresh hosted CI run once committed and pushed.
 
 - **Automated checks on the uncommitted worktree:**
