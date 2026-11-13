@@ -263,11 +263,7 @@ impl<'a> Slider<'a> {
                 painter.rect_filled(meter, CornerRadius::same(1), fade(p.accent.gamma_multiply(0.55)));
             }
             let radius = 9.0 + hot;
-            painter.circle_filled(center + vec2(0.0, 1.0), radius + 1.0, p.shadow);
-            painter.circle_filled(center, radius, fade(p.knob));
-            if !p.dark {
-                painter.circle_stroke(center, radius, Stroke::new(0.5, fade(p.border)));
-            }
+            draw_knob(painter, center, radius, p, enabled);
         }
         focus_ring(ui, rect, &response, p, 8);
 
@@ -363,7 +359,9 @@ pub fn toggle_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str, descript
     // Text column leaves room for the switch; descriptions wrap instead of running under it.
     let text_w = (width - 64.0).max(80.0);
     let desc_galley = description.map(|d| {
-        let mut job = egui::text::LayoutJob::simple(d.to_string(), FontId::proportional(12.0), p.text_muted, text_w);
+        let mut job = egui::text::LayoutJob::default();
+        job.append(d, 0.0, super::typography::format(super::typography::Role::Footnote, p.text_muted, look));
+        job.wrap.max_width = text_w;
         job.halign = egui::Align::LEFT;
         ui.painter().layout_job(job)
     });
@@ -377,6 +375,8 @@ pub fn toggle_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str, descript
         *on = !*on;
         response.mark_changed();
     }
+    let dur = super::theme::duration(ui, super::theme::motion::STANDARD);
+    let t = ui.ctx().animate_bool_with_time_and_easing(response.id, *on, dur, super::theme::motion::ease);
     let painter = ui.painter();
     if response.hovered() {
         painter.rect_filled(rect.expand2(vec2(4.0, 0.0)), CornerRadius::same(6), p.surface_hover);
@@ -384,22 +384,47 @@ pub fn toggle_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str, descript
     let text = if enabled { p.text } else { p.text_muted };
     let left = rect.left() + 2.0;
     if let Some(galley) = desc_galley {
-        painter.text(pos2(left, rect.top() + 5.0), Align2::LEFT_TOP, label, FontId::proportional(14.0), text);
+        super::typography::paint(
+            painter,
+            pos2(left, rect.top() + 5.0),
+            Align2::LEFT_TOP,
+            label,
+            super::typography::Role::Body,
+            text,
+            look,
+        );
         painter.galley(pos2(left, rect.top() + 25.0), galley, p.text_muted);
     } else {
-        painter.text(pos2(left, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), text);
+        super::typography::paint(
+            painter,
+            pos2(left, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            super::typography::Role::Body,
+            text,
+            look,
+        );
     }
-    let t = ui.ctx().animate_bool(response.id, *on);
-    let track = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(38.0, 20.0));
-    let on_fill = if enabled { p.accent } else { p.accent.gamma_multiply(0.4) };
-    if *on {
-        painter.rect_filled(track, CornerRadius::same(10), on_fill);
+    if p.high_contrast {
+        let track = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(38.0, 20.0));
+        let on_fill = if enabled { p.accent } else { p.accent.gamma_multiply(0.4) };
+        if *on {
+            painter.rect_filled(track, CornerRadius::same(10), on_fill);
+        } else {
+            painter.rect_stroke(track, CornerRadius::same(10), Stroke::new(1.5, p.text_muted), StrokeKind::Inside);
+        }
+        let knob_x = egui::lerp(track.left() + 10.0..=track.right() - 10.0, t);
+        let knob = if *on { p.on_accent } else { p.text_muted };
+        painter.circle_filled(pos2(knob_x, track.center().y), if *on { 6.0 } else { 5.0 }, knob);
     } else {
-        painter.rect_stroke(track, CornerRadius::same(10), Stroke::new(1.5, p.text_muted), StrokeKind::Inside);
+        let track = Rect::from_center_size(pos2(rect.right() - 21.0, rect.center().y), vec2(36.0, 22.0));
+        let off_fill = if enabled { p.fill } else { p.fill.gamma_multiply(0.4) };
+        let on_fill = if enabled { p.accent } else { p.accent.gamma_multiply(0.4) };
+        painter.rect_filled(track, CornerRadius::same(11), blend_color(off_fill, on_fill, t));
+        let knob_x = egui::lerp(track.left() + 11.0..=track.right() - 11.0, t);
+        let center = pos2(knob_x, track.center().y);
+        draw_knob(painter, center, 9.0, p, enabled);
     }
-    let knob_x = egui::lerp(track.left() + 10.0..=track.right() - 10.0, t);
-    let knob = if *on { p.on_accent } else { p.text_muted };
-    painter.circle_filled(pos2(knob_x, track.center().y), if *on { 6.0 } else { 5.0 }, knob);
     focus_ring(ui, rect, &response, p, 6);
     let (label_owned, selected) = (label.to_string(), *on);
     response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, selected, &label_owned));
@@ -408,6 +433,23 @@ pub fn toggle_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str, descript
         ui.ctx().accesskit_node_builder(response.id, |node| node.set_description(description));
     }
     response
+}
+
+fn draw_knob(painter: &egui::Painter, center: egui::Pos2, radius: f32, p: &Palette, enabled: bool) {
+    let fill = if enabled { p.knob } else { p.knob.gamma_multiply(0.45) };
+    painter.circle_filled(center + vec2(0.0, 1.0), radius + 1.0, p.shadow);
+    painter.circle_filled(center, radius, fill);
+    if !p.dark {
+        let border = if enabled { p.border } else { p.border.gamma_multiply(0.45) };
+        painter.circle_stroke(center, radius, Stroke::new(0.5, border));
+    }
+}
+
+fn blend_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let [r0, g0, b0, a0] = a.to_array();
+    let [r1, g1, b1, a1] = b.to_array();
+    let ch = |x: u8, y: u8| egui::lerp(f32::from(x)..=f32::from(y), t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_premultiplied(ch(r0, r1), ch(g0, g1), ch(b0, b1), ch(a0, a1))
 }
 
 /// A segmented control; returns `true` when the value changed.
