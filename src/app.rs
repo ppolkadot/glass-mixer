@@ -484,7 +484,7 @@ impl MixerApp {
         let Some(h) = self.hwnd else {
             return;
         };
-        if window::is_shown(h) {
+        if window::is_shown(h) && window::is_foreground(h) {
             self.hide_to_tray();
         } else {
             window::show(h);

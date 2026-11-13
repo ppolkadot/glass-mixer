@@ -16,8 +16,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
+    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowPos, ShowWindow,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -79,6 +80,10 @@ pub fn is_visible(hwnd: Hwnd) -> bool {
 /// Visible and not minimized.
 pub fn is_shown(hwnd: Hwnd) -> bool {
     unsafe { IsWindowVisible(hwnd.get()).as_bool() && !IsIconic(hwnd.get()).as_bool() }
+}
+
+pub fn is_foreground(hwnd: Hwnd) -> bool {
+    unsafe { GetForegroundWindow() == hwnd.get() }
 }
 
 fn process_image_path(pid: u32) -> windows::core::Result<String> {
