@@ -161,6 +161,7 @@ pub struct MixerApp {
     last_hotkey_errors: Vec<String>,
     store: SettingsStore,
     settings: Settings,
+    settings_seen: Settings,
     dirty_since: Option<Instant>,
     save_error_shown: bool,
     prefs: SystemPrefs,
@@ -310,7 +311,8 @@ impl MixerApp {
             preset_editor: crate::ui::presets::PresetEditor::default(),
             last_hotkey_errors: Vec::new(),
             store: opts.store,
-            settings: opts.settings,
+            settings: opts.settings.clone(),
+            settings_seen: opts.settings,
             dirty_since: None,
             save_error_shown: false,
             prefs,
@@ -706,6 +708,7 @@ impl MixerApp {
         let outer_pos = outer.zip(self.hwnd).and_then(|(_, h)| window::outer_position(h));
         let inner_size = inner.map(|inner| (inner.width(), inner.height()));
         if record_window_geometry(&mut self.settings, shown, maximized, outer_pos, inner_size) {
+            self.settings_seen.window = self.settings.window;
             self.mark_dirty();
         }
     }
@@ -984,7 +987,6 @@ impl eframe::App for MixerApp {
         ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, look.p.base);
         let snapshot = self.audio.snapshot();
         let meters = self.audio.meters();
-        let before = self.settings.clone();
         if let Some(imported) = self.import_to_apply.take() {
             self.settings = imported;
             self.mixer.forget_drafts();
@@ -1107,27 +1109,29 @@ impl eframe::App for MixerApp {
             });
         });
 
-        if self.settings != before {
-            if self.settings.presets != before.presets {
+        if self.settings != self.settings_seen {
+            if self.settings.presets != self.settings_seen.presets {
                 self.audio.send(crate::audio::Command::SetPresetRules(self.settings.presets.clone()));
             }
-            if self.settings.typeface != before.typeface {
+            if self.settings.typeface != self.settings_seen.typeface {
                 fonts::install(ui.ctx(), self.settings.typeface);
             }
-            if self.settings.pinned_devices != before.pinned_devices
-                || self.settings.solo != before.solo
-                || self.settings.focus_rules != before.focus_rules
-                || self.settings.mic_ducking != before.mic_ducking
+            if self.settings.pinned_devices != self.settings_seen.pinned_devices
+                || self.settings.solo != self.settings_seen.solo
+                || self.settings.focus_rules != self.settings_seen.focus_rules
+                || self.settings.mic_ducking != self.settings_seen.mic_ducking
             {
                 send_audio_preferences(&self.audio, &self.settings);
                 self.update_foreground_watch();
             }
-            if (self.settings.hotkeys != before.hotkeys || self.settings.hotkey_step != before.hotkey_step)
+            if (self.settings.hotkeys != self.settings_seen.hotkeys
+                || self.settings.hotkey_step != self.settings_seen.hotkey_step)
                 && let Some(service) = &self.hotkeys
                 && let Err(e) = service.configure(&self.settings.hotkeys, self.settings.hotkey_step)
             {
                 errors.push(e);
             }
+            self.settings_seen = self.settings.clone();
             self.mark_dirty();
             let ctx = ui.ctx().clone();
             self.refresh_look(&ctx);
