@@ -190,6 +190,7 @@ pub(crate) enum Msg {
 pub(crate) type Listener = Arc<dyn Fn() + Send + Sync>;
 type EngineThread = (JoinHandle<()>, Receiver<()>);
 
+#[derive(Default)]
 pub(crate) struct Shared {
     snapshot: Mutex<Arc<AudioSnapshot>>,
     meters: Mutex<Arc<Meters>>,
@@ -245,6 +246,10 @@ impl Shared {
 
     pub(crate) fn meters_wanted(&self) -> bool {
         self.meters_wanted.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn take_notices(&self) -> Vec<Notice> {
+        self.notices.lock().drain(..).collect()
     }
 
     fn notify(&self) {
@@ -318,7 +323,7 @@ impl AudioHandle {
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
-        self.shared.notices.lock().drain(..).collect()
+        self.shared.take_notices()
     }
 
     /// Registers a callback invoked (from the engine thread) whenever new state is published.

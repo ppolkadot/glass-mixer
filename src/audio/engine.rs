@@ -118,30 +118,7 @@ impl Dirty {
 pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
     let _com = ComGuard::multithreaded();
     let _power = PowerWatch::register(tx.clone());
-    let mut runner = Runner {
-        engine: None,
-        tx,
-        shared,
-        dirty: Dirty::default(),
-        retry_at: Some(Instant::now()),
-        backoff: Duration::from_millis(250),
-        delayed_rebuild: None,
-        device_events: Coalesce::default(),
-        last_meter_poll: Instant::now(),
-        last_meters: Arc::default(),
-        meter_scratch: Meters::default(),
-        was_unavailable: false,
-        devices_loaded: false,
-        preset_rules: Vec::new(),
-        pinned_outputs: Vec::new(),
-        solo: None,
-        solo_level: Reduction { factor: 0.2, mute: false },
-        focus_rules: Vec::new(),
-        focus: FocusSettle::default(),
-        mic: None,
-        mic_gate: MicGate::default(),
-        last_mic_poll: Instant::now(),
-    };
+    let mut runner = Runner::new(tx, shared);
 
     loop {
         runner.maintain();
@@ -196,6 +173,33 @@ struct Runner {
 }
 
 impl Runner {
+    fn new(tx: Sender<Msg>, shared: Arc<Shared>) -> Self {
+        Self {
+            engine: None,
+            tx,
+            shared,
+            dirty: Dirty::default(),
+            retry_at: Some(Instant::now()),
+            backoff: Duration::from_millis(250),
+            delayed_rebuild: None,
+            device_events: Coalesce::default(),
+            last_meter_poll: Instant::now(),
+            last_meters: Arc::default(),
+            meter_scratch: Meters::default(),
+            was_unavailable: false,
+            devices_loaded: false,
+            preset_rules: Vec::new(),
+            pinned_outputs: Vec::new(),
+            solo: None,
+            solo_level: Reduction { factor: 0.2, mute: false },
+            focus_rules: Vec::new(),
+            focus: FocusSettle::default(),
+            mic: None,
+            mic_gate: MicGate::default(),
+            last_mic_poll: Instant::now(),
+        }
+    }
+
     /// Returns `false` when the engine should stop.
     fn handle(&mut self, msgs: Vec<Msg>) -> bool {
         let mut commands: Vec<Command> = Vec::new();
@@ -340,6 +344,9 @@ impl Runner {
         }
         if cmd == Command::LoadDevices {
             self.devices_loaded = true;
+            if self.engine.is_none() {
+                return;
+            }
         }
         if cmd == Command::Refresh {
             log::info!("manual audio refresh requested");
@@ -2462,5 +2469,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(is_fatal(err.code()));
+    }
+
+    #[test]
+    fn load_devices_without_engine_records_flag_without_error_notice() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let shared = Arc::new(Shared::default());
+        let mut runner = Runner::new(tx, shared.clone());
+        runner.apply(Command::LoadDevices);
+        assert!(runner.devices_loaded);
+        assert!(shared.take_notices().is_empty());
     }
 }
