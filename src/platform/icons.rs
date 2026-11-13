@@ -32,7 +32,7 @@ use std::{
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ, ReleaseDC, SelectObject,
+    DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SelectObject,
 };
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::UI::Shell::{
@@ -433,8 +433,21 @@ fn hbitmap_to_image(hbmp: HBITMAP) -> Option<ColorImage> {
 }
 
 fn hicon_to_image(hicon: HICON, px: i32) -> Option<ColorImage> {
+    struct Dc(HDC);
+    impl Drop for Dc {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.0);
+            }
+        }
+    }
+
     unsafe {
         let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            return None;
+        }
+        let _dc = Dc(hdc);
         let info = top_down_info(px, px);
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         let dib = CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
@@ -447,7 +460,6 @@ fn hicon_to_image(hicon: HICON, px: i32) -> Option<ColorImage> {
         };
         SelectObject(hdc, old);
         let _ = DeleteObject(HGDIOBJ(dib.0));
-        let _ = DeleteDC(hdc);
         buf.map(|b| bgra_to_image(b, px as usize, px as usize))
     }
 }
