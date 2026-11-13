@@ -161,6 +161,7 @@ pub struct MixerApp {
     store: SettingsStore,
     settings: Settings,
     dirty_since: Option<Instant>,
+    save_error_shown: bool,
     prefs: SystemPrefs,
     prefs_checked: Instant,
     support: Support,
@@ -307,6 +308,7 @@ impl MixerApp {
             store: opts.store,
             settings: opts.settings,
             dirty_since: None,
+            save_error_shown: false,
             prefs,
             prefs_checked: Instant::now(),
             support,
@@ -421,19 +423,54 @@ impl MixerApp {
     }
 
     fn save_if_due(&mut self, ctx: &egui::Context, force: bool) {
-        let Some(since) = self.dirty_since else { return };
-        let due = since + SAVE_DEBOUNCE;
-        if !force && Instant::now() < due {
-            ctx.request_repaint_after(due - Instant::now());
-            return;
+        let (wait, error) = flush_save_if_due(
+            &self.store,
+            &self.settings,
+            &mut self.dirty_since,
+            &mut self.save_error_shown,
+            Instant::now(),
+            force,
+        );
+        if let Some(delay) = wait
+            && !force
+        {
+            ctx.request_repaint_after(delay);
         }
-        self.dirty_since = None;
-        if let Err(e) = self.store.save(&self.settings) {
-            log::error!("saving settings failed: {e}");
-            self.toast(NoticeLevel::Error, format!("Couldn't save settings: {e}"));
+        if let Some(msg) = error {
+            self.toast(NoticeLevel::Error, msg);
         }
     }
+}
 
+fn flush_save_if_due(
+    store: &SettingsStore,
+    settings: &Settings,
+    dirty_since: &mut Option<Instant>,
+    save_error_shown: &mut bool,
+    now: Instant,
+    force: bool,
+) -> (Option<Duration>, Option<String>) {
+    let Some(since) = *dirty_since else { return (None, None) };
+    let due = since + SAVE_DEBOUNCE;
+    if !force && now < due {
+        return (Some(due - now), None);
+    }
+    *dirty_since = None;
+    match store.save(settings) {
+        Ok(()) => {
+            *save_error_shown = false;
+            (None, None)
+        }
+        Err(e) => {
+            log::error!("saving settings failed: {e}");
+            *dirty_since = Some(now);
+            let msg = (!std::mem::replace(save_error_shown, true)).then(|| format!("Couldn't save settings: {e}"));
+            (Some(SAVE_DEBOUNCE), msg)
+        }
+    }
+}
+
+impl MixerApp {
     fn toast(&mut self, level: NoticeLevel, text: String) {
         self.notify(crate::audio::Notice { level, text, announce: false });
     }
@@ -1162,5 +1199,41 @@ mod tests {
             "real move/resize updates geometry"
         );
         assert_eq!(settings.window, Some(WindowGeometry { x: 140.0, y: 160.0, width: 500.0, height: 740.0 }));
+    }
+
+    #[test]
+    fn failed_save_keeps_dirty_state_for_retry_and_toasts_once_per_streak() {
+        let root = std::env::temp_dir().join(format!("glass-mixer-save-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&root);
+        // A regular file where a directory is expected makes SettingsStore::save fail.
+        std::fs::write(&root, b"not a directory").unwrap();
+        let store = SettingsStore::new(&root);
+        let settings = Settings::default();
+        let t0 = Instant::now();
+        let mut dirty_since = Some(t0);
+        let mut error_shown = false;
+
+        let (wait, err) =
+            flush_save_if_due(&store, &settings, &mut dirty_since, &mut error_shown, t0 + SAVE_DEBOUNCE, false);
+        assert!(wait.is_some());
+        assert!(err.is_some(), "first failure surfaces an error toast");
+        assert_eq!(dirty_since, Some(t0 + SAVE_DEBOUNCE), "dirty_since is restored for debounce retry and shutdown");
+        assert!(error_shown);
+
+        // Second consecutive failure retries after debounce but does not re-toast.
+        let t1 = t0 + SAVE_DEBOUNCE * 2;
+        let (_wait, err2) = flush_save_if_due(&store, &settings, &mut dirty_since, &mut error_shown, t1, false);
+        assert!(err2.is_none(), "repeated failure suppresses duplicate toast");
+        assert_eq!(dirty_since, Some(t1));
+
+        // Removing the obstacle lets the next retry succeed and clears both flags.
+        std::fs::remove_file(&root).unwrap();
+        let (wait, err3) = flush_save_if_due(&store, &settings, &mut dirty_since, &mut error_shown, t1, true);
+        assert!(wait.is_none());
+        assert!(err3.is_none());
+        assert!(dirty_since.is_none());
+        assert!(!error_shown);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
