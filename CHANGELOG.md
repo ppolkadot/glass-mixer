@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.6.0 (2026-11-13)
+
+Package details and checksums are in [the release record](docs/releases/0.6.0.md).
+
+### Visual refresh and typography
+
+- **Tahoe / Control Center design language:** updated dark glass, light glass,
+  opaque, and high-contrast palettes (`ui/theme.rs`), card/control corner radii
+  (`12/10 pt` and `8/7 pt`), hairline grouped list dividers, and centralized
+  motion tokens with reduced-motion support.
+- **Polaris typography:** embedded Salted Flutters Polaris Bold alongside Regular
+  and Semibold (`platform/fonts.rs`), added a 9-role typography system with
+  interpolated `trak` letter-spacing via `LayoutJob` (`ui/typography.rs`), and
+  computed dynamic numeric readout widths (`ui/widgets.rs`).
+- **Widgets and views:** added semantic buttons, an animated-pill segmented tab
+  bar, view fade transitions, restyled sliders/toggles/disclosures/search
+  fields/combo icons/check rows, `2.5 pt` focus rings (`2.0 pt` in high
+  contrast), grouped Mixer cards with refreshed details/empty states, refreshed
+  Devices, Presets, and Settings views, standalone `HotkeyEditor`
+  (`ui/hotkey_editor.rs`), and fade-in visibility-frozen toasts (`ui/toasts.rs`).
+
+### Native Windows integration and performance
+
+- **Immediate OS appearance and DPI wakeups:** subclassed the window for
+  `WM_SETTINGCHANGE`, `WM_DWMCOLORIZATIONCOLORCHANGED`, and `WM_DPICHANGED`
+  (`platform/window.rs`).
+- **Themed, per-monitor-DPI tray menu:** replaced the stock tray menu with an
+  owner-drawn Win32 popup (`platform/tray_menu.rs`) matching system dark/light/high-contrast
+  themes, scaled per monitor, rendered with a process-private Polaris Semibold
+  font and `&`-derived mnemonics.
+- **DWM border color:** set `DWMWA_BORDER_COLOR` from the blended glass border
+  palette (`DWMWA_COLOR_NONE` when solid or high contrast) in
+  `platform/backdrop.rs`.
+- **Lower UI overhead:** replaced per-frame settings cloning with persistent
+  `settings_seen` diffing in `app.rs` and skipped redundant Win32 tray menu
+  rebuilds when tray state is unchanged.
+
+### Reliability, packaging, and internal cleanup
+
+- **Audio & engine robustness:** preserved Solo across engine rebuilds, skipped
+  non-fatal session errors during attenuation reconciliation, returned early on
+  `LoadDevices` when the engine is unavailable, avoided caching transient
+  `Route::Unknown`, caught engine thread panics (`Unavailable`), bounded
+  `file_description` UTF-16 slices, and coalesced `SetStreamVolume` commands.
+- **Settings, transfer, and lifecycle:** normalized and capped
+  `mic_ducking.targets`, compared JSON floats within `1e-6` in `import_notes`,
+  retained `dirty_since` and rate-limited failed-save toasts, preserved
+  maximized window geometry separately from normal geometry, prevented
+  `--minimized` launches from activating an existing window, raised unfocused
+  visible windows on show/hide shortcuts, and skipped startup path repair in
+  debug builds and dev profiles.
+- **Installer & workflow hardening:** checked `--exit` return codes during
+  upgrades and removed `%LOCALAPPDATA%\GlassMixer` on confirmed uninstall; pinned
+  workflow actions to commit SHAs, added a weekly `cargo audit` schedule, split
+  release build/publish permissions, and required a release record in
+  `scripts/check-version.ps1`.
+- **Code organization:** extracted `platform/hotkey_model.rs`,
+  `ui/hotkey_editor.rs`, `ui/toasts.rs`, and `src/audio/engine/*` submodules,
+  and removed dead endpoint commands and registry mono helpers.
+
 ## 0.5.0 (2026-11-06)
 
 Package details and checksums are in [the release record](docs/releases/0.5.0.md).

@@ -47,6 +47,11 @@
       preservation, `--minimized` second-instance non-activation, unfocused visible
       window raising, and skipping startup path repair in debug builds / dev
       profiles (`main`).
+  - `scripts/package.ps1` (with Inno Setup 6.7.3), `scripts/check-version.ps1`,
+    and `scripts/verify-package.ps1` ran and passed, producing and verifying
+    the release executable (`26,747,392` bytes, `25.5` MB), portable ZIP
+    (`14,423,400` bytes), installer (`12,329,429` bytes, `11.8` MB),
+    `THIRD-PARTY-NOTICES.txt` (168 crates), and `SHA256SUMS.txt` (all unsigned).
 - **Environment limitations (not run in this non-interactive sandbox):**
   - Live desktop automation scripts (`scripts/verify-ui.ps1`,
     `scripts/lifecycle.ps1`, `scripts/hotkey-smoke.ps1`) require an interactive
@@ -54,11 +59,9 @@
     in this sandbox session.
   - The 13 `#[ignore]` hardware audio integration tests (`tests/audio_integration.rs`
     and `tests/devices_integration.rs`) require physical Windows audio endpoints.
-  - Inno Setup 6 (`ISCC.exe`) is not installed in this environment, so local
-    packaging produces and verifies the release executable, portable ZIP, and
-    `SHA256SUMS.txt` without `glass-mixer-0.6.0-setup.exe` (`scripts/installer-smoke.ps1`
-    was not run locally; `scripts/check-version.ps1` and `scripts/installer-smoke.ps1`
-    were checked for PowerShell syntax and clean behavior in WP-K3/WP-K6).
+  - `scripts/installer-smoke.ps1` was not run interactively in this sandbox
+    (`scripts/check-version.ps1` and `scripts/installer-smoke.ps1` were checked
+    for PowerShell parser syntax and clean behavior in WP-K3/WP-K6).
 
 ## Stage 6: release readiness (2026-11-06, `experiments`)
 

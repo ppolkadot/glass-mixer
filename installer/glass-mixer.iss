@@ -2,11 +2,11 @@
 ; Built by scripts\package.ps1 (which passes /DAppVersion=...).
 
 #ifndef AppVersion
-  #define AppVersion "0.5.0"
+  #define AppVersion "0.6.0"
 #endif
 ; Four numeric parts, for the setup program's file version (scripts\package.ps1 passes it).
 #ifndef AppVersionNumeric
-  #define AppVersionNumeric "0.5.0.0"
+  #define AppVersionNumeric "0.6.0.0"
 #endif
 
 [Setup]
