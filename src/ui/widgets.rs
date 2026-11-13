@@ -124,13 +124,14 @@ impl<'a> Slider<'a> {
     }
 
     pub fn show(self, ui: &mut Ui, p: &Palette) -> Response {
-        let height = 26.0;
+        let height = if p.high_contrast { 26.0 } else { 28.0 };
         let (rect, mut response) = ui.allocate_exact_size(vec2(self.width.max(60.0), height), Sense::click_and_drag());
         let enabled = ui.is_enabled();
         let span = self.max - self.min;
         let small = span / 100.0;
         let large = span / 10.0;
-        let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, 4.0));
+        let track_h = if p.high_contrast { 4.0 } else { 6.0 };
+        let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, track_h));
         let to_x = |v: f32| track.left() + ((v - self.min) / span).clamp(0.0, 1.0) * track.width();
 
         let old = *self.value;
@@ -215,37 +216,59 @@ impl<'a> Slider<'a> {
             response.mark_changed();
         }
 
+        let hot_dur = super::theme::duration(ui, super::theme::motion::FAST);
+        let hot = ui.ctx().animate_bool_with_time_and_easing(
+            response.id.with("hot"),
+            response.hovered() || response.dragged() || response.has_focus(),
+            hot_dur,
+            super::theme::motion::ease,
+        );
         let painter = ui.painter();
         let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
         let fill = if self.muted { p.text_muted.gamma_multiply(0.6) } else { p.accent };
-        painter.rect_filled(track, CornerRadius::same(2), fade(p.track));
         let (a, b) = {
             let (x0, x1) = (to_x(self.origin), to_x(*self.value));
             (x0.min(x1), x0.max(x1))
         };
-        painter.rect_filled(
-            Rect::from_min_max(pos2(a, track.top()), pos2(b, track.bottom())),
-            CornerRadius::same(2),
-            fade(fill),
-        );
-        if let Some(level) = self.meter.filter(|l| *l > 0.003 && !self.muted) {
-            let end = (track.left() + level.clamp(0.0, 1.0) * track.width()).min(to_x(*self.value));
-            let meter = Rect::from_min_max(pos2(track.left(), track.bottom() + 3.0), pos2(end, track.bottom() + 5.0));
-            painter.rect_filled(meter, CornerRadius::same(1), fade(p.accent.gamma_multiply(0.55)));
-        }
-        let hot = ui
-            .ctx()
-            .animate_bool(response.id.with("hot"), response.hovered() || response.dragged() || response.has_focus());
         let center = pos2(to_x(*self.value), track.center().y);
-        let radius = 7.0 + 1.5 * hot;
-        let thumb = if p.dark { Color32::from_rgb(0xf4, 0xf4, 0xf8) } else { Color32::WHITE };
-        painter.circle_filled(
-            center + vec2(0.0, 1.0),
-            radius + 0.5,
-            Color32::from_black_alpha(if p.dark { 90 } else { 35 }),
-        );
-        painter.circle_filled(center, radius, fade(thumb));
-        painter.circle_filled(center, 3.0 + hot, fade(fill));
+        if p.high_contrast {
+            painter.rect_filled(track, CornerRadius::same(2), fade(p.track));
+            painter.rect_filled(
+                Rect::from_min_max(pos2(a, track.top()), pos2(b, track.bottom())),
+                CornerRadius::same(2),
+                fade(fill),
+            );
+            if let Some(level) = self.meter.filter(|l| *l > 0.003 && !self.muted) {
+                let end = (track.left() + level.clamp(0.0, 1.0) * track.width()).min(to_x(*self.value));
+                let meter =
+                    Rect::from_min_max(pos2(track.left(), track.bottom() + 3.0), pos2(end, track.bottom() + 5.0));
+                painter.rect_filled(meter, CornerRadius::same(1), fade(p.accent.gamma_multiply(0.55)));
+            }
+            let radius = 7.0 + 1.5 * hot;
+            let thumb = Color32::from_rgb(0xf4, 0xf4, 0xf8);
+            painter.circle_filled(center + vec2(0.0, 1.0), radius + 0.5, Color32::from_black_alpha(90));
+            painter.circle_filled(center, radius, fade(thumb));
+            painter.circle_filled(center, 3.0 + hot, fade(fill));
+        } else {
+            painter.rect_filled(track, CornerRadius::same(3), fade(p.fill));
+            painter.rect_filled(
+                Rect::from_min_max(pos2(a, track.top()), pos2(b, track.bottom())),
+                CornerRadius::same(3),
+                fade(fill),
+            );
+            if let Some(level) = self.meter.filter(|l| *l > 0.003 && !self.muted) {
+                let end = (track.left() + level.clamp(0.0, 1.0) * track.width()).min(to_x(*self.value));
+                let meter =
+                    Rect::from_min_max(pos2(track.left(), track.bottom() + 2.0), pos2(end, track.bottom() + 4.0));
+                painter.rect_filled(meter, CornerRadius::same(1), fade(p.accent.gamma_multiply(0.55)));
+            }
+            let radius = 9.0 + hot;
+            painter.circle_filled(center + vec2(0.0, 1.0), radius + 1.0, p.shadow);
+            painter.circle_filled(center, radius, fade(p.knob));
+            if !p.dark {
+                painter.circle_stroke(center, radius, Stroke::new(0.5, fade(p.border)));
+            }
+        }
         focus_ring(ui, rect, &response, p, 8);
 
         let value = *self.value as f64 * self.a11y_scale;
@@ -281,9 +304,16 @@ pub fn set_name(ui: &Ui, response: &Response, name: &str) {
 
 /// An unavailable slider has no numeric value, thumb or live meter.
 pub fn unavailable_slider(ui: &mut Ui, look: &Look, label: &str) {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().max(60.0), 26.0), Sense::hover());
-    let track = Rect::from_center_size(rect.center(), vec2((rect.width() - 16.0).max(10.0), 4.0));
-    ui.painter().rect_filled(track, CornerRadius::same(2), look.p.text_muted.gamma_multiply(0.35));
+    let high_contrast = look.p.high_contrast;
+    let height = if high_contrast { 26.0 } else { 28.0 };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().max(60.0), height), Sense::hover());
+    let (track_h, radius, color) = if high_contrast {
+        (4.0, 2, look.p.text_muted.gamma_multiply(0.35))
+    } else {
+        (6.0, 3, look.p.fill.gamma_multiply(0.5))
+    };
+    let track = Rect::from_center_size(rect.center(), vec2((rect.width() - 16.0).max(10.0), track_h));
+    ui.painter().rect_filled(track, CornerRadius::same(radius), color);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, false, label));
     ui.ctx().accesskit_node_builder(response.id, |node| {
         node.set_disabled();
