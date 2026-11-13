@@ -388,7 +388,7 @@ fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow,
         if icon_button(ui, look, g, if ep.muted { "M" } else { "On" }, &label, emphasis).clicked() {
             cx.audio.send(Command::SetDeviceMute { id: ep.id.clone(), muted: !ep.muted });
         }
-        let width = ui.available_width() - 40.0 - ui.spacing().item_spacing.x;
+        let width = ui.available_width() - widgets::percent_width(ui, look) - ui.spacing().item_spacing.x;
         let meter =
             (cx.settings.show_meters && cx.snap.endpoint(flow).is_some_and(|d| d.id == ep.id)).then_some(match flow {
                 Flow::Output => cx.meters.output,
@@ -823,7 +823,7 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             {
                 cx.audio.send(Command::SetAppMute { key: app.key.clone(), muted: !app.muted });
             }
-            let width = ui.available_width() - 40.0 - ui.spacing().item_spacing.x - 4.0;
+            let width = ui.available_width() - widgets::percent_width(ui, look) - ui.spacing().item_spacing.x - 4.0;
             let meter = cx.settings.show_meters.then(|| cx.meters.apps.get(&app.key).copied().unwrap_or(0.0));
             let a11y = format!("{name} volume");
             let response = Slider { muted: app.muted, meter, ..Slider::volume(&mut v, &a11y, width) }
@@ -1146,7 +1146,7 @@ fn streams(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
                 {
                     cx.audio.send(Command::SetStreamMute { id: stream.id.clone(), muted: !stream.muted });
                 }
-                let width = ui.available_width() - 40.0 - ui.spacing().item_spacing.x - 4.0;
+                let width = ui.available_width() - widgets::percent_width(ui, look) - ui.spacing().item_spacing.x - 4.0;
                 let a11y = format!("{name} stream {n} volume");
                 let response = Slider { muted: stream.muted, ..Slider::volume(&mut v, &a11y, width) }
                     .wheel_percent(cx.settings.wheel_step)

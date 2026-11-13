@@ -465,8 +465,18 @@ pub fn card(look: &Look) -> egui::Frame {
         .inner_margin(egui::Margin::same((look.m.pad * 0.85) as i8))
 }
 
+/// Width that holds both `"100%"` and `"Muted"` in [`super::typography::Role::Numeric`].
+pub fn percent_width(ui: &Ui, look: &Look) -> f32 {
+    let measure = |text: &str| {
+        let mut job = egui::text::LayoutJob::default();
+        job.append(text, 0.0, super::typography::format(super::typography::Role::Numeric, look.p.text, look));
+        ui.painter().layout_job(job).size().x
+    };
+    measure("100%").max(measure("Muted")).ceil() + 2.0
+}
+
 pub fn percent_label(ui: &mut Ui, look: &Look, text: &str, dim: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(40.0, look.m.button), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(percent_width(ui, look), look.m.button), Sense::hover());
     let color = if dim { look.p.text_muted } else { look.p.text };
     super::typography::paint(
         ui.painter(),
@@ -477,4 +487,29 @@ pub fn percent_label(ui: &mut Ui, look: &Look, text: &str, dim: bool) {
         color,
         look,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::test_support::Harness;
+
+    #[test]
+    fn percent_width_fits_longest_numeric_labels() {
+        let h = Harness::new(crate::settings::Density::Comfortable);
+        let look = &h.look;
+        h.run(360.0, 120.0, |ui| {
+            let w = percent_width(ui, look);
+            for sample in ["0%", "9%", "10%", "100%", "Muted"] {
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    sample,
+                    0.0,
+                    crate::ui::typography::format(crate::ui::typography::Role::Numeric, look.p.text, look),
+                );
+                let sample_w = ui.painter().layout_job(job).size().x;
+                assert!(w >= sample_w + 2.0, "percent_width {w} too narrow for {sample:?} ({sample_w})");
+            }
+        });
+    }
 }
