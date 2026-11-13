@@ -169,6 +169,21 @@ pub fn metrics(density: Density) -> Metrics {
     }
 }
 
+pub mod motion {
+    pub const FAST: f32 = 0.12;
+    pub const STANDARD: f32 = 0.20;
+    pub const VIEW: f32 = 0.16;
+
+    pub fn ease(t: f32) -> f32 {
+        egui::emath::easing::cubic_out(t)
+    }
+}
+
+/// Returns `seconds`, or `0.0` when animations are turned off.
+pub fn duration(ui: &egui::Ui, seconds: f32) -> f32 {
+    if ui.style().animation_time > 0.0 { seconds } else { 0.0 }
+}
+
 pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
     let mut style = egui::Style {
         text_styles: [
@@ -181,7 +196,7 @@ pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
         .into(),
         ..Default::default()
     };
-    style.animation_time = if animations { 0.12 } else { 0.0 };
+    style.animation_time = if animations { motion::FAST } else { 0.0 };
     style.spacing.item_spacing = Vec2::new(8.0, m.gap * 0.6);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
     style.spacing.interact_size = Vec2::new(40.0, m.button - 4.0);
@@ -271,5 +286,18 @@ mod tests {
                 check("on_accent on accent", p.on_accent, p.accent, 4.5);
             }
         }
+    }
+
+    #[test]
+    fn duration_returns_zero_when_animations_are_disabled() {
+        let h = crate::ui::test_support::Harness::new(Density::Comfortable);
+        apply(&h.ctx, &h.look.p, &h.look.m, true);
+        h.run(360.0, 120.0, |ui| {
+            assert_eq!(duration(ui, motion::STANDARD), motion::STANDARD);
+        });
+        apply(&h.ctx, &h.look.p, &h.look.m, false);
+        h.run(360.0, 120.0, |ui| {
+            assert_eq!(duration(ui, motion::STANDARD), 0.0);
+        });
     }
 }
