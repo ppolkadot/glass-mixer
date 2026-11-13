@@ -25,9 +25,11 @@ fn main() -> ExitCode {
     }
 
     let Some(_instance) = single_instance::acquire() else {
-        log::info!("another instance is running; activating it");
-        if !dev_profile_active() {
+        if should_activate_existing(&args, dev_profile_active()) {
+            log::info!("another instance is running; activating it");
             window::activate_existing_instance();
+        } else {
+            log::info!("another instance is running; leaving it undisturbed");
         }
         return ExitCode::SUCCESS;
     };
@@ -88,6 +90,10 @@ fn main() -> ExitCode {
 fn dev_profile_active() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("GLASS_MIXER_DEV_PROFILE").is_some_and(|dir| std::path::Path::new(&dir).is_absolute())
+}
+
+fn should_activate_existing(args: &[String], dev_profile: bool) -> bool {
+    !dev_profile && !args.iter().skip(1).any(|a| a == startup::MINIMIZED_ARG)
 }
 
 fn wants_wgpu_fallback(args: &[String], dev_profile: bool, dev_renderer: Option<&str>) -> bool {
@@ -287,6 +293,14 @@ mod tests {
         assert!(wants_wgpu_fallback(&args(&["glass-mixer.exe", "--renderer=wgpu"]), false, None));
         assert!(wants_wgpu_fallback(&args(&["glass-mixer.exe", "--RENDERER=WGPU"]), false, None));
         assert!(!wants_wgpu_fallback(&args(&["glass-mixer.exe", "--renderer=glow"]), false, None));
+    }
+
+    #[test]
+    fn minimized_or_dev_profile_second_launch_skips_activation() {
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(should_activate_existing(&args(&["glass-mixer.exe"]), false));
+        assert!(!should_activate_existing(&args(&["glass-mixer.exe", startup::MINIMIZED_ARG]), false));
+        assert!(!should_activate_existing(&args(&["glass-mixer.exe"]), true));
     }
 
     #[test]
