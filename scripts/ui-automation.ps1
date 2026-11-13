@@ -174,7 +174,7 @@ if ($openFolder.Current.HasKeyboardFocus) {
     throw "Settings 'Open settings folder' already had keyboard focus before Tab traversal."
 }
 $scrolledIntoView = $false
-for ($step = 0; $step -lt 45; $step++) {
+for ($step = 0; $step -lt 120; $step++) {
     if (-not [GlassUiaKey]::SendTab($hwnd)) {
         $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "PostMessageW(VK_TAB) failed at step $step (Win32 error $err)."
