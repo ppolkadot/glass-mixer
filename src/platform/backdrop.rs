@@ -6,7 +6,7 @@
 //! falls back to an opaque surface drawn by egui.
 
 use super::window::Hwnd;
-use crate::settings::Backdrop;
+use crate::settings::{Backdrop, ThemeMode};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR,
     DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -127,6 +127,40 @@ pub fn set_border(hwnd: Hwnd, support: Support, p: &crate::ui::theme::Palette) {
     }
 }
 
+/// Appearance and OS build tuple identifying when a rejected backdrop should be retried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackdropRetryKey {
+    pub glass: bool,
+    pub backdrop: Backdrop,
+    pub theme: ThemeMode,
+    pub dark: bool,
+    pub high_contrast: bool,
+    pub build: u32,
+}
+
+#[derive(Default)]
+pub struct BackdropRejection {
+    failed_for: Option<BackdropRetryKey>,
+}
+
+impl BackdropRejection {
+    pub fn reset_for(&mut self, key: BackdropRetryKey) {
+        if self.failed_for.is_some_and(|failed| failed != key) {
+            self.failed_for = None;
+        }
+    }
+
+    pub fn may_try(&self, key: BackdropRetryKey) -> bool {
+        self.failed_for != Some(key)
+    }
+
+    pub fn record(&mut self, key: BackdropRetryKey, applied: Applied) {
+        if !applied.glass {
+            self.failed_for = Some(key);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +189,26 @@ mod tests {
         assert_ne!(light_color, DWMWA_COLOR_NONE);
         assert_ne!(dark_color, light_color);
         assert_eq!(dark_color & 0xFF00_0000, 0, "COLORREF upper byte must be zero");
+    }
+
+    #[test]
+    fn rejected_backdrop_stays_rejected_until_appearance_or_build_changes() {
+        let key = BackdropRetryKey {
+            glass: true,
+            backdrop: Backdrop::Acrylic,
+            theme: ThemeMode::Dark,
+            dark: true,
+            high_contrast: false,
+            build: 26200,
+        };
+        let mut rejection = BackdropRejection::default();
+        assert!(rejection.may_try(key));
+        rejection.record(key, Applied { glass: false, dark: true, kind: None });
+        assert!(!rejection.may_try(key));
+        assert!(rejection.may_try(BackdropRetryKey { backdrop: Backdrop::Mica, ..key }));
+        assert!(rejection.may_try(BackdropRetryKey { theme: ThemeMode::Light, ..key }));
+        assert!(rejection.may_try(BackdropRetryKey { build: 26201, ..key }));
+        rejection.reset_for(BackdropRetryKey { backdrop: Backdrop::Mica, ..key });
+        assert!(rejection.may_try(key), "returning to the earlier setting should retry");
     }
 }

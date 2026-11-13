@@ -2,7 +2,7 @@
 //! views together, and owns the single shutdown path.
 
 use crate::audio::{AudioHandle, NoticeLevel};
-use crate::platform::backdrop::{self, Applied, Support};
+use crate::platform::backdrop::{self, Applied, BackdropRejection, BackdropRetryKey, Support};
 use crate::platform::exit_request::ExitListener;
 use crate::platform::fonts;
 use crate::platform::foreground::ForegroundWatch;
@@ -14,9 +14,10 @@ use crate::platform::tray::{Tray, TrayAction};
 use crate::platform::window::{self, Hwnd};
 use crate::settings::{Backdrop, Settings, SettingsStore, ThemeMode, WindowGeometry};
 use crate::ui::hotkey_editor::HotkeyEditor;
+use crate::ui::toasts::{Toast, ToastExpiry, draw_toasts, push_toast};
 use crate::ui::{GlassStatus, Look, mixer, settings_view, theme};
 use crossbeam_channel::Receiver;
-use egui::{Align2, Color32, CornerRadius, Margin, ViewportCommand};
+use egui::{CornerRadius, Margin, ViewportCommand};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 
@@ -49,45 +50,6 @@ enum View {
     Settings,
 }
 
-struct Toast {
-    level: NoticeLevel,
-    text: String,
-    expiry: ToastExpiry,
-}
-
-/// Visible display time for a toast. The countdown runs only while the window
-/// is shown, so a toast queued while hidden is displayed in full later.
-struct ToastExpiry {
-    remaining: Duration,
-    /// When the toast should disappear; `None` while the countdown is paused.
-    due: Option<Instant>,
-}
-
-impl ToastExpiry {
-    fn new(visible_for: Duration) -> Self {
-        Self { remaining: visible_for, due: None }
-    }
-
-    /// Tracks a visibility change; repeated calls with the same state have no effect.
-    fn tick(&mut self, shown: bool, now: Instant) {
-        if shown {
-            if self.due.is_none() {
-                self.due = Some(now + self.remaining);
-            }
-        } else if let Some(due) = self.due.take() {
-            self.remaining = due.saturating_duration_since(now);
-        }
-    }
-
-    fn due(&self) -> Option<Instant> {
-        self.due
-    }
-
-    fn expired(&self, now: Instant) -> bool {
-        self.due.is_some_and(|due| due <= now)
-    }
-}
-
 /// Logs the renderer and graphics adapter in use. Returns whether frames are
 /// rendered in software (WARP, the "Microsoft Basic Render Driver"), and a
 /// description for the diagnostic report.
@@ -116,39 +78,6 @@ fn log_renderer(cc: &eframe::CreationContext<'_>) -> (bool, String) {
             log::info!("renderer: OpenGL (glow)");
         }
         (false, "OpenGL (glow)".to_owned())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BackdropRetryKey {
-    glass: bool,
-    backdrop: Backdrop,
-    theme: ThemeMode,
-    dark: bool,
-    high_contrast: bool,
-    build: u32,
-}
-
-#[derive(Default)]
-struct BackdropRejection {
-    failed_for: Option<BackdropRetryKey>,
-}
-
-impl BackdropRejection {
-    fn reset_for(&mut self, key: BackdropRetryKey) {
-        if self.failed_for.is_some_and(|failed| failed != key) {
-            self.failed_for = None;
-        }
-    }
-
-    fn may_try(&self, key: BackdropRetryKey) -> bool {
-        self.failed_for != Some(key)
-    }
-
-    fn record(&mut self, key: BackdropRetryKey, applied: Applied) {
-        if !applied.glass {
-            self.failed_for = Some(key);
-        }
     }
 }
 
@@ -506,16 +435,7 @@ impl MixerApp {
                 tray.notify(level, &text);
             }
         }
-        let secs = match level {
-            NoticeLevel::Info => 4,
-            NoticeLevel::Warning => 7,
-            NoticeLevel::Error => 9,
-        };
-        self.toasts.retain(|t| t.text != text);
-        self.toasts.push(Toast { level, text, expiry: ToastExpiry::new(Duration::from_secs(secs)) });
-        while self.toasts.len() > 3 {
-            self.toasts.remove(0);
-        }
+        push_toast(&mut self.toasts, level, text);
     }
 
     fn hide_to_tray(&mut self) {
@@ -604,8 +524,7 @@ impl MixerApp {
         let hotkeys = self.hotkeys.as_ref().map(HotkeyService::status);
         let notices: Vec<_> = self.recent_notices.iter().cloned().collect();
         let log_tail = crate::diagnostics::read_log_tail(crate::diagnostics::log_lines());
-        let unix_seconds =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        let unix_seconds = Self::unix_now();
         crate::diagnostics::build(&crate::diagnostics::Inputs {
             settings: &self.settings,
             snapshot: &snapshot,
@@ -625,8 +544,7 @@ impl MixerApp {
             return self.toast(NoticeLevel::Error, "Couldn't find a folder for the diagnostic report.".into());
         };
         let report = self.diagnostic_report();
-        let unix_seconds =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        let unix_seconds = Self::unix_now();
         match crate::diagnostics::save(&report, &dir, unix_seconds) {
             Ok(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -710,105 +628,6 @@ impl MixerApp {
         if record_window_geometry(&mut self.settings, shown, maximized, outer_pos, inner_size) {
             self.settings_seen.window = self.settings.window;
             self.mark_dirty();
-        }
-    }
-
-    fn draw_toasts(&mut self, ui: &mut egui::Ui) {
-        let now = Instant::now();
-        // Toasts queued during `ui` start counting down here.
-        for toast in &mut self.toasts {
-            toast.expiry.tick(true, now);
-        }
-        self.toasts.retain(|t| !t.expiry.expired(now));
-        if let Some(next) = self.toasts.iter().filter_map(|t| t.expiry.due()).min() {
-            ui.ctx().request_repaint_after(next - now);
-        }
-        if self.toasts.is_empty() {
-            return;
-        }
-        let look = self.look;
-        let p = look.p;
-        let mut dismiss = None;
-        egui::Area::new(egui::Id::new("toasts"))
-            .anchor(Align2::CENTER_BOTTOM, [0.0, -12.0])
-            .order(egui::Order::Foreground)
-            .show(ui.ctx(), |ui| {
-                ui.set_max_width(360.0);
-                for (i, t) in self.toasts.iter().enumerate() {
-                    let accent = match t.level {
-                        NoticeLevel::Info => p.accent,
-                        NoticeLevel::Warning => Color32::from_rgb(0xf5, 0x9e, 0x0b),
-                        NoticeLevel::Error => p.danger,
-                    };
-                    let prefix = match t.level {
-                        NoticeLevel::Info => "",
-                        NoticeLevel::Warning => "Warning: ",
-                        NoticeLevel::Error => "Error: ",
-                    };
-                    let toast_id = egui::Id::new(("toast", t.text.as_str()));
-                    let seen_id = toast_id.with("seen");
-                    if !ui.ctx().data(|d| d.get_temp::<bool>(seen_id)).unwrap_or(false) {
-                        ui.ctx().data_mut(|d| d.insert_temp(seen_id, true));
-                        ui.ctx().animate_bool_with_time_and_easing(toast_id, false, 0.0, theme::motion::ease);
-                    }
-                    let alpha = ui.ctx().animate_bool_with_time_and_easing(
-                        toast_id,
-                        true,
-                        theme::duration(ui, theme::motion::VIEW),
-                        theme::motion::ease,
-                    );
-                    ui.scope(|ui| {
-                        ui.multiply_opacity(alpha);
-                        let resp = egui::Frame::NONE
-                            .fill(p.surface_strong)
-                            .stroke(egui::Stroke::new(1.0, if p.high_contrast { accent } else { p.border }))
-                            .corner_radius(CornerRadius::same(14))
-                            .inner_margin(Margin::symmetric(12, 8))
-                            .shadow(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: p.shadow })
-                            .show(ui, |ui| {
-                                ui.set_width(336.0);
-                                ui.horizontal(|ui| {
-                                    if look.icons {
-                                        let glyph = match t.level {
-                                            NoticeLevel::Info => crate::ui::widgets::glyph::INFO,
-                                            NoticeLevel::Warning => crate::ui::widgets::glyph::WARNING,
-                                            NoticeLevel::Error => crate::ui::widgets::glyph::ERROR,
-                                        };
-                                        let (rect, _) =
-                                            ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::empty());
-                                        ui.painter().text(
-                                            rect.center(),
-                                            Align2::CENTER_CENTER,
-                                            glyph,
-                                            crate::ui::widgets::icon_font(15.0),
-                                            accent,
-                                        );
-                                    }
-                                    ui.add(
-                                        egui::Label::new(
-                                            crate::ui::typography::rich(
-                                                format!("{prefix}{}", t.text),
-                                                crate::ui::typography::Role::Callout,
-                                                &look,
-                                            )
-                                            .color(p.text),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
-                            })
-                            .response
-                            .interact(egui::Sense::click())
-                            .on_hover_text("Click to dismiss");
-                        if resp.clicked() {
-                            dismiss = Some(i);
-                        }
-                    });
-                    ui.add_space(6.0);
-                }
-            });
-        if let Some(i) = dismiss {
-            self.toasts.remove(i);
         }
     }
 }
@@ -911,8 +730,7 @@ impl eframe::App for MixerApp {
         if minimized
             && self.settings.minimize_to_tray
             && self.tray.is_some()
-            && let Some(h) = self.hwnd
-            && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(h.get()) }.as_bool()
+            && self.hwnd.is_some_and(window::is_visible)
         {
             self.hide_to_tray();
         }
@@ -1041,7 +859,7 @@ impl eframe::App for MixerApp {
             ui.scope(|ui| {
                 ui.multiply_opacity(view_t);
                 match self.view {
-                    View::Devices => {
+                    View::Devices | View::Mixer => {
                         let mut cx = mixer::MixerCtx {
                             audio: &self.audio,
                             snap: &snapshot,
@@ -1050,18 +868,9 @@ impl eframe::App for MixerApp {
                             settings: &mut self.settings,
                             icons: &mut self.icons,
                         };
-                        mixer::show_devices(ui, &mut self.mixer, &mut cx);
-                    }
-                    View::Mixer => {
-                        let mut cx = mixer::MixerCtx {
-                            audio: &self.audio,
-                            snap: &snapshot,
-                            meters: &meters,
-                            look: &look,
-                            settings: &mut self.settings,
-                            icons: &mut self.icons,
-                        };
-                        if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
+                        if self.view == View::Devices {
+                            mixer::show_devices(ui, &mut self.mixer, &mut cx);
+                        } else if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
                             self.audio.send(crate::audio::Command::LoadDevices);
                             self.view = View::Devices;
                         }
@@ -1156,7 +965,7 @@ impl eframe::App for MixerApp {
         if import_now {
             self.confirm_import();
         }
-        self.draw_toasts(ui);
+        draw_toasts(ui, &mut self.toasts, &look);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -1179,75 +988,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hidden_toast_time_is_frozen_and_restarts_when_first_shown() {
-        let created = Instant::now();
-
-        // Queued while hidden: the full duration starts at the reveal.
-        let mut queued_while_hidden = ToastExpiry::new(Duration::from_secs(7));
-        queued_while_hidden.tick(true, created + Duration::from_secs(3600));
-        assert!(
-            !queued_while_hidden.expired(created + Duration::from_secs(3600 + 6)),
-            "a warning queued while hidden must survive a long idle and be displayable on reveal"
-        );
-        assert!(queued_while_hidden.expired(created + Duration::from_secs(3600 + 8)));
-
-        // Hidden mid-countdown: the remaining time resumes on reveal.
-        let mut frozen = ToastExpiry::new(Duration::from_secs(7));
-        frozen.tick(true, created);
-        frozen.tick(false, created + Duration::from_secs(3));
-        frozen.tick(true, created + Duration::from_secs(3600));
-        assert!(!frozen.expired(created + Duration::from_secs(3600 + 3)), "7s minus 3s shown = 4s left");
-        assert!(frozen.expired(created + Duration::from_secs(3600 + 5)));
-    }
-
-    #[test]
     fn meters_run_while_shown_except_with_a_software_renderer() {
         assert!(meters_wanted(true, true, false));
         assert!(!meters_wanted(false, true, false), "hidden");
         assert!(!meters_wanted(true, false, false), "meters turned off");
         assert!(!meters_wanted(true, true, true), "software rendering");
-    }
-
-    #[test]
-    fn repeated_visible_passes_do_not_extend_a_toast() {
-        let created = Instant::now();
-        let mut expiry = ToastExpiry::new(Duration::from_secs(4));
-        expiry.tick(true, created);
-        expiry.tick(true, created + Duration::from_secs(2));
-        assert!(!expiry.expired(created + Duration::from_millis(3900)));
-        assert!(expiry.expired(created + Duration::from_secs(4)));
-    }
-
-    #[test]
-    fn a_toast_expired_while_visible_stays_gone_across_hide_and_reveal() {
-        let created = Instant::now();
-        let mut expiry = ToastExpiry::new(Duration::from_secs(4));
-        expiry.tick(true, created);
-        assert!(expiry.expired(created + Duration::from_secs(4)));
-        expiry.tick(false, created + Duration::from_secs(5));
-        expiry.tick(true, created + Duration::from_secs(100));
-        assert!(expiry.expired(created + Duration::from_secs(100)));
-    }
-
-    #[test]
-    fn rejected_backdrop_stays_rejected_until_appearance_or_build_changes() {
-        let key = BackdropRetryKey {
-            glass: true,
-            backdrop: Backdrop::Acrylic,
-            theme: ThemeMode::Dark,
-            dark: true,
-            high_contrast: false,
-            build: 26200,
-        };
-        let mut rejection = BackdropRejection::default();
-        assert!(rejection.may_try(key));
-        rejection.record(key, Applied { glass: false, dark: true, kind: None });
-        assert!(!rejection.may_try(key));
-        assert!(rejection.may_try(BackdropRetryKey { backdrop: Backdrop::Mica, ..key }));
-        assert!(rejection.may_try(BackdropRetryKey { theme: ThemeMode::Light, ..key }));
-        assert!(rejection.may_try(BackdropRetryKey { build: 26201, ..key }));
-        rejection.reset_for(BackdropRetryKey { backdrop: Backdrop::Mica, ..key });
-        assert!(rejection.may_try(key), "returning to the earlier setting should retry");
     }
 
     #[test]
