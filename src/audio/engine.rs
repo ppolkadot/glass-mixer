@@ -556,7 +556,8 @@ fn push_coalesced(commands: &mut Vec<Command>, cmd: Command) {
         (Command::SetAppVolume { key: x, .. }, Command::SetAppVolume { key: y, .. })
         | (Command::SetAppBalance { key: x, .. }, Command::SetAppBalance { key: y, .. }) => x == y,
         (Command::SetDeviceVolume { id: x, .. }, Command::SetDeviceVolume { id: y, .. })
-        | (Command::SetDeviceBalance { id: x, .. }, Command::SetDeviceBalance { id: y, .. }) => x == y,
+        | (Command::SetDeviceBalance { id: x, .. }, Command::SetDeviceBalance { id: y, .. })
+        | (Command::SetStreamVolume { id: x, .. }, Command::SetStreamVolume { id: y, .. }) => x == y,
         _ => false,
     };
     commands.retain(|c| !same_target(c, &cmd));
@@ -2118,6 +2119,9 @@ mod tests {
         push_coalesced(&mut cmds, Command::SetAppVolume { key: a.clone(), volume: 0.3 });
         push_coalesced(&mut cmds, Command::SetEndpointVolume { flow: Flow::Output, volume: 0.4 });
         push_coalesced(&mut cmds, Command::SetEndpointVolume { flow: Flow::Output, volume: 0.5 });
+        push_coalesced(&mut cmds, Command::SetStreamVolume { id: "s1".into(), volume: 0.1 });
+        push_coalesced(&mut cmds, Command::SetStreamVolume { id: "s2".into(), volume: 0.2 });
+        push_coalesced(&mut cmds, Command::SetStreamVolume { id: "s1".into(), volume: 0.8 });
         assert_eq!(
             cmds,
             vec![
@@ -2125,6 +2129,8 @@ mod tests {
                 Command::SetAppMute { key: a.clone(), muted: true },
                 Command::SetAppVolume { key: a, volume: 0.3 },
                 Command::SetEndpointVolume { flow: Flow::Output, volume: 0.5 },
+                Command::SetStreamVolume { id: "s2".into(), volume: 0.2 },
+                Command::SetStreamVolume { id: "s1".into(), volume: 0.8 },
             ]
         );
     }
