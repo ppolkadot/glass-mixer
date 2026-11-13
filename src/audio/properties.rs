@@ -1,29 +1,23 @@
 //! Read-only sound properties. Call Core Audio readers on the engine's COM thread.
 
 use std::fmt;
-use windows::{
-    Win32::{
-        Foundation::PROPERTYKEY,
-        Media::Audio::{
-            ENDPOINT_SYSFX_DISABLED, ENDPOINT_SYSFX_ENABLED, IAudioClient, IMMDevice, ISpatialAudioClient,
-            PKEY_AudioEndpoint_Disable_SysFx, PKEY_AudioEngine_DeviceFormat,
-        },
-        System::{
-            Com::{
-                CLSCTX_ALL, CoTaskMemFree, STGM_READ,
-                StructuredStorage::{PROPVARIANT, PropVariantClear},
-            },
-            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
-            Variant::{VT_BLOB, VT_UI4},
-        },
+use windows::Win32::{
+    Foundation::PROPERTYKEY,
+    Media::Audio::{
+        ENDPOINT_SYSFX_DISABLED, ENDPOINT_SYSFX_ENABLED, IAudioClient, IMMDevice, ISpatialAudioClient,
+        PKEY_AudioEndpoint_Disable_SysFx, PKEY_AudioEngine_DeviceFormat,
     },
-    core::HSTRING,
+    System::{
+        Com::{
+            CLSCTX_ALL, CoTaskMemFree, STGM_READ,
+            StructuredStorage::{PROPVARIANT, PropVariantClear},
+        },
+        Variant::{VT_BLOB, VT_UI4},
+    },
 };
 
 pub const SOUND_SETTINGS_URI: &str = "ms-settings:sound";
 pub const MONO_SETTINGS_URI: &str = "ms-settings:easeofaccess-audio";
-pub const MONO_REGISTRY_SUBKEY: &str = r"Software\Microsoft\Multimedia\Audio";
-pub const MONO_REGISTRY_VALUE: &str = "AccessibilityMonoMixState";
 
 /// Each field can fail independently without making volume controls unavailable.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,35 +147,6 @@ fn read_spatial(device: &IMMDevice) -> Result<SpatialSupport, String> {
             .GetMaxDynamicObjectCount()
             .map(|max_dynamic_objects| SpatialSupport { max_dynamic_objects })
             .map_err(|e| format!("Spatial audio availability could not be read: {e}"))
-    }
-}
-
-/// Reads an observed Windows implementation detail, not a documented control API.
-/// Missing or unexpected values remain unknown. Never writes this registry value.
-pub fn read_system_mono() -> Result<bool, String> {
-    let mut data = 0u32;
-    let mut size = 4u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            &HSTRING::from(MONO_REGISTRY_SUBKEY),
-            &HSTRING::from(MONO_REGISTRY_VALUE),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&mut data as *mut u32).cast()),
-            Some(&mut size),
-        )
-    };
-    if status.is_err() {
-        return Err(format!(
-            "Windows mono audio state is unavailable (registry error {}). Open Accessibility audio settings.",
-            status.0
-        ));
-    }
-    match (size, data) {
-        (4, 0) => Ok(false),
-        (4, 1) => Ok(true),
-        _ => Err("Windows returned an unrecognized mono audio state. Open Accessibility audio settings.".into()),
     }
 }
 

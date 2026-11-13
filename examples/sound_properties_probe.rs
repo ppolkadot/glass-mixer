@@ -6,7 +6,7 @@
 #[path = "../src/audio/properties.rs"]
 mod properties;
 
-use properties::{AudioFormat, read_device_properties, read_system_mono};
+use properties::{AudioFormat, read_device_properties};
 use windows::{
     Win32::{
         Media::Audio::{
@@ -33,7 +33,6 @@ fn main() -> Result<()> {
     }
     let _com = Com;
     let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
-    println!("System mono: {:?}", read_system_mono());
     for (flow, label) in [(eRender, "output"), (eCapture, "input")] {
         let devices = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)? };
         let count = unsafe { devices.GetCount()? };

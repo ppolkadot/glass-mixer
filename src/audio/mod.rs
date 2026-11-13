@@ -65,14 +65,6 @@ pub enum Command {
         flow: Flow,
         volume: f32,
     },
-    SetEndpointMute {
-        flow: Flow,
-        muted: bool,
-    },
-    SetEndpointBalance {
-        flow: Flow,
-        balance: f32,
-    },
     ToggleOutputMute,
     SetDefaultDevice {
         flow: Flow,
