@@ -21,7 +21,7 @@ use windows::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessTimes, INFINITE, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, RegisterWaitForSingleObject, UnregisterWaitEx, WT_EXECUTEONLYONCE,
 };
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::core::{HSTRING, PWSTR};
 
 #[derive(Clone, Debug, Default)]
 pub struct ProcessInfo {
@@ -141,10 +141,12 @@ pub fn file_description(path: &std::path::Path) -> Option<String> {
         let mut chars = 0u32;
         let ok = unsafe { VerQueryValueW(data.as_ptr() as *const c_void, &key, &mut value, &mut chars) };
         if ok.as_bool() && !value.is_null() && chars > 1 {
-            let s = unsafe { PCWSTR(value as *const u16).to_string() }.unwrap_or_default();
-            let s = s.trim().to_string();
-            if !s.is_empty() {
-                return Some(s);
+            let slice = unsafe { std::slice::from_raw_parts(value as *const u16, chars as usize) };
+            let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+            let s = String::from_utf16_lossy(&slice[..len]);
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
             }
         }
     }
@@ -239,5 +241,14 @@ mod tests {
         // `child` still owns a handle, so the PID can't be reused yet.
         assert!(!is_running(pid, started));
         drop(child);
+    }
+
+    #[test]
+    fn reads_file_description_of_system_executable() {
+        let cmd = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        let desc = file_description(&cmd).expect("system executable should have a FileDescription");
+        assert!(!desc.is_empty());
     }
 }
