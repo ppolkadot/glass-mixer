@@ -7,6 +7,59 @@
 > old ones: `107a305` is now `ea9c816`, `e47b328` is `209e563`, `518cd33` is `2561aee`
 > and `41f656d` is `86fdb9b`.
 
+## 0.6.0 release verification (2026-11-13, `main`)
+
+- **Gate**, with every step's exit status checked:
+  - `cargo fmt --check`: passed.
+  - `cargo clippy --locked --all-targets -- -D warnings`: passed (0 warnings
+    across library, binary, integration tests, and examples).
+  - `cargo test --locked`: **222** library tests passed (3 ignored), **5**
+    binary tests passed, **1** source-encoding test passed (`tests/source_encoding.rs`),
+    and the **13** real-hardware integration tests (`12` in `tests/audio_integration.rs`,
+    `1` in `tests/devices_integration.rs`) remained ignored as expected without
+    --ignored.
+  - New and expanded 0.6.0 tests cover:
+    - Font & typography: Polaris Bold weight chain (`platform::fonts`), 9 semantic
+      `Role` mappings, `polaris_tracking` interpolation/clamping, and zeroed
+      tracking when disabled (`ui::typography`), plus dynamic `percent_width`
+      measurement (`ui::widgets`).
+    - Theme & widgets: WCAG contrast thresholds for all palettes, reduced-motion
+      zero duration helper (`ui::theme`), semantic button kinds/names/focus,
+      segmented pill tabs, toggle row, disclosure chevron, combo icon, search
+      field, check row, icon glyph coverage, and 2.5 pt focus rings (`ui::widgets`).
+    - Views & toasts: toast deduplication, 3-toast cap, and visibility-frozen
+      expiry (`ui::toasts`), Mixer grouped cards/search/details/empty state,
+      Devices disclosure/controls, Presets cards/focus scrolling, Settings
+      minimum-width layout/shortcuts/backup/diagnostics, and standalone
+      `HotkeyEditor` (`ui::hotkey_editor`).
+    - Platform & performance: immediate `WM_SETTINGCHANGE`/`WM_DPICHANGED`/
+      `WM_DWMCOLORIZATIONCOLORCHANGED` wake signaling (`platform::window`),
+      theme/DPI-aware tray menu and derived `&` mnemonics (`platform::tray_menu`),
+      `DWMWA_BORDER_COLOR` calculation and retry keys (`platform::backdrop`),
+      unchanged tray menu state skip (`app`), and `settings_seen` diffing.
+    - Reliability & hardening: non-fatal reduction errors and Solo preservation
+      across rebuilds (`audio::engine`), early return on `LoadDevices` when
+      engine unavailable, non-caching of transient `Route::Unknown`, bounded UTF-16
+      slice in `file_description`, `SetStreamVolume` coalescing, engine thread
+      panic safety, `mic_ducking.targets` normalization and cap (`settings`),
+      `1e-6` float tolerance in `import_notes` (`transfer`), failed-save
+      `dirty_since` preservation and rate-limited toast, maximized geometry
+      preservation, `--minimized` second-instance non-activation, unfocused visible
+      window raising, and skipping startup path repair in debug builds / dev
+      profiles (`main`).
+- **Environment limitations (not run in this non-interactive sandbox):**
+  - Live desktop automation scripts (`scripts/verify-ui.ps1`,
+    `scripts/lifecycle.ps1`, `scripts/hotkey-smoke.ps1`) require an interactive
+    desktop foreground window (`GetForegroundWindow() != 0`), which is unavailable
+    in this sandbox session.
+  - The 13 `#[ignore]` hardware audio integration tests (`tests/audio_integration.rs`
+    and `tests/devices_integration.rs`) require physical Windows audio endpoints.
+  - Inno Setup 6 (`ISCC.exe`) is not installed in this environment, so local
+    packaging produces and verifies the release executable, portable ZIP, and
+    `SHA256SUMS.txt` without `glass-mixer-0.6.0-setup.exe` (`scripts/installer-smoke.ps1`
+    was not run locally; `scripts/check-version.ps1` and `scripts/installer-smoke.ps1`
+    were checked for PowerShell syntax and clean behavior in WP-K3/WP-K6).
+
 ## Stage 6: release readiness (2026-11-06, `experiments`)
 
 Machine: Windows 11 build 26200, HDMI output active, one monitor at 100 %. See
@@ -179,7 +232,6 @@ published 0.4.0 release; this checks the merged tree.
   shutdown leaves it restored for a fresh engine. Removing the restore in
   `Engine::drop` makes it fail (checked, then reverted).
 
-<<<<<<< HEAD
 ## Stages 3 and 4: controls, profiles, routing and ducking (2026-11-05, branch `stage3-4/features`)
 
 Pinned outputs and cycling, the wheel step, app and profile shortcuts, per-stream
@@ -300,7 +352,7 @@ unreadable sessions, device-notification coalescing, and the hotkey test guard.
 - Not run: a Bluetooth reconnect burst (the coalescing is unit-tested only), an
   app with several stereo sessions at different balances on real hardware,
   saturation over a real long-running session, and Windows 10.
-=======
+
 ## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `86fdb9b`)
 
 The three review findings have focused regression coverage. New tests first
@@ -345,7 +397,6 @@ run for `86fdb9b` covers only the audit baseline. Package hashes are in the
 Not run in this correction pass: the installed upgrade/uninstall flow,
 Windows 10, and the hardware audio matrix. The live exit matrix checks process
 handling but does not replace an installed upgrade/uninstall test.
->>>>>>> 7a1486f61c90b027c7cd53a88efec8e3bc9fb074
 
 ## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
 

@@ -131,15 +131,19 @@ the settings schema version, the renderer, the Windows build and appearance
 flags, the audio service status, device and session counts, device read errors,
 failed shortcuts, a settings summary (counts and choices), the last 30 warnings
 and errors the user was shown, and the last 80 log lines. It never contains
-audio, files or a name: app, device and profile names (from the snapshot, pins,
-rules, profiles and shortcut targets) and the user's profile folder, in plain
-text and in the escaped form the log uses, are replaced with `<app>`,
-`<device>`, `<profile>` and `%USERPROFILE%` before the text is written or
-copied. Names shorter than three characters, or inside a placeholder, are left
-alone so the replacement can't garble text. "Save diagnostic report" writes it
-to `diagnostics\` beside the log (the newest 10 are kept) and opens the folder; "Copy
-report" puts it on the clipboard. Nothing is sent anywhere, and no dependency or
-file dialog is involved.
+audio, files or a name: current snapshot strings (device read errors and
+failed-shortcut reasons) scrub app, device and profile names (from the
+snapshot, pins, rules, profiles and shortcut targets) and the user's profile
+folder, in plain text and in the escaped form the log uses, into `<app>`,
+`<device>`, `<profile>` and `%USERPROFILE%` (leaving names shorter than three
+characters or already inside a placeholder alone). For the historical notices
+and log tail, `diagnostics::historical_detail` omits free-form text (`Event
+details omitted for privacy`) and retains only the severity tag and any
+8-digit `0x...` Windows error codes so names of apps or devices that already
+left cannot leak. "Save diagnostic report" writes it to `diagnostics\` beside
+the log (the newest 10 are kept) and opens the folder; "Copy report" puts it on
+the clipboard. Nothing is sent anywhere, and no dependency or file dialog is
+involved.
 
 ## Additional endpoints and sound properties
 
@@ -182,15 +186,15 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 
 | Module | Responsibility |
 | --- | --- |
-| `audio/` | The engine thread, Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds the pure, unit-tested logic: snapshot types, session grouping (an app's balance is `Uniform`, `Mixed` when its stereo sessions disagree, or `Unavailable`), balance math, tooltip text. |
+| `audio/` | The engine thread (`engine/` submodules: `mod.rs`, `runner.rs`, `meters.rs`, `error.rs`, `reductions.rs`, `profiles.rs`, `routing.rs`, `endpoint.rs`, `session.rs`), Core Audio callbacks, `IPolicyConfig`, process identity and exit watching, sleep/resume. `model.rs` holds pure, unit-tested logic: snapshot types, session grouping (`Uniform`, `Mixed`, or `Unavailable` balance), balance math, tooltip text. `properties.rs` provides read-only endpoint inspection and Windows Settings shortcuts. |
 | `audio/attenuation.rs`, `automation.rs`, `app_routing.rs` | The attenuation ledger shared by Solo, foreground rules and microphone ducking (a level the user changes is never overwritten), those two automatic rules, and per-app output routing through the undocumented `AudioPolicyConfig` factory. |
-| `platform/` | Win32 integration: tray, window show/hide/cloak, single instance, exit requests (`--exit`), launch at login (registry), DWM backdrop, system preferences, the foreground-window hook (`foreground.rs`), the embedded Polaris typeface (`fonts.rs`), and app icon resolution. |
-| `diagnostics.rs` | The diagnostic report: versions, states, counts and recent warnings, with app, device and profile names replaced; made locally, sent nowhere. |
+| `platform/` | Win32 integration: tray (`tray.rs`), owner-drawn themed/DPI-aware tray menu (`tray_menu.rs`), global shortcut model and worker (`hotkey_model.rs`, `hotkeys.rs`), window show/hide/cloak and appearance/DPI wakeup subclass (`window.rs`), single instance, exit requests (`--exit`), launch at login (`startup.rs`), DWM backdrop and border color (`backdrop.rs`), system preferences, the foreground-window hook (`foreground.rs`), the embedded Polaris typeface (`fonts.rs`), and app icon resolution. |
+| `diagnostics.rs` | The diagnostic report: versions, states, counts, scrubbed live error strings, and severity/hex-code summaries of recent notices and logs; made locally, sent nowhere. |
 | `transfer.rs` | Settings export and import: versioned JSON, validated before anything changes, reporting what cannot be read. |
-| `ui/` | The design system (`theme.rs`), custom widgets (`widgets.rs`), the mixer view and the settings view. |
+| `ui/` | The design system and motion tokens (`theme.rs`), semantic typography and Polaris `trak` tracking (`typography.rs`), custom widgets and `2.5 pt` focus rings (`widgets.rs`), visibility-aware toasts (`toasts.rs`), standalone shortcut recorder (`hotkey_editor.rs`), and the Mixer/Devices, Presets, and Settings views. |
 | `settings.rs` | Versioned JSON preferences with per-field lenient parsing, preservation of unknown top-level fields, atomic migration backups, and atomic writes. |
 | `app.rs` | Lifecycle. It wires everything together and owns the single shutdown path. |
-| `main.rs` | Logging, panic hook, single-instance check, window options. |
+| `main.rs` | Logging, panic hook, single-instance check, debug/dev-profile startup guard, window options. |
 
 ## Windows API strategy
 
@@ -208,8 +212,8 @@ See [Windows notification behavior](https://learn.microsoft.com/en-us/windows/wi
 | Process exit | `RegisterWaitForSingleObject` on the process handle (no polling) |
 | Icons | `IAudioSessionControl::GetIconPath` → AppsFolder shell item (packaged apps) → `IShellItemImageFactory` on the exe → generic tile |
 | Sleep/resume | `PowerRegisterSuspendResumeNotification` |
-| Glass and fallback | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`), with a transparent GL surface; if GL startup fails, retry eframe/wgpu with an opaque surface on Direct3D 12 or Vulkan only (wgpu's OpenGL backend is excluded; see "Renderer fallback" below) |
-| Tray | `tray-icon` (Shell_NotifyIcon) with a `muda` menu; its default `libappindicator` (Linux GTK) feature is disabled, keeping the GTK/glib 0.18 family out of `Cargo.lock` |
+| Glass and fallback | `DwmExtendFrameIntoClientArea` plus `DWMWA_SYSTEMBACKDROP_TYPE` (Acrylic = `TRANSIENTWINDOW`, Mica = `MAINWINDOW`) and `DWMWA_BORDER_COLOR`, with a transparent GL surface; if GL startup fails, retry eframe/wgpu with an opaque surface on Direct3D 12 or Vulkan only (wgpu's OpenGL backend is excluded; see "Renderer fallback" below) |
+| Tray | `tray-icon` (`Shell_NotifyIcon`) with an owner-drawn native Win32 popup menu (`tray_menu.rs`); `tray-icon`'s default `libappindicator` (Linux GTK) feature is disabled, keeping the GTK/glib 0.18 family out of `Cargo.lock` |
 | Launch at login | `HKCU\...\CurrentVersion\Run` (plus `StartupApproved` for the Task Manager state) |
 
 ## Key design decisions
@@ -259,11 +263,13 @@ unregisters it: `Engine`, `Endpoint`, `SessionSet`, `Session`,
   the other sessions still refresh.
 
 **Idle cost.** While hidden, the engine thread blocks on its channel and
-the UI thread gets no frames, so CPU use is 0 ms over 10 s. While visible,
-it re-checks Windows theme and transparency every 2 s and polls meters at
-about 30 Hz. A poll reuses its buffers, so silence or a steady level costs a
-few `GetPeakValue` calls and no allocation; only a change of more than 1 %
-publishes new levels (shared as an `Arc`) and repaints.
+the UI thread gets no frames, so CPU use is 0 ms over 10 s. While visible, a
+window subclass wakes the UI immediately on `WM_SETTINGCHANGE`,
+`WM_DWMCOLORIZATIONCOLORCHANGED`, and `WM_DPICHANGED`, with a 2 s fallback
+re-check, and polls meters at about 30 Hz. A poll reuses its buffers, so
+silence or a steady level costs a few `GetPeakValue` calls and no allocation;
+only a change of more than 1 % publishes new levels (shared as an `Arc`) and
+repaints.
 
 **Toast lifetime follows visibility.** An in-window notice's countdown runs
 only while the window is shown. Hiding the window freezes the remaining time,
@@ -284,18 +290,20 @@ when the position can be validated on a monitor.
 
 **Typefaces.** `platform/fonts.rs` builds the egui font families from the
 Typeface setting, and `ui/typography.rs` maps semantic roles (`Role`) to
-points and weights. Salted Flutters Polaris (Regular for body copy and notes,
-Semibold for row names and emphasis, Bold for titles) is embedded with
-`include_bytes!` and `FontData::from_static`, so it needs no installation, no
-file at run time and no extra memory copy. Each chain is Polaris, then Segoe UI
-of the same weight when Windows has it, then lighter weights behind it, and
-finally egui's built-in fonts, so a glyph Polaris lacks is drawn by the next
-font and nothing disappears. The icon font (Segoe Fluent Icons or Segoe MDL2
-Assets) is a separate family. The Windows typeface leaves Polaris out entirely.
-Changing the setting reinstalls the fonts once; there is no restart. The font's
-license requires that the files stay unmodified, that its metadata line stays in
-every style, and that `LICENSE.txt` accompanies redistribution: a test checks
-the first two, and the portable ZIP and the installer both carry
+points and weights while applying Polaris's `trak` table letter-spacing
+(`polaris_tracking`) via `LayoutJob` when Polaris is active. Salted Flutters
+Polaris (Regular for body copy and notes, Semibold for row names and emphasis,
+Bold for titles) is embedded with `include_bytes!` and `FontData::from_static`,
+so it needs no installation, no file at run time and no extra memory copy. Each
+chain is Polaris, then Segoe UI of the same weight when Windows has it, then
+lighter weights behind it, and finally egui's built-in fonts, so a glyph
+Polaris lacks is drawn by the next font and nothing disappears. The icon font
+(Segoe Fluent Icons or Segoe MDL2 Assets) is a separate family. The Windows
+typeface leaves Polaris out entirely and zeroes custom tracking. Changing the
+setting reinstalls the fonts once; there is no restart. The font's license
+requires that the files stay unmodified, that its metadata line stays in every
+style, and that `LICENSE.txt` accompanies redistribution: a test checks the
+first two, and the portable ZIP and the installer both carry
 `fonts\LICENSE.txt`.
 
 **Icon caches.** The worker keeps up to 96 extracted icons in an LRU keyed by

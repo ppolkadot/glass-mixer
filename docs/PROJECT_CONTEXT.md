@@ -369,14 +369,27 @@ Dependencies, as locked in `Cargo.lock`:
 
 ### 5.5 Appearance
 
+- **Visual language:** Tahoe / Control Center aesthetic with translucent
+  grouped cards (`12 pt` radius in Comfortable, `10 pt` in Compact; `8/7 pt`
+  control radii), hairline dividers (`separator`), recessed control troughs
+  (`fill`), semantic buttons, an animated-pill segmented tab bar, view fade
+  transitions, and centralized motion tokens (`ui/theme.rs`).
 - **Glass:** Acrylic (default) or Mica on Windows 11 22H2 and later; Mica
   only on 21H2 (undocumented attribute 1029). It turns off automatically
-  when Windows transparency effects or high contrast are on, or on
+  when Windows transparency effects are off, high contrast is on, or on
   Windows 10. The settings page explains why it's off.
 - **Renderer:** OpenGL first. If it cannot initialize, eframe retries with
   wgpu and a solid surface; the Settings status explains the fallback.
-- **Theme:** System (default), Light or Dark. The title bar follows
-  through `DWMWA_USE_IMMERSIVE_DARK_MODE`, and windows get rounded corners.
+- **Theme and border:** System (default), Light or Dark. The native Win32
+  title bar follows through `DWMWA_USE_IMMERSIVE_DARK_MODE`, windows get
+  rounded corners, and Windows 11 window borders match the blended glass
+  border palette via `DWMWA_BORDER_COLOR` (`DWMWA_COLOR_NONE` when solid or
+  in high contrast).
+- **Tray menu:** Owner-drawn native Win32 popup menu (`platform/tray_menu.rs`)
+  themed to system dark/light/high-contrast preferences, scaled for
+  per-monitor DPI (`GetDpiForMonitor` / `GetDpiForWindow`), rendered with a
+  process-private Polaris Semibold font and mnemonics derived from `&` in
+  item labels.
 - **Accents:** Violet (default), Blue, Teal, Green, Amber, Coral and Pink.
   Each has a dark-theme and a light-theme value; the light values are
   darker to keep contrast.
@@ -384,21 +397,27 @@ Dependencies, as locked in `Cargo.lock`:
   rows, 22 pt icons; the status line is hidden).
 - **Palettes:**
   - Dark glass: a translucent tint (rgba 16,16,22,96) with white
-    surfaces at about 5 % alpha.
+    surfaces at about 5.5 % alpha (`rgba 255,255,255,14`).
   - Light glass: rgba 250,250,253,110.
   - Opaque fallbacks for both.
   - A separate black/white/yellow high-contrast palette.
-- **Fonts:** Segoe UI regular and semibold from `%WINDIR%\Fonts`. Icons use
-  Segoe Fluent Icons, or Segoe MDL2 Assets on Windows 10. Without an icon
+- **Fonts:** Salted Flutters Polaris (Regular, Semibold, and Bold) embedded in
+  the executable (`platform/fonts.rs`) with Segoe UI fallback per weight, or the
+  Windows typeface setting (Segoe UI only). `ui/typography.rs` maps semantic
+  roles (`Role`) to point sizes and weights and applies Polaris `trak`
+  letter-spacing via `LayoutJob` (disabled for the Windows typeface). Icons
+  use Segoe Fluent Icons, or Segoe MDL2 Assets on Windows 10; without an icon
   font, text fallbacks are drawn.
-- **Windows preferences** are re-read every 2 s while the window is visible
-  (theme, transparency, animations, high contrast). Reduced motion sets
-  egui's animation time to 0.
-- **Notices** are toasts above the bottom edge: info 4 s, warning 7 s,
-  error 9 s, at most three. Click one to dismiss it. Their countdown runs only
-  while the window is shown: hiding freezes the remaining time, and a warning
-  queued while hidden starts (or resumes) counting down when the window is
-  next shown, with no hidden timer.
+- **Windows preferences** wake the UI immediately via a window subclass on
+  `WM_SETTINGCHANGE`, `WM_DWMCOLORIZATIONCOLORCHANGED`, and `WM_DPICHANGED`,
+  with a 2 s fallback re-check while visible (theme, transparency, animations,
+  high contrast). Reduced motion sets egui's animation time to 0 and disables
+  custom widget motion durations.
+- **Notices** are toasts above the bottom edge (`ui/toasts.rs`): info 4 s,
+  warning 7 s, error 9 s, at most three, with a fade-in. Click one to dismiss
+  it. Their countdown runs only while the window is shown: hiding freezes the
+  remaining time, and a warning queued while hidden starts (or resumes)
+  counting down when the window is next shown, with no hidden timer.
 
 ### 5.6 Accessibility
 
@@ -413,8 +432,9 @@ Dependencies, as locked in `Cargo.lock`:
     Home/End: 0 or 100 %.
   - Mouse wheel: 2 % per notch, without scrolling the list.
   - UIA SetValue, Increment and Decrement are supported.
-- Every custom widget draws a visible 2 px focus ring. Icon-only buttons
-  have tooltips.
+- Every custom widget draws a visible 2.5 pt focus ring (2.0 pt in high
+  contrast) via `widgets::focus_ring`, which also scrolls newly focused
+  controls into view. Icon-only buttons have tooltips.
 
 ### 5.7 Settings page
 
@@ -523,49 +543,63 @@ Windows change ─► callback ─► Msg::*Changed ─► engine re-reads ─�
 
 | File | Lines | Responsibility |
 | --- | --- | --- |
-| `src/main.rs` | ~221 | Logging, panic hook, single-instance check, settings load, monitor-aware restore, GL-to-wgpu fallback |
-| `src/app.rs` | ~899 | `MixerApp`: lifecycle, tray, hotkeys, views, backdrop status, settings debounce, toasts, shutdown |
-| `src/settings.rs` | ~436 | Lenient versioned settings, pins/presets/hotkeys, atomic save, isolated debug profile, tests |
-| `src/icon_art.rs` | ~187 | Procedural app icon (SDF, 4×4 supersampled) and ICO encoder. Shared with `build.rs`. |
+| `src/main.rs` | ~330 | Logging, panic hook, single-instance check, debug/dev-profile startup guard, settings load, monitor-aware restore, GL-to-wgpu fallback |
+| `src/app.rs` | ~1068 | `MixerApp`: lifecycle, tray, hotkeys, views, backdrop status, settings debounce (`settings_seen`), toast wiring, shutdown |
+| `src/settings.rs` | ~1164 | Lenient versioned settings, pins/presets/hotkeys/mic-ducking normalization, atomic save, isolated debug profile, tests |
+| `src/diagnostics.rs` | ~669 | Local diagnostic report: live-state name scrubbing, severity/hex-code summary for historical logs and notices |
+| `src/transfer.rs` | ~479 | Versioned settings export and validated import with pre-import backup |
+| `src/icon_art.rs` | ~184 | Procedural app icon (SDF, 4×4 supersampled) and ICO encoder. Shared with `build.rs`. |
 | `build.rs` | ~72 | Generates `app.ico` and the `.rc`; embeds the icon, manifest (PerMonitorV2, asInvoker, UTF-8, Common Controls 6) and VERSIONINFO |
-| `src/audio/mod.rs` | ~263 | `Command`, `Notice`, internal `Msg`, `Shared` (snapshot, meters, notices, listeners), `AudioHandle` (start / send / snapshot / shutdown with a 2 s timeout) |
-| `src/audio/model.rs` | ~415 | Snapshot types, `AppKey`, `group_sessions`, balance math, `to_percent`, filter including System sounds, names, tooltip, with tests |
-| `src/audio/engine.rs` | ~1215 | `Runner`, `Engine`, endpoint/session owners, independent devices, preset rules, command application |
-| `src/audio/callbacks.rs` | ~179 | Device, endpoint and session callbacks; `OWN_EVENT_CONTEXT` |
-| `src/audio/policy_config.rs` | ~52 | The undocumented `IPolicyConfig` vtable and `set_default` (all three roles) |
-| `src/audio/process.rs` | ~193 | `OpenProcess` (limited), image path, AUMID, `FileDescription`, `ProcessWatch` |
+| `src/audio/mod.rs` | ~374 | `Command`, `Notice`, internal `Msg`, `Shared` (snapshot, meters, notices, listeners), `AudioHandle` (start / send / snapshot / shutdown with a 2 s timeout) |
+| `src/audio/model.rs` | ~575 | Snapshot types, `AppKey`, `group_sessions`, balance math, `to_percent`, filter including System sounds, names, tooltip, with tests |
+| `src/audio/engine/` | ~2198 total | Split engine submodules: `mod.rs` (~962, `Engine` & state/commands), `runner.rs` (~488, MTA loop/coalescing/backoff), `profiles.rs` (~303, presets & start rules), `session.rs` (~273, session set & values), `reductions.rs` (~214, attenuation reconciliation), `routing.rs` (~129), `endpoint.rs` (~112), `meters.rs` (~82), `error.rs` (~35) |
+| `src/audio/preferences.rs` | ~1016 | Stable app identities, pinned apps/outputs, presets, conservative once-per-process start tracker and reclaim pass |
+| `src/audio/properties.rs` | ~267 | Read-only endpoint format/availability inspection and Windows Settings shortcuts |
+| `src/audio/callbacks.rs` | ~180 | Device, endpoint and session callbacks; `OWN_EVENT_CONTEXT` |
+| `src/audio/app_routing.rs` | ~173 | Undocumented `AudioPolicyConfig` WinRT binding for per-app output routing |
+| `src/audio/attenuation.rs` | ~246 | Attenuation ledger shared by Solo, focus rules, and microphone ducking |
+| `src/audio/automation.rs` | ~168 | Focus settling and microphone ducking attack/release gates |
+| `src/audio/policy_config.rs` | ~50 | Undocumented `IPolicyConfig` vtable and `set_default` (all three roles) |
+| `src/audio/process.rs` | ~254 | `OpenProcess` (limited), image path, AUMID, `FileDescription`, `ProcessWatch` |
 | `src/audio/power.rs` | ~59 | Suspend/resume subscription |
 | `src/audio/com.rs` | ~71 | `ComGuard`, `take_pwstr`, fatal and not-found HRESULT classification |
-| `src/platform/backdrop.rs` | ~115 | `Support::for_build`, `apply()` (dark title bar, round corners, frame extension, backdrop type), with tests |
-| `src/platform/tray.rs` | ~228 | Tray icon, menu, hidden warning/error notifications |
-| `src/platform/icons.rs` | ~418 | `IconService` (request / retry / prune / take_ready / shutdown), resolution chain, HBITMAP/HICON to RGBA, with tests |
-| `src/platform/window.rs` | ~133 | `Hwnd`, show / hide / cloak / visibility, physical window position, `activate_existing_instance` |
+| `src/platform/backdrop.rs` | ~214 | `Support::for_build`, `apply()` (dark title bar, round corners, frame extension, backdrop type, `DWMWA_BORDER_COLOR`), `BackdropRetryKey`, `BackdropRejection` |
+| `src/platform/tray.rs` | ~234 | Tray icon lifecycle, hidden warning/error balloon notifications, menu trigger |
+| `src/platform/tray_menu.rs` | ~431 | Owner-drawn native Win32 popup menu with system dark/light/high-contrast theme, per-monitor DPI scaling, Polaris Semibold, and derived `&` mnemonics |
+| `src/platform/hotkeys.rs` | ~822 | Blocking Win32 hotkey worker thread and synthetic registration test seam |
+| `src/platform/hotkey_model.rs` | ~438 | Pure shortcut chord/target parsing, validation, and settings serialization |
+| `src/platform/icons.rs` | ~743 | `IconService` (request / retry / prune / take_ready / shutdown), LRU cache, HBITMAP/HICON to RGBA |
+| `src/platform/window.rs` | ~333 | `Hwnd`, show / hide / cloak / visibility, physical window position, `activate_existing_instance`, `WM_SETTINGCHANGE`/`WM_DPICHANGED` wake subclass |
+| `src/platform/exit_request.rs` | ~346 | Clean `--exit` coordination for portable and installed upgrades |
+| `src/platform/foreground.rs` | ~158 | Out-of-context `EVENT_SYSTEM_FOREGROUND` hook thread for focus rules |
 | `src/platform/startup.rs` | ~101 | Run key state, enable/disable, path repair |
 | `src/platform/sysprefs.rs` | ~64 | Dark mode, transparency, animations, high contrast, build number |
-| `src/platform/fonts.rs` | ~50 | Segoe UI, semibold and icon-font families |
+| `src/platform/fonts.rs` | ~198 | Embedded Salted Flutters Polaris (Regular, Semibold, Bold), Segoe UI fallback, icon-font family |
 | `src/platform/single_instance.rs` | ~50 | Mutex guard; isolated debug-profile identity |
-| `src/platform/mod.rs` | ~54 | Registry read helpers |
-| `src/ui/theme.rs` | ~211 | `Palette`, accents, `Metrics`, `apply()` (same style for both egui theme slots; egui's window-theme sync disabled) |
-| `src/ui/widgets.rs` | ~429 | Glyphs, `Slider`, `icon_button`, `toggle_row`, `segmented`, `fallback_tile`, `card`, `percent_label`, focus ring |
-| `src/ui/mixer.rs` | ~724 | Mixer and Devices views, pins, device properties, value holds, pruned textures |
-| `src/ui/settings_view.rs` | ~241 | Settings view, hotkey editor and recommended-size action |
-| `src/ui/mod.rs` | ~42 | `Look`, `GlassStatus` |
+| `src/platform/mod.rs` | ~57 | Registry read helpers |
+| `src/ui/theme.rs` | ~303 | `Palette`, accents, `Metrics`, `motion` tokens & `duration()`, `apply()` |
+| `src/ui/typography.rs` | ~181 | 9 semantic typography `Role`s, weight selection, Polaris `trak` tracking via `LayoutJob` |
+| `src/ui/widgets.rs` | ~916 | Glyphs, `Slider`, semantic buttons, `toggle_row`, `segmented`, `disclosure`, `combo_icon`, `search_field`, `check_row`, `card`, dynamic `percent_width`, `2.5 pt` focus ring |
+| `src/ui/toasts.rs` | ~219 | `Toast`, `ToastExpiry`, `push_toast`, `draw_toasts` (visibility-frozen expiry, fade-in, cap at 3) |
+| `src/ui/mixer.rs` | ~2302 | Mixer and Devices views, grouped cards, pins, details drawer, device properties, value holds, pruned textures |
+| `src/ui/presets.rs` | ~597 | Presets view cards, capture/apply/rename/delete, automatic process rule controls |
+| `src/ui/settings_view.rs` | ~1101 | Settings sections, diagnostic report actions, backup/import confirmation, reset confirmation |
+| `src/ui/hotkey_editor.rs` | ~402 | Standalone shortcut chord recorder and failed-binding retry UI |
+| `src/ui/test_support.rs` | ~294 | Headless egui test harness checking accessible names, bounds, focus, and overflow |
+| `src/ui/mod.rs` | ~49 | `Look`, `GlassStatus`, view navigation module wiring |
 | `tests/audio_integration.rs` | ~200 | Real-hardware tests (ignored by default) plus the silent-stream helper |
+| `tests/devices_integration.rs` | ~130 | Self-restoring real-hardware multi-device tests (ignored by default) |
 | `tests/source_encoding.rs` | ~24 | Rust source UTF-8 and mojibake regression scan |
 | `examples/audio_probe.rs` | ~97 | Read-only diagnostic: dumps state and watches for changes |
 | `examples/glass_spike.rs` | ~90 | Minimal glass test case with `GM_RENDERER=glow|wgpu` |
-| `scripts/package.ps1` | ~74 | Release zip/installer and optional certificate-store signing |
-| `installer/glass-mixer.iss` | ~67 | Inno Setup script |
+| `examples/sound_properties_probe.rs` | ~60 | Read-only sound endpoint format/property probe |
+| `scripts/package.ps1` | ~109 | Release zip/installer packaging and optional certificate-store signing |
+| `installer/glass-mixer.iss` | ~95 | Inno Setup script |
 
 ### Important constants
 
-Additional modules: `audio/properties.rs` (~278 lines), `audio/preferences.rs`
-(~512), `platform/hotkeys.rs` (~1302), `ui/presets.rs` (~92), the read-only
-`examples/sound_properties_probe.rs` (~87), and the self-restoring
-`tests/devices_integration.rs` (~130). Phase 4 adds test scripts under
-`scripts/`, its README, and `.github/workflows/ci.yml`. The audit added
-`ui/test_support.rs`, a test-only headless egui harness that reports every
-widget's accessible name and bounds.
+Automation scripts and CI live under `scripts/` (see `scripts/README.md`) and
+`.github/workflows/`.
 
 | Constant | Value |
 | --- | --- |
@@ -626,8 +660,12 @@ error.
 10. **Default switching uses `IPolicyConfig`.** No public API exists. If it
     can't be created, switching degrades to disabled, never to a silent
     failure.
-11. **Only sessions on the default output are shown,** as in Windows' own
-    mixer.
+11. **Sessions across all active outputs are shown.** The engine opens a
+    session set for every active output (the default output first), so an app
+    playing on another device stays visible and controllable. Sessions on
+    non-default outputs are listed while playing or when the app has no
+    session on the default output; System sounds is listed for the default
+    output only.
 12. **Launch at login is stored only in the registry.**
 13. **Icons are generated in code.** One source (`icon_art.rs`) feeds the
     exe ICO, the window icon and the tray icon, so the repo has no binary
@@ -662,6 +700,13 @@ error.
     frozen while the window is hidden and starts (or resumes) when it is
     shown, so a warning queued during a hidden idle is still displayed in
     full, without a hidden timer or repaint loop.
+23. **Embedded Polaris weights (Regular, Semibold, Bold) and role-based
+    typography with `trak` tracking.** `ui/typography.rs` maps semantic UI
+    roles to weight and point size and applies Polaris letter-spacing via
+    `LayoutJob` when Polaris is active (leaving Windows/Segoe UI unspaced).
+24. **Native Win32 title bar with `DWMWA_BORDER_COLOR` (no custom client-area
+    title bar in 0.6.0)** so Windows Snap Layouts, caption buttons, and system
+    menu behavior remain native.
 
 ---
 
@@ -881,49 +926,47 @@ risks remain; hardware-dependent paths need the manual checks in section 9.
    recorded for that process. Windows keeps per-app levels between launches,
    so an app whose level Windows restores below `100%` or muted will not
    qualify (explained in the Presets UI). The tracker never evicts live
-   markers; after 1,024 un-reclaimed instances it latches saturated and skips
-   unseen instances until the rules are re-armed or Glass Mixer restarts, even
-   if confirmed exits later free slots. Instances skipped while saturated were
-   never recorded, so clearing the latch automatically could requalify an
-   untracked running process. Not verified on live multi-app hardware
-   sessions.
+   markers; after 1,024 un-reclaimed instances it latches saturated until a
+   reclaim pass frees slots (which clears the latch and advances the arming
+   time so instances skipped while saturated still cannot qualify later). Not
+   verified on live multi-app hardware sessions.
 4. **Acrylic goes solid when the window loses focus.** This is Windows'
    own behaviour for `DWMSBT_TRANSIENTWINDOW`, but users may read it as
    glass "turning off".
 5. **Single-instance activation needs the same exe name.** If the exe is
    renamed, the mutex still blocks a second instance, but the first
    window isn't found, so the second launch exits silently.
-6. **Portable copies fight over launch at login.** `repair_path_if_enabled`
-   re-points the Run key to whichever copy started last.
+6. **Release portable copies fight over launch at login.** Debug builds and
+   dev profiles skip startup path repair (`should_repair_startup_path`), while
+   release builds running with Launch at login enabled still re-point the Run
+   key to whichever copy started last.
 7. **Uninstall stops only the installed copy.** The uninstaller runs
     `glass-mixer.exe --exit`, which asks the copy running from the install
     folder to exit cleanly and terminates it only if it hasn't exited after
     10 seconds. A portable copy elsewhere keeps running. (Before this, the
     uninstaller ran `taskkill /IM glass-mixer.exe /F`.)
-8. **Device names can repeat.** Two devices with the same friendly name
-    are indistinguishable in the drop-down.
-9. **Legacy positions can be ambiguous.** A version-1 logical position
+8. **Legacy positions can be ambiguous.** A version-1 logical position
     can correspond to more than one monitor at different scales. In that
     case the app centers rather than claiming to know the original monitor.
-10. **Meters are approximate.** Peaks are pre-mute and may be pre-volume
+9. **Meters are approximate.** Peaks are pre-mute and may be pre-volume
     depending on the stream. The meter line is clipped to the slider value
     and hidden while muted.
-11. **PID reuse.** `ProcessWatch` holds a Windows process handle while watching
+10. **PID reuse.** `ProcessWatch` holds a Windows process handle while watching
     a PID (so the OS does not reuse a watched PID before the handle closes), and
     `SessionSet::sync` and `StartTracker` also defensively prune exited PIDs
     and compare `(pid, created)` timestamps before reusing a PID entry.
-12. **Elevated or protected processes:** limited process access may
+11. **Elevated or protected processes:** limited process access may
     fail, giving `AppKey::Pid`, no icon, and a "Process N" name unless the
     session supplies a name.
-13. **Untested recovery paths:**
+12. **Untested recovery paths:**
     - The rebuild 1.5 s after resume may come too early for slow drivers.
       The backoff should recover.
     - An audio service restart should show "unavailable" and then
       reconnect.
-14. **Prefs polling while visible** causes a repaint every 2 s (the
-    visible CPU cost measured above). Listening for `WM_SETTINGCHANGE`
-    would avoid this, but needs a message hook that eframe doesn't
-    expose.
+13. **2 s visible prefs fallback re-check.** `platform/window.rs` subclasses
+    the window to wake the UI immediately on `WM_SETTINGCHANGE`,
+    `WM_DWMCOLORIZATIONCOLORCHANGED`, and `WM_DPICHANGED`, leaving only a
+    low-cost 2 s visible fallback re-check.
 15. **High contrast uses a fixed palette** (black, white and yellow), not
     the user's chosen system high-contrast colours.
 16. **Meter polling continues in silence.** Meters are polled at about
