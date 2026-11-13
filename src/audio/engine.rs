@@ -134,6 +134,7 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
         devices_loaded: false,
         preset_rules: Vec::new(),
         pinned_outputs: Vec::new(),
+        solo: None,
         solo_level: Reduction { factor: 0.2, mute: false },
         focus_rules: Vec::new(),
         focus: FocusSettle::default(),
@@ -185,6 +186,7 @@ struct Runner {
     devices_loaded: bool,
     preset_rules: Vec<super::preferences::VolumePreset>,
     pinned_outputs: Vec<String>,
+    solo: Option<AppKey>,
     solo_level: Reduction,
     focus_rules: Vec<(AppKey, Reduction)>,
     focus: FocusSettle<AppKey>,
@@ -280,6 +282,9 @@ impl Runner {
                         }
                         self.shared.push_notice(NoticeLevel::Error, err.to_string());
                     }
+                }
+                if matches!(cmd, Command::ToggleSolo { .. } | Command::EndSolo) {
+                    self.solo.clone_from(&engine.reductions.solo);
                 }
                 self.dirty.values = true;
                 self.dirty.devices |= matches!(cmd, Command::CycleOutputDevice);
@@ -391,6 +396,7 @@ impl Runner {
                     engine.devices_loaded = self.devices_loaded;
                     engine.set_preset_rules(self.preset_rules.clone());
                     engine.pinned_outputs.clone_from(&self.pinned_outputs);
+                    engine.reductions.solo.clone_from(&self.solo);
                     engine.reductions.solo_level = self.solo_level;
                     self.engine = Some(engine);
                     self.sync_automation();
@@ -414,8 +420,10 @@ impl Runner {
         }
         let engine = self.engine.as_mut().expect("engine present");
         let result = engine.refresh(dirty, &self.shared).and_then(|()| engine.snapshot(&self.shared));
+        let engine_solo = engine.reductions.solo.clone();
         match result {
             Ok(snapshot) => {
+                self.solo = engine_solo;
                 self.backoff = Duration::from_millis(250);
                 if self.was_unavailable {
                     self.was_unavailable = false;
