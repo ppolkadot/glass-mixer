@@ -19,11 +19,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
-      contents: write # creates the draft release
+      contents: read
+    outputs:
+      version: ${{ steps.notes.outputs.version }}
     env:
       # Optional Authenticode signing. Without the secrets the build is unsigned, and
       # the release notes say so. Never commit a certificate or its password.
@@ -85,10 +87,12 @@ jobs:
         run: |
           if ($env:SIGNED -eq 'true') { ./scripts/verify-package.ps1 -RequireInstaller -RequireSigned } else { ./scripts/verify-package.ps1 -RequireInstaller }
       - name: Release notes
+        id: notes
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           if ($env:SIGNED -eq 'true') { ./scripts/release-notes.ps1 -Version $version -OutFile dist/release-notes.md -Signed } else { ./scripts/release-notes.ps1 -Version $version -OutFile dist/release-notes.md }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -100,13 +104,32 @@ jobs:
             dist/glass-mixer-${{ env.VERSION }}-SHA256SUMS.txt
             dist/release-notes.md
           if-no-files-found: error
+          retention-days: 30
 
-      # A draft: review it, then publish it from the GitHub Releases page.
-      - name: Draft release
-        if: ${{ github.ref_type == 'tag' }}
+      - name: Remove the certificate from the runner
+        if: ${{ always() && env.SIGN_PFX_BASE64 != '' }}
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GLASS_MIXER_SIGN_CERT_SHA1) { Remove-Item "Cert:\CurrentUser\My\$env:GLASS_MIXER_SIGN_CERT_SHA1" -Force -ErrorAction SilentlyContinue }
+
+  # A draft: review it, then publish it from the GitHub Releases page.
+  publish:
+    needs: build
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # creates the draft release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: glass-mixer-${{ needs.build.outputs.version }}
+          path: dist
+      - name: Draft release
+        shell: pwsh
         run: |
           gh release view $env:GITHUB_REF_NAME *> $null
           if ($LASTEXITCODE -eq 0) {
@@ -118,9 +141,3 @@ jobs:
             "dist/glass-mixer-$env:VERSION-setup.exe" `
             "dist/glass-mixer-$env:VERSION-SHA256SUMS.txt" `
             --draft --title "Glass Mixer $env:VERSION" --notes-file dist/release-notes.md
-
-      - name: Remove the certificate from the runner
-        if: ${{ always() && env.SIGN_PFX_BASE64 != '' }}
-        shell: pwsh
-        run: |
-          if ($env:GLASS_MIXER_SIGN_CERT_SHA1) { Remove-Item "Cert:\CurrentUser\My\$env:GLASS_MIXER_SIGN_CERT_SHA1" -Force -ErrorAction SilentlyContinue }
