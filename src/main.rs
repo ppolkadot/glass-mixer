@@ -42,7 +42,7 @@ fn main() -> ExitCode {
         log::info!("first run: using default settings");
     }
     let settings = outcome.into_settings();
-    if !dev_profile_active() {
+    if should_repair_startup_path(cfg!(debug_assertions), dev_profile_active()) {
         startup::repair_path_if_enabled();
     }
 
@@ -90,6 +90,10 @@ fn main() -> ExitCode {
 fn dev_profile_active() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("GLASS_MIXER_DEV_PROFILE").is_some_and(|dir| std::path::Path::new(&dir).is_absolute())
+}
+
+fn should_repair_startup_path(debug_build: bool, dev_profile: bool) -> bool {
+    !debug_build && !dev_profile
 }
 
 fn should_activate_existing(args: &[String], dev_profile: bool) -> bool {
@@ -314,5 +318,13 @@ mod tests {
         assert_eq!(restore_position(WindowGeometry { x: 1100.0, ..g }, false, &monitors), None);
         assert_eq!(restore_position(WindowGeometry { x: 2200.0, y: 200.0, ..g }, true, &monitors), Some((2200, 200)));
         assert_eq!(restore_position(WindowGeometry { x: 5000.0, ..g }, true, &monitors), None);
+    }
+
+    #[test]
+    fn startup_path_repair_is_skipped_in_debug_builds_and_dev_profiles() {
+        assert!(should_repair_startup_path(false, false));
+        assert!(!should_repair_startup_path(true, false));
+        assert!(!should_repair_startup_path(false, true));
+        assert!(!should_repair_startup_path(true, true));
     }
 }
