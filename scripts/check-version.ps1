@@ -8,6 +8,7 @@
     - assets\app.manifest (assemblyIdentity, four-part)
     - the defaults in installer\glass-mixer.iss (AppVersion and AppVersionNumeric)
     - a "## <version> (" heading in CHANGELOG.md, with no "## Unreleased" section left
+    - docs\releases\<version>.md, when not -AllowUnreleased
     - optionally a release tag (-Tag v0.5.0)
     - optionally a built executable's file and product version (-Exe path)
 
@@ -64,8 +65,16 @@ $changelog = Read-Repo 'CHANGELOG.md'
 if ($changelog -notmatch ('(?m)^## ' + [regex]::Escape($version) + ' \(')) {
     $problems.Add("CHANGELOG.md has no '## $version (date)' heading.")
 }
-if (-not $AllowUnreleased -and $changelog -match '(?m)^## Unreleased') {
-    $problems.Add("CHANGELOG.md still has an 'Unreleased' section; move it under '## $version'.")
+if (-not $AllowUnreleased) {
+    if ($changelog -match '(?m)^## Unreleased') {
+        $problems.Add("CHANGELOG.md still has an 'Unreleased' section; move it under '## $version'.")
+    }
+    $releaseRecord = Join-Path $root "docs\releases\$version.md"
+    if (-not (Test-Path -LiteralPath $releaseRecord)) {
+        $problems.Add("docs\releases\$version.md does not exist.")
+    } elseif ([string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $releaseRecord -Raw -Encoding UTF8))) {
+        $problems.Add("docs\releases\$version.md is empty.")
+    }
 }
 
 if ($Tag -and $Tag -ne "v$version") { $problems.Add("The tag is $Tag, but Cargo.toml is version $version (expected v$version).") }
@@ -86,6 +95,7 @@ if ($problems.Count -gt 0) {
     exit 1
 }
 $checked = 'Cargo.lock, app.manifest, installer, CHANGELOG'
+if (-not $AllowUnreleased) { $checked += ', release record' }
 if ($Tag) { $checked += ', tag' }
 if ($Exe) { $checked += ', executable' }
 Write-Host "Version $version is consistent ($checked)."
