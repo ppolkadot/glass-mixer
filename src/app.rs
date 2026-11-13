@@ -949,20 +949,27 @@ impl eframe::App for MixerApp {
 
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            ui.horizontal(|ui| {
-                let look = &self.look;
-                let menu_text =
-                    |text| crate::ui::typography::rich(text, crate::ui::typography::Role::CalloutStrong, look);
-                ui.selectable_value(&mut self.view, View::Mixer, menu_text("Mixer"));
-                if ui.selectable_value(&mut self.view, View::Devices, menu_text("Devices")).clicked() {
-                    self.audio.send(crate::audio::Command::LoadDevices);
-                }
-                ui.selectable_value(&mut self.view, View::Presets, menu_text("Presets"));
-                if ui.selectable_value(&mut self.view, View::Settings, menu_text("Settings")).clicked() {
+            let look = self.look;
+            if crate::ui::widgets::segmented(
+                ui,
+                &look,
+                &mut self.view,
+                &[
+                    (View::Mixer, "Mixer"),
+                    (View::Devices, "Devices"),
+                    (View::Presets, "Presets"),
+                    (View::Settings, "Settings"),
+                ],
+                ui.available_width(),
+                crate::ui::widgets::SegmentKind::Tab,
+            ) {
+                match self.view {
+                    View::Devices => self.audio.send(crate::audio::Command::LoadDevices),
                     // Task Manager can change the launch-at-login state behind our back.
-                    self.login = startup::state();
+                    View::Settings => self.login = startup::state(),
+                    View::Mixer | View::Presets => {}
                 }
-            });
+            }
             ui.add_space(look.m.gap);
             match self.view {
                 View::Devices => {
