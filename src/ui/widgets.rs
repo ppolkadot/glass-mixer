@@ -468,5 +468,13 @@ pub fn card(look: &Look) -> egui::Frame {
 pub fn percent_label(ui: &mut Ui, look: &Look, text: &str, dim: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(40.0, look.m.button), Sense::hover());
     let color = if dim { look.p.text_muted } else { look.p.text };
-    ui.painter().text(rect.right_center(), Align2::RIGHT_CENTER, text, semibold(13.5), color);
+    super::typography::paint(
+        ui.painter(),
+        rect.right_center(),
+        Align2::RIGHT_CENTER,
+        text,
+        super::typography::Role::Numeric,
+        color,
+        look,
+    );
 }

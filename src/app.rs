@@ -297,6 +297,7 @@ impl MixerApp {
             p: theme::palette(true, false, opts.settings.accent, false),
             m: theme::metrics(opts.settings.density),
             icons: has_icon_font,
+            tracking: opts.settings.typeface == crate::settings::Typeface::Polaris,
         };
         let mut app = Self {
             audio,
@@ -408,6 +409,7 @@ impl MixerApp {
             p: theme::palette(dark, glass, self.settings.accent, self.prefs.high_contrast),
             m: theme::metrics(self.settings.density),
             icons: self.has_icon_font,
+            tracking: self.settings.typeface == crate::settings::Typeface::Polaris,
         };
         if self.style_key != Some(look) {
             theme::apply(ctx, &look.p, &look.m, self.prefs.animations);
@@ -948,7 +950,9 @@ impl eframe::App for MixerApp {
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             ui.horizontal(|ui| {
-                let menu_text = |text| RichText::new(text).font(crate::ui::widgets::semibold(14.0));
+                let look = &self.look;
+                let menu_text =
+                    |text| crate::ui::typography::rich(text, crate::ui::typography::Role::CalloutStrong, look);
                 ui.selectable_value(&mut self.view, View::Mixer, menu_text("Mixer"));
                 if ui.selectable_value(&mut self.view, View::Devices, menu_text("Devices")).clicked() {
                     self.audio.send(crate::audio::Command::LoadDevices);

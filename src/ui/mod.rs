@@ -16,6 +16,8 @@ pub struct Look {
     pub m: theme::Metrics,
     /// Whether the Segoe icon font is available (otherwise text fallbacks are drawn).
     pub icons: bool,
+    /// Whether to apply Polaris tracking offsets to interface text.
+    pub tracking: bool,
 }
 
 /// Why the glass effect is or isn't showing; explained in Settings.

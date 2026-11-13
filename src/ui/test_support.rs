@@ -47,7 +47,12 @@ impl Harness {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let icons = crate::platform::fonts::install(&ctx, crate::settings::Typeface::default());
-        let look = Look { p: theme::palette(true, false, Accent::Violet, false), m: theme::metrics(density), icons };
+        let look = Look {
+            p: theme::palette(true, false, Accent::Violet, false),
+            m: theme::metrics(density),
+            icons,
+            tracking: true,
+        };
         theme::apply(&ctx, &look.p, &look.m, false);
         Self { ctx, look, time: std::cell::Cell::new(0.0) }
     }
