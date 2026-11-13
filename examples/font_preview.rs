@@ -3,10 +3,11 @@
 //! Typeface setting does. Shows no app, device or user data.
 //! cargo run --example font_preview
 
-use egui::{Color32, FontFamily, FontId, RichText};
+use egui::{Color32, RichText};
 use glass_mixer::{
-    platform::fonts::{self, SEMIBOLD},
+    platform::fonts,
     settings::Typeface,
+    ui::typography::{Role, font, spec},
 };
 
 struct Preview {
@@ -23,28 +24,39 @@ impl eframe::App for Preview {
             }
         });
         ui.visuals_mut().override_text_color = Some(Color32::from_gray(235));
-        let semibold = |size: f32| FontId::new(size, FontFamily::Name(SEMIBOLD.into()));
-        let regular = |size: f32| FontId::proportional(size);
         ui.separator();
-        ui.label(RichText::new("Settings   Devices   Presets   Mixer").font(semibold(18.0)));
-        ui.label(RichText::new("Output device").font(semibold(14.0)));
-        ui.label(RichText::new("APPEARANCE").font(semibold(13.0)).color(Color32::from_gray(150)));
-        for (text, size) in [
-            ("Configuração de áudio — Ação, são, coração, você, ônibus, pingüim", 14.0),
-            ("ÀÁÂÃÇÉÊÍÓÔÕÚÜ àáâãçéêíóôõúü ñ ß", 14.0),
-            ("Volume 100%  45%  7%   R$ 1.234,56   € 9,90   £ 3   ¥ 120   0123456789", 14.0),
-            ("“Quotes” ‘single’ « » ¿Qué? ¡Hola! … · • – — ← → ↑ ↓ ✓  (a) [b] {c} @ # & / \\ | ~", 13.0),
-            ("Playing · 2 streams · lowered while you talk · Muted · Idle", 12.0),
+        for (role, sample) in [
+            (Role::LargeTitle, "LargeTitle — Settings · Devices · Profiles · Mixer"),
+            (Role::Title, "Title — Apps · Outputs · Inputs"),
+            (Role::Headline, "Headline — Firefox · Output device"),
+            (Role::Body, "Body — Show audio meters and controls"),
+            (Role::Callout, "Callout — Secondary control or combo item"),
+            (Role::CalloutStrong, "CalloutStrong — Save profile · Mixer"),
+            (Role::Footnote, "Footnote — Playing · 2 streams · lowered while you talk"),
+            (Role::Caption, "Caption — C:\\Program Files\\Glass Mixer\\settings.json"),
+            (Role::Numeric, "Numeric — 100%  45%  7%  0123456789"),
         ] {
-            ui.label(RichText::new(text).font(regular(size)));
+            let (size, weight) = spec(role);
+            ui.label(RichText::new(format!("{sample} ({size:.0} pt, {weight:?})")).font(font(role)));
         }
-        ui.label(RichText::new("Same line in semibold: Ação, €, “aspas”, 100%").font(semibold(14.0)));
+        ui.separator();
+        for (text, role) in [
+            ("Configuração de áudio — Ação, são, coração, você, ônibus, pingüim", Role::Body),
+            ("ÀÁÂÃÇÉÊÍÓÔÕÚÜ àáâãçéêíóôõúü ñ ß", Role::Body),
+            (
+                "R$ 1.234,56   € 9,90   £ 3   ¥ 120   “Quotes” ‘single’ « » ¿Qué? ¡Hola! … · • – — ← → ↑ ↓ ✓",
+                Role::Callout,
+            ),
+            ("Same line in semibold and bold: Ação, €, “aspas”, 100%", Role::Title),
+        ] {
+            ui.label(RichText::new(text).font(font(role)));
+        }
     }
 }
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 330.0]).with_title("Font preview"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 460.0]).with_title("Font preview"),
         ..Default::default()
     };
     eframe::run_native(

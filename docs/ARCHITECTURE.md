@@ -283,17 +283,20 @@ window if more than one monitor could match. The saved size is retained only
 when the position can be validated on a monitor.
 
 **Typefaces.** `platform/fonts.rs` builds the egui font families from the
-Typeface setting. Salted Flutters Polaris (Regular for text, Semibold for names,
-labels and headings) is embedded with `include_bytes!` and `FontData::from_static`,
-so it needs no installation, no file at run time and no extra memory copy. Each
-chain is Polaris, then Segoe UI of the same weight when Windows has it, then
-egui's built-in fonts, so a glyph Polaris lacks is drawn by the next font and
-nothing disappears. The icon font (Segoe Fluent Icons or Segoe MDL2 Assets) is a
-separate family. The Windows typeface leaves Polaris out entirely. Changing the
-setting reinstalls the fonts once; there is no restart. The font's license
-requires that the files stay unmodified, that its metadata line stays in every
-style, and that `LICENSE.txt` accompanies redistribution: a test checks the first
-two, and the portable ZIP and the installer both carry `fonts\LICENSE.txt`.
+Typeface setting, and `ui/typography.rs` maps semantic roles (`Role`) to
+points and weights. Salted Flutters Polaris (Regular for body copy and notes,
+Semibold for row names and emphasis, Bold for titles) is embedded with
+`include_bytes!` and `FontData::from_static`, so it needs no installation, no
+file at run time and no extra memory copy. Each chain is Polaris, then Segoe UI
+of the same weight when Windows has it, then lighter weights behind it, and
+finally egui's built-in fonts, so a glyph Polaris lacks is drawn by the next
+font and nothing disappears. The icon font (Segoe Fluent Icons or Segoe MDL2
+Assets) is a separate family. The Windows typeface leaves Polaris out entirely.
+Changing the setting reinstalls the fonts once; there is no restart. The font's
+license requires that the files stay unmodified, that its metadata line stays in
+every style, and that `LICENSE.txt` accompanies redistribution: a test checks
+the first two, and the portable ZIP and the installer both carry
+`fonts\LICENSE.txt`.
 
 **Icon caches.** The worker keeps up to 96 extracted icons in an LRU keyed by
 what they came from: the executable's lower-cased path, size and modification

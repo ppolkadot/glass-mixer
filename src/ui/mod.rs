@@ -6,6 +6,7 @@ pub mod settings_view;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod theme;
+pub mod typography;
 pub mod widgets;
 
 /// Everything a view needs to know about the current appearance.

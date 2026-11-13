@@ -1,6 +1,6 @@
 //! UI typefaces and the icon font.
 //!
-//! The default typeface is Salted Flutters Polaris (Regular and Semibold),
+//! The default typeface is Salted Flutters Polaris (Regular, Semibold and Bold),
 //! embedded in the executable: nothing is installed and no file is read for it.
 //! Segoe UI stays behind it as the fallback for any glyph Polaris lacks, and is
 //! the whole typeface when the user chooses "Windows". Icons come from the system
@@ -11,17 +11,20 @@ use egui::{FontData, FontDefinitions, FontFamily};
 use std::{path::PathBuf, sync::Arc};
 
 pub const SEMIBOLD: &str = "semibold";
+pub const BOLD: &str = "bold";
 pub const ICONS: &str = "icons";
 
 /// Embedded unmodified; its license (`assets/fonts/LICENSE.txt`) ships with every package.
 static POLARIS_REGULAR: &[u8] = include_bytes!("../../assets/fonts/SaltedFluttersPolaris-Regular.otf");
 pub(super) static POLARIS_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/SaltedFluttersPolaris-Semibold.otf");
+pub(super) static POLARIS_BOLD: &[u8] = include_bytes!("../../assets/fonts/SaltedFluttersPolaris-Bold.otf");
 
 /// Fonts read from the Windows Fonts folder; any of them can be missing.
 #[derive(Default)]
-struct SystemFonts {
+pub(crate) struct SystemFonts {
     regular: Option<Vec<u8>>,
     semibold: Option<Vec<u8>>,
+    bold: Option<Vec<u8>>,
     icons: Option<Vec<u8>>,
 }
 
@@ -33,6 +36,7 @@ impl SystemFonts {
         Self {
             regular: read("segoeui.ttf"),
             semibold: read("seguisb.ttf"),
+            bold: read("segoeuib.ttf"),
             icons: read("SegoeIcons.ttf").or_else(|| read("segmdl2.ttf")),
         }
     }
@@ -50,7 +54,7 @@ pub fn install(ctx: &egui::Context, face: Typeface) -> bool {
 
 /// The font families for `face`. Each chain ends with egui's built-in fonts, so
 /// text stays readable even if every preferred font is missing.
-fn definitions(face: Typeface, system: SystemFonts) -> (FontDefinitions, bool) {
+pub(crate) fn definitions(face: Typeface, system: SystemFonts) -> (FontDefinitions, bool) {
     let mut defs = FontDefinitions::default();
     let add = |defs: &mut FontDefinitions, key: &str, data: FontData| {
         defs.font_data.insert(key.into(), Arc::new(data));
@@ -59,11 +63,16 @@ fn definitions(face: Typeface, system: SystemFonts) -> (FontDefinitions, bool) {
 
     let mut regular: Vec<String> = Vec::new();
     let mut semibold: Vec<String> = Vec::new();
+    let mut bold: Vec<String> = Vec::new();
     if face == Typeface::Polaris {
         regular.push(add(&mut defs, "polaris-regular", FontData::from_static(POLARIS_REGULAR)));
         semibold.push(add(&mut defs, "polaris-semibold", FontData::from_static(POLARIS_SEMIBOLD)));
+        bold.push(add(&mut defs, "polaris-bold", FontData::from_static(POLARIS_BOLD)));
     }
-    // A missing glyph in a semibold run falls back to a semibold glyph first.
+    // A missing glyph in a heavier run falls back to that weight before lighter weights.
+    if let Some(bytes) = system.bold {
+        bold.push(add(&mut defs, "segoe-bold", FontData::from_owned(bytes)));
+    }
     if let Some(bytes) = system.semibold {
         semibold.push(add(&mut defs, "segoe-sb", FontData::from_owned(bytes)));
     }
@@ -74,6 +83,7 @@ fn definitions(face: Typeface, system: SystemFonts) -> (FontDefinitions, bool) {
     let builtin = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let proportional: Vec<String> = regular.into_iter().chain(builtin).collect();
     let semibold_chain: Vec<String> = semibold.into_iter().chain(proportional.iter().cloned()).collect();
+    let bold_chain: Vec<String> = bold.into_iter().chain(semibold_chain.iter().cloned()).collect();
 
     let has_icons = system.icons.is_some();
     let mut icon_chain = Vec::new();
@@ -82,6 +92,7 @@ fn definitions(face: Typeface, system: SystemFonts) -> (FontDefinitions, bool) {
     }
     icon_chain.extend(proportional.iter().cloned());
 
+    defs.families.insert(FontFamily::Name(BOLD.into()), bold_chain);
     defs.families.insert(FontFamily::Name(SEMIBOLD.into()), semibold_chain);
     defs.families.insert(FontFamily::Name(ICONS.into()), icon_chain);
     defs.families.insert(FontFamily::Proportional, proportional);
@@ -94,7 +105,7 @@ mod tests {
     use egui::FontId;
 
     fn fake_system() -> SystemFonts {
-        SystemFonts { regular: Some(vec![1]), semibold: Some(vec![2]), icons: Some(vec![3]) }
+        SystemFonts { regular: Some(vec![1]), semibold: Some(vec![2]), bold: Some(vec![4]), icons: Some(vec![3]) }
     }
 
     fn chain(defs: &FontDefinitions, family: FontFamily) -> Vec<&str> {
@@ -110,6 +121,8 @@ mod tests {
         assert!(regular.len() > 2, "egui's built-in fonts stay as the last fallback: {regular:?}");
         let semibold = chain(&defs, FontFamily::Name(SEMIBOLD.into()));
         assert_eq!(&semibold[..3], ["polaris-semibold", "segoe-sb", "polaris-regular"]);
+        let bold = chain(&defs, FontFamily::Name(BOLD.into()));
+        assert_eq!(&bold[..3], ["polaris-bold", "segoe-bold", "polaris-semibold"]);
         let icons = chain(&defs, FontFamily::Name(ICONS.into()));
         assert_eq!(&icons[..2], ["icons", "polaris-regular"], "icons first, text fallbacks behind");
     }
@@ -120,6 +133,7 @@ mod tests {
         assert!(!defs.font_data.keys().any(|k| k.starts_with("polaris")));
         assert_eq!(&chain(&defs, FontFamily::Proportional)[..1], ["segoe"]);
         assert_eq!(&chain(&defs, FontFamily::Name(SEMIBOLD.into()))[..2], ["segoe-sb", "segoe"]);
+        assert_eq!(&chain(&defs, FontFamily::Name(BOLD.into()))[..3], ["segoe-bold", "segoe-sb", "segoe"]);
     }
 
     #[test]
@@ -135,7 +149,7 @@ mod tests {
     #[test]
     fn the_embedded_fonts_are_opentype_files_that_keep_the_required_notice() {
         let notice = "Salted Flutters Polaris - Created by ppoolar";
-        for (name, bytes) in [("Regular", POLARIS_REGULAR), ("Semibold", POLARIS_SEMIBOLD)] {
+        for (name, bytes) in [("Regular", POLARIS_REGULAR), ("Semibold", POLARIS_SEMIBOLD), ("Bold", POLARIS_BOLD)] {
             assert_eq!(&bytes[..4], b"OTTO", "{name} is not a CFF OpenType file");
             let found = |needle: Vec<u8>| bytes.windows(needle.len()).any(|w| w == needle.as_slice());
             assert!(
@@ -161,18 +175,20 @@ mod tests {
                 let output = ctx.run_ui(egui::RawInput::default(), |ui| {
                     let regular = FontId::proportional(14.0);
                     let semibold = FontId::new(14.0, FontFamily::Name(SEMIBOLD.into()));
-                    let (covered_regular, covered_semibold) =
-                        ui.ctx().fonts_mut(|f| (f.has_glyphs(&regular, SAMPLE), f.has_glyphs(&semibold, SAMPLE)));
+                    let bold = FontId::new(14.0, FontFamily::Name(BOLD.into()));
+                    let (covered_regular, covered_semibold, covered_bold) = ui.ctx().fonts_mut(|f| {
+                        (f.has_glyphs(&regular, SAMPLE), f.has_glyphs(&semibold, SAMPLE), f.has_glyphs(&bold, SAMPLE))
+                    });
                     let galley = ui.painter().layout_no_wrap(SAMPLE.to_owned(), regular, egui::Color32::WHITE);
-                    result = Some((covered_regular, covered_semibold, galley.size().x));
+                    result = Some((covered_regular, covered_semibold, covered_bold, galley.size().x));
                 });
                 output.drop_without_applying_deltas();
             }
             result.expect("a frame ran")
         };
-        let (regular, semibold, polaris_width) = width_of(Typeface::Polaris);
-        assert!(regular && semibold, "a glyph the interface uses is missing from the Polaris chains");
-        let (_, _, system_width) = width_of(Typeface::System);
+        let (regular, semibold, bold, polaris_width) = width_of(Typeface::Polaris);
+        assert!(regular && semibold && bold, "a glyph the interface uses is missing from the Polaris chains");
+        let (_, _, _, system_width) = width_of(Typeface::System);
         assert!(polaris_width > 100.0);
         assert!(
             (polaris_width - system_width).abs() > 1.0,

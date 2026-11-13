@@ -144,10 +144,10 @@ pub fn metrics(density: Density) -> Metrics {
 pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
     let mut style = egui::Style {
         text_styles: [
-            (TextStyle::Heading, FontId::new(17.0, FontFamily::Name(crate::platform::fonts::SEMIBOLD.into()))),
-            (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(14.0, FontFamily::Name(crate::platform::fonts::SEMIBOLD.into()))),
-            (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+            (TextStyle::Heading, super::typography::font(super::typography::Role::Title)),
+            (TextStyle::Body, super::typography::font(super::typography::Role::Body)),
+            (TextStyle::Button, super::typography::font(super::typography::Role::CalloutStrong)),
+            (TextStyle::Small, super::typography::font(super::typography::Role::Footnote)),
             (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
         ]
         .into(),
