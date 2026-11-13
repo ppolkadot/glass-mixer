@@ -1366,28 +1366,20 @@ impl Engine {
         if !self.reductions.active() {
             return Ok(());
         }
-        for s in self.sessions.iter().flat_map(|set| set.sessions.iter()) {
-            let wanted = self.reductions.wanted(&s.key);
-            if wanted.is_none() && !self.reductions.ledger.contains(&s.instance_id) {
-                continue;
-            }
-            let current = match unsafe { s.simple.GetMasterVolume().and_then(|v| Ok((v, s.simple.GetMute()?))) } {
-                Ok((volume, muted)) => Level { volume, muted: muted.as_bool() },
-                Err(e) if is_fatal(e.code()) => return Err(e),
-                Err(e) => {
-                    log::debug!("couldn't read {} for a reduction: {e}", s.name);
-                    return Err(e);
-                }
-            };
-            if let Some(target) = self.reductions.ledger.reconcile(&s.instance_id, current, wanted) {
-                write_reduction(&mut self.reductions.ledger, s, current, target, wanted.is_none())?;
-            }
-        }
-        let sessions = &self.sessions;
-        self.reductions
-            .ledger
-            .retain(|id| sessions.iter().flat_map(|set| set.sessions.iter()).any(|s| s.instance_id == id));
-        Ok(())
+        let sessions = self
+            .sessions
+            .iter()
+            .flat_map(|set| set.sessions.iter())
+            .map(|s| (s, s.instance_id.as_str(), s.name.as_str(), &s.key));
+        execute_reductions(
+            &mut self.reductions,
+            sessions,
+            |s| unsafe {
+                s.simple.GetMasterVolume().and_then(|volume| Ok(Level { volume, muted: s.simple.GetMute()?.as_bool() }))
+            },
+            |s, v| unsafe { s.simple.SetMasterVolume(v, &OWN_EVENT_CONTEXT) },
+            |s, m| unsafe { s.simple.SetMute(m, &OWN_EVENT_CONTEXT) },
+        )
     }
 
     /// Puts back every level a reduction changed (when it is still the written
@@ -1645,6 +1637,66 @@ fn release_in(ledger: &mut Ledger, sets: &[&SessionSet]) {
     }
 }
 
+fn execute_reductions<'a, S: 'a>(
+    reductions: &mut Reductions,
+    sessions: impl Iterator<Item = (&'a S, &'a str, &'a str, &'a AppKey)> + Clone,
+    mut read_level: impl FnMut(&S) -> WinResult<Level>,
+    mut set_volume: impl FnMut(&S, f32) -> WinResult<()>,
+    mut set_mute: impl FnMut(&S, bool) -> WinResult<()>,
+) -> WinResult<()> {
+    for (s, instance_id, name, key) in sessions.clone() {
+        let wanted = reductions.wanted(key);
+        if wanted.is_none() && !reductions.ledger.contains(instance_id) {
+            continue;
+        }
+        let current = match read_level(s) {
+            Ok(level) => level,
+            Err(e) if is_fatal(e.code()) => return Err(e),
+            Err(e) => {
+                log::debug!("couldn't read {name} for a reduction: {e}");
+                continue;
+            }
+        };
+        if let Some(target) = reductions.ledger.reconcile(instance_id, current, wanted)
+            && let Err(e) = write_reduction_with(
+                &mut reductions.ledger,
+                instance_id,
+                current,
+                target,
+                wanted.is_none(),
+                |v| set_volume(s, v),
+                |m| set_mute(s, m),
+            )
+        {
+            if is_fatal(e.code()) {
+                return Err(e);
+            }
+            log::warn!("couldn't change {name} for a reduction: {e}");
+        }
+    }
+    reductions.ledger.retain(|id| sessions.clone().any(|(_, instance_id, _, _)| instance_id == id));
+    Ok(())
+}
+
+fn write_reduction_with(
+    ledger: &mut Ledger,
+    instance_id: &str,
+    current: Level,
+    level: Level,
+    restoring: bool,
+    set_volume: impl FnOnce(f32) -> WinResult<()>,
+    set_mute: impl FnOnce(bool) -> WinResult<()>,
+) -> WinResult<()> {
+    set_volume(level.volume)?;
+    ledger.record_written(instance_id, Level { volume: level.volume, muted: current.muted });
+    set_mute(level.muted)?;
+    ledger.record_written(instance_id, level);
+    if restoring {
+        ledger.finish_restore(instance_id);
+    }
+    Ok(())
+}
+
 fn write_reduction(
     ledger: &mut Ledger,
     session: &Session,
@@ -1652,16 +1704,15 @@ fn write_reduction(
     level: Level,
     restoring: bool,
 ) -> WinResult<()> {
-    unsafe {
-        session.simple.SetMasterVolume(level.volume, &OWN_EVENT_CONTEXT)?;
-        ledger.record_written(&session.instance_id, Level { volume: level.volume, muted: current.muted });
-        session.simple.SetMute(level.muted, &OWN_EVENT_CONTEXT)?;
-        ledger.record_written(&session.instance_id, level);
-        if restoring {
-            ledger.finish_restore(&session.instance_id);
-        }
-        Ok(())
-    }
+    write_reduction_with(
+        ledger,
+        &session.instance_id,
+        current,
+        level,
+        restoring,
+        |v| unsafe { session.simple.SetMasterVolume(v, &OWN_EVENT_CONTEXT) },
+        |m| unsafe { session.simple.SetMute(m, &OWN_EVENT_CONTEXT) },
+    )
 }
 
 impl Drop for Engine {
@@ -2320,5 +2371,88 @@ mod tests {
             retried_after_capacity.is_empty(),
             "previously failed or considered live process must not re-qualify on recreated session after capacity"
         );
+    }
+
+    #[test]
+    fn reductions_skip_nonfatal_session_errors_and_abort_on_fatal() {
+        use super::super::com::AUDCLNT_E_DEVICE_INVALIDATED;
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        struct Stub {
+            id: &'static str,
+            name: &'static str,
+            key: AppKey,
+            read_err: Option<windows::core::HRESULT>,
+            write_err: Option<windows::core::HRESULT>,
+        }
+
+        let (a, b, c) = (AppKey::Exe("a.exe".into()), AppKey::Exe("b.exe".into()), AppKey::Exe("c.exe".into()));
+        let mut r = Reductions {
+            solo: Some(AppKey::Exe("solo.exe".into())),
+            solo_level: Reduction { factor: 0.2, mute: false },
+            focus_rules: Vec::new(),
+            foreground: None,
+            mic: None,
+            mic_active: false,
+            ledger: Ledger::default(),
+        };
+        let stubs = [
+            Stub { id: "s1", name: "BadRead", key: a, read_err: Some(E_ACCESSDENIED), write_err: None },
+            Stub { id: "s2", name: "BadWrite", key: b, read_err: None, write_err: Some(E_ACCESSDENIED) },
+            Stub { id: "s3", name: "Healthy", key: c, read_err: None, write_err: None },
+        ];
+        let mut applied = Vec::new();
+        execute_reductions(
+            &mut r,
+            stubs.iter().map(|s| (s, s.id, s.name, &s.key)),
+            |s| match s.read_err {
+                Some(hr) => Err(windows::core::Error::from_hresult(hr)),
+                None => Ok(Level { volume: 1.0, muted: false }),
+            },
+            |s, v| match s.write_err {
+                Some(hr) => Err(windows::core::Error::from_hresult(hr)),
+                None => {
+                    applied.push((s.id, v));
+                    Ok(())
+                }
+            },
+            |_s, _m| Ok(()),
+        )
+        .expect("non-fatal errors must skip and continue");
+        assert_eq!(applied, vec![("s3", 0.2)]);
+
+        let fatal_read = [Stub {
+            id: "sf1",
+            name: "FatalRead",
+            key: AppKey::Exe("f1.exe".into()),
+            read_err: Some(AUDCLNT_E_DEVICE_INVALIDATED),
+            write_err: None,
+        }];
+        let err = execute_reductions(
+            &mut r,
+            fatal_read.iter().map(|s| (s, s.id, s.name, &s.key)),
+            |s| Err(windows::core::Error::from_hresult(s.read_err.unwrap())),
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(is_fatal(err.code()));
+
+        let fatal_write = [Stub {
+            id: "sf2",
+            name: "FatalWrite",
+            key: AppKey::Exe("f2.exe".into()),
+            read_err: None,
+            write_err: Some(AUDCLNT_E_DEVICE_INVALIDATED),
+        }];
+        let err = execute_reductions(
+            &mut r,
+            fatal_write.iter().map(|s| (s, s.id, s.name, &s.key)),
+            |_| Ok(Level { volume: 1.0, muted: false }),
+            |s, _| Err(windows::core::Error::from_hresult(s.write_err.unwrap())),
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(is_fatal(err.code()));
     }
 }
