@@ -2,6 +2,7 @@
 //! Windows still owns navigation, selection, dismissal and menu accessibility.
 
 use super::{fonts::POLARIS_SEMIBOLD, window::Hwnd};
+use std::cell::Cell;
 use windows::{
     Win32::{
         Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
@@ -27,9 +28,9 @@ const ITEMS: [(u32, &str); 3] = [(OPEN, "&Open Mixer"), (MUTE, "&Mute"), (EXIT, 
 
 struct State {
     menu: HMENU,
-    font: HFONT,
+    font: Cell<HFONT>,
     resource: HANDLE,
-    dpi: u32,
+    dpi: Cell<u32>,
 }
 
 pub struct TrayMenu {
@@ -44,7 +45,12 @@ impl TrayMenu {
             let menu = CreatePopupMenu().map_err(|e| e.to_string())?;
             let mut result = Self {
                 hwnd,
-                state: Box::new(State { menu, font: HFONT::default(), resource: HANDLE::default(), dpi: 96 }),
+                state: Box::new(State {
+                    menu,
+                    font: Cell::new(HFONT::default()),
+                    resource: HANDLE::default(),
+                    dpi: Cell::new(96),
+                }),
                 attached: false,
             };
             let mut count = 0;
@@ -98,8 +104,9 @@ impl TrayMenu {
 }
 
 impl State {
-    unsafe fn set_dpi(&mut self, dpi: u32) -> Result<(), String> {
-        if dpi == self.dpi && !self.font.is_invalid() {
+    unsafe fn set_dpi(&self, dpi: u32) -> Result<(), String> {
+        let prev = self.font.get();
+        if dpi == self.dpi.get() && !prev.is_invalid() {
             return Ok(());
         }
         let font = unsafe {
@@ -123,18 +130,18 @@ impl State {
         if font.is_invalid() {
             return Err("Couldn't create the Polaris tray font.".into());
         }
-        if !self.font.is_invalid() {
+        self.font.set(font);
+        self.dpi.set(dpi);
+        if !prev.is_invalid() {
             unsafe {
-                let _ = DeleteObject(self.font.into());
+                let _ = DeleteObject(prev.into());
             }
         }
-        self.font = font;
-        self.dpi = dpi;
         Ok(())
     }
 
     fn px(&self, logical: i32) -> i32 {
-        logical * self.dpi as i32 / 96
+        logical * self.dpi.get() as i32 / 96
     }
 
     unsafe fn measure(&self, item: &mut MEASUREITEMSTRUCT) {
@@ -142,7 +149,7 @@ impl State {
         if dc.is_invalid() {
             return;
         }
-        let old = unsafe { SelectObject(dc, self.font.into()) };
+        let old = unsafe { SelectObject(dc, self.font.get().into()) };
         let mut size = SIZE::default();
         let text: Vec<u16> = "Open Mixer".encode_utf16().collect();
         unsafe {
@@ -173,7 +180,7 @@ impl State {
                 return;
             }
             FillRect(item.hDC, &item.rcItem, GetSysColorBrush(background));
-            SelectObject(item.hDC, self.font.into());
+            SelectObject(item.hDC, self.font.get().into());
             SetBkMode(item.hDC, TRANSPARENT);
             SetTextColor(item.hDC, windows::Win32::Foundation::COLORREF(GetSysColor(foreground)));
             let mut rect = RECT { left: item.rcItem.left + self.px(30), ..item.rcItem };
@@ -193,7 +200,7 @@ impl State {
 }
 
 unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM, _: usize, data: usize) -> LRESULT {
-    let state = unsafe { &mut *(data as *mut State) };
+    let state = unsafe { &*(data as *const State) };
     match message {
         SHOW_MENU => unsafe {
             if let Err(e) = state.set_dpi(GetDpiForWindow(hwnd).max(96)) {
@@ -202,9 +209,7 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPA
             let mut pos = POINT::default();
             let _ = GetCursorPos(&mut pos);
             let _ = SetForegroundWindow(hwnd);
-            let menu = state.menu;
-            // Do not keep a mutable borrow across the nested menu message loop.
-            let command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pos.x, pos.y, None, hwnd, None);
+            let command = TrackPopupMenu(state.menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pos.x, pos.y, None, hwnd, None);
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             LRESULT(command.0 as isize)
         },
@@ -250,8 +255,9 @@ impl Drop for TrayMenu {
                 let _ = RemoveWindowSubclass(self.hwnd.get(), Some(subclass), SUBCLASS_ID);
             }
             let _ = DestroyMenu(self.state.menu);
-            if !self.state.font.is_invalid() {
-                let _ = DeleteObject(self.state.font.into());
+            let font = self.state.font.get();
+            if !font.is_invalid() {
+                let _ = DeleteObject(font.into());
             }
             if !self.state.resource.is_invalid() {
                 let _ = RemoveFontMemResourceEx(self.state.resource);
@@ -282,9 +288,9 @@ mod tests {
                 None,
             )
             .unwrap();
-            let mut menu = TrayMenu::new(Hwnd(hwnd.0 as isize)).unwrap();
+            let menu = TrayMenu::new(Hwnd(hwnd.0 as isize)).unwrap();
             let dc = CreateCompatibleDC(None);
-            let old = SelectObject(dc, menu.state.font.into());
+            let old = SelectObject(dc, menu.state.font.get().into());
             let mut face = [0u16; 64];
             let len = GetTextFaceW(dc, Some(&mut face));
             assert_eq!(String::from_utf16_lossy(&face[..len as usize - 1]), "Salted Flutters Polaris");
