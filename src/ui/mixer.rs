@@ -7,6 +7,7 @@
 //! the display returns to whatever Windows reports.
 
 use super::Look;
+use super::typography::{self, Role};
 use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label, semibold};
 use crate::audio::{
     Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, BalanceState, Command, EndpointState, Flow, Meters, Route,
@@ -610,18 +611,15 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
 
     ui.horizontal(|ui| {
         ui.add_space(2.0);
-        ui.label(RichText::new("Apps").font(semibold(15.0)));
-        ui.label(RichText::new(format!("{}", visible.len())).small().color(look.p.text_muted));
+        ui.label(typography::rich("Apps", Role::Title, look).color(look.p.text));
+        ui.label(typography::rich(format!("{}", visible.len()), Role::Footnote, look).color(look.p.text_muted));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if icon_button(ui, look, glyph::REFRESH, "R", "Refresh audio devices and apps", None).clicked() {
                 cx.icons.retry_failed();
                 cx.audio.send(Command::Refresh);
             }
-            let search = ui.add(
-                egui::TextEdit::singleline(&mut st.filter)
-                    .hint_text("Filter apps")
-                    .desired_width(ui.available_width().min(170.0)),
-            );
+            let search =
+                widgets::search_field(ui, look, &mut st.filter, "Filter apps", ui.available_width().min(170.0));
             if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
                 search.request_focus();
             }
@@ -649,10 +647,25 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
         return;
     }
 
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for app in &visible {
-            app_row(ui, st, cx, app);
-        }
+    card(look).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for (i, app) in visible.iter().enumerate() {
+                if i > 0 {
+                    let (sep_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(ui.available_width().max(1.0), 1.0), Sense::empty());
+                    let left = sep_rect.left() + look.m.icon + 12.0;
+                    let right = sep_rect.right() - 6.0;
+                    if right > left {
+                        ui.painter().line_segment(
+                            [pos2(left, sep_rect.center().y), pos2(right, sep_rect.center().y)],
+                            egui::Stroke::new(1.0, look.p.separator),
+                        );
+                    }
+                }
+                app_row(ui, st, cx, app);
+            }
+        });
     });
 }
 
@@ -660,7 +673,7 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
     let look = cx.look;
     let name = st.display_name(app).to_owned();
     ui.push_id((&app.key, "offline"), |ui| {
-        card(look).show(ui, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
             // Fill the row, so long names truncate instead of widening the card.
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -708,7 +721,6 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                 .wrap(),
             );
         });
-        ui.add_space(4.0);
     });
 }
 
@@ -849,8 +861,8 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
         ui.painter().set(
             bg,
             Shape::rect_filled(
-                rect,
-                CornerRadius::same(8),
+                rect.shrink(2.0),
+                CornerRadius::same(m.control_radius),
                 p.surface_hover.gamma_multiply(if expanded { 0.8 } else { 1.0 }),
             ),
         );
