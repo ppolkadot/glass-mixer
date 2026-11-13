@@ -452,6 +452,13 @@ fn blend_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_premultiplied(ch(r0, r1), ch(g0, g1), ch(b0, b1), ch(a0, a1))
 }
 
+/// Whether a [`segmented`] bar behaves as mutually exclusive radio options or top-level tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegmentKind {
+    Radio,
+    Tab,
+}
+
 /// A segmented control; returns `true` when the value changed.
 pub fn segmented<T: PartialEq + Copy>(
     ui: &mut Ui,
@@ -459,44 +466,95 @@ pub fn segmented<T: PartialEq + Copy>(
     value: &mut T,
     options: &[(T, &str)],
     width: f32,
+    kind: SegmentKind,
 ) -> bool {
+    if options.is_empty() {
+        return false;
+    }
     let p = &look.p;
-    let height = 30.0;
+    let height = if p.high_contrast { 30.0 } else { 28.0 };
+    let inset = if p.high_contrast { 3.0 } else { 2.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let enabled = ui.is_enabled();
-    ui.painter().rect_filled(rect, CornerRadius::same(8), p.surface);
-    ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    if p.high_contrast {
+        ui.painter().rect_filled(rect, CornerRadius::same(8), p.surface);
+        ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    } else {
+        ui.painter().rect_filled(rect, CornerRadius::same(look.m.control_radius), p.fill);
+    }
+
     let seg_w = width / options.len() as f32;
     let mut changed = false;
+    let mut items = Vec::with_capacity(options.len());
     for (i, (opt, label)) in options.iter().enumerate() {
         let seg =
-            Rect::from_min_size(pos2(rect.left() + seg_w * i as f32, rect.top()), vec2(seg_w, height)).shrink(3.0);
+            Rect::from_min_size(pos2(rect.left() + seg_w * i as f32, rect.top()), vec2(seg_w, height)).shrink(inset);
         let id = ui.id().with(("segment", label));
         let response = ui.interact(seg, id, Sense::click());
-        let selected = *value == *opt;
-        if response.clicked() && enabled && !selected {
+        if response.clicked() && enabled && *value != *opt {
             *value = *opt;
             changed = true;
         }
+        items.push((seg, response, *label, *value == *opt));
+    }
+
+    let pill_r = if p.high_contrast { 6 } else { look.m.control_radius.saturating_sub(2) };
+    let selected_idx = items.iter().position(|(_, _, _, sel)| *sel);
+    if p.high_contrast {
         let painter = ui.painter();
-        if selected {
-            painter.rect_filled(seg, CornerRadius::same(6), p.accent_soft);
-            painter.rect_stroke(seg, CornerRadius::same(6), Stroke::new(1.0, p.accent), StrokeKind::Inside);
-        } else if response.hovered() {
-            painter.rect_filled(seg, CornerRadius::same(6), p.surface_hover);
+        for &(seg, ref response, _, selected) in &items {
+            if selected {
+                painter.rect_filled(seg, CornerRadius::same(pill_r), p.accent_soft);
+                painter.rect_stroke(seg, CornerRadius::same(pill_r), Stroke::new(1.0, p.accent), StrokeKind::Inside);
+            } else if response.hovered() {
+                painter.rect_filled(seg, CornerRadius::same(pill_r), p.surface_hover);
+            }
         }
+    } else {
+        for &(seg, ref response, _, selected) in &items {
+            if !selected && response.hovered() {
+                ui.painter().rect_filled(seg, CornerRadius::same(pill_r), p.surface_hover);
+            }
+        }
+        if let Some(idx) = selected_idx {
+            let target_left = rect.left() + seg_w * idx as f32 + inset;
+            let pill_id = ui.id().with(("segment-pill", options.len(), options[0].1));
+            let dur = super::theme::duration(ui, super::theme::motion::STANDARD);
+            let pill_left = ui.ctx().animate_value_with_time(pill_id, target_left, dur);
+            let pill = Rect::from_min_size(
+                pos2(pill_left, rect.top() + inset),
+                vec2(seg_w - 2.0 * inset, height - 2.0 * inset),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(pill.translate(vec2(0.0, 1.0)), CornerRadius::same(pill_r), p.shadow);
+            painter.rect_filled(pill, CornerRadius::same(pill_r), p.raised);
+        }
+    }
+
+    let widget_type = match kind {
+        SegmentKind::Radio => WidgetType::RadioButton,
+        SegmentKind::Tab => WidgetType::Button,
+    };
+    for (seg, response, label, selected) in items {
         let color = if !enabled {
             p.text_muted.gamma_multiply(0.6)
-        } else if selected {
+        } else if !p.high_contrast || selected {
             p.text
         } else {
             p.text_muted
         };
-        let font = semibold(13.0);
-        painter.text(seg.center(), Align2::CENTER_CENTER, *label, font, color);
-        focus_ring(ui, seg, &response, p, 6);
+        super::typography::paint(
+            ui.painter(),
+            seg.center(),
+            Align2::CENTER_CENTER,
+            label,
+            super::typography::Role::CalloutStrong,
+            color,
+            look,
+        );
+        focus_ring(ui, seg, &response, p, pill_r);
         let label_owned = label.to_string();
-        response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, enabled, selected, &label_owned));
+        response.widget_info(|| WidgetInfo::selected(widget_type, enabled, selected, &label_owned));
     }
     changed
 }

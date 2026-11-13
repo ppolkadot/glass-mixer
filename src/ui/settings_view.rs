@@ -1,6 +1,6 @@
 //! Settings page: appearance, behaviour, audio and about.
 
-use super::widgets::{self, card, glyph, icon_button, segmented, semibold, toggle_row};
+use super::widgets::{self, SegmentKind, card, glyph, icon_button, segmented, semibold, toggle_row};
 use super::{GlassStatus, Look, theme};
 use crate::audio::{AudioHandle, Command};
 use crate::platform::backdrop::Support;
@@ -120,12 +120,20 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             &mut s.theme,
             &[(ThemeMode::System, "System"), (ThemeMode::Light, "Light"), (ThemeMode::Dark, "Dark")],
             210.0,
+            SegmentKind::Radio,
         );
     });
     toggle_row(ui, &look, &mut s.glass, "Glass effect", Some(cx.glass.description()));
     ui.add_enabled_ui(s.glass && cx.glass == GlassStatus::Active && cx.support == Support::Full, |ui| {
         labeled(ui, &look, "Backdrop", |ui| {
-            segmented(ui, &look, &mut s.backdrop, &[(Backdrop::Acrylic, "Acrylic"), (Backdrop::Mica, "Mica")], 160.0);
+            segmented(
+                ui,
+                &look,
+                &mut s.backdrop,
+                &[(Backdrop::Acrylic, "Acrylic"), (Backdrop::Mica, "Mica")],
+                160.0,
+                SegmentKind::Radio,
+            );
         });
     });
     labeled(ui, &look, "Accent", |ui| {
@@ -134,7 +142,14 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
         }
     });
     labeled(ui, &look, "Typeface", |ui| {
-        segmented(ui, &look, &mut s.typeface, &[(Typeface::Polaris, "Polaris"), (Typeface::System, "Windows")], 210.0);
+        segmented(
+            ui,
+            &look,
+            &mut s.typeface,
+            &[(Typeface::Polaris, "Polaris"), (Typeface::System, "Windows")],
+            210.0,
+            SegmentKind::Radio,
+        );
     });
     ui.label(
         RichText::new("Polaris is the bundled Salted Flutters Polaris. Windows uses Segoe UI.")
@@ -148,6 +163,7 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             &mut s.density,
             &[(Density::Comfortable, "Comfortable"), (Density::Compact, "Compact")],
             210.0,
+            SegmentKind::Radio,
         );
     });
     let meters = if cx.software_renderer {
@@ -249,7 +265,14 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
         let custom = ui.add_enabled(preset == 0, egui::DragValue::new(&mut s.wheel_step).range(1..=20).suffix("%"));
         widgets::set_name(ui, &custom, "Custom mouse wheel step");
         widgets::scroll_on_focus(custom).on_hover_text("Any step from 1 to 20 percent");
-        if segmented(ui, &look, &mut preset, &[(1, "1%"), (2, "2%"), (5, "5%"), (0, "Custom")], 200.0) {
+        if segmented(
+            ui,
+            &look,
+            &mut preset,
+            &[(1, "1%"), (2, "2%"), (5, "5%"), (0, "Custom")],
+            200.0,
+            SegmentKind::Radio,
+        ) {
             s.wheel_step = if preset == 0 { 3 } else { preset };
         }
     });
