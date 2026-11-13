@@ -1,6 +1,11 @@
 //! The Profiles view: save the current state as a profile, then apply, rename,
 //! duplicate, trim or delete it. Profiles are stored as `presets` in settings.
 
+use super::{
+    Look,
+    typography::{self, Role},
+    widgets::{self, ButtonKind},
+};
 use crate::{
     audio::{
         AudioHandle, AudioSnapshot, Command,
@@ -64,9 +69,9 @@ fn retarget_shortcuts(settings: &mut Settings, old: &str, new: Option<&str>) {
     }
 }
 
-fn named_button(ui: &mut egui::Ui, text: &str, name: &str) -> egui::Response {
-    let response = crate::ui::widgets::scroll_on_focus(ui.button(text));
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+fn named_button(ui: &mut egui::Ui, look: &Look, text: &str, name: &str, kind: ButtonKind) -> egui::Response {
+    let response = widgets::button(ui, look, text, kind);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
     response
 }
 
@@ -86,6 +91,7 @@ enum Action {
 
 pub fn show(
     ui: &mut egui::Ui,
+    look: &Look,
     editor: &mut PresetEditor,
     settings: &mut Settings,
     snapshot: &AudioSnapshot,
@@ -94,43 +100,33 @@ pub fn show(
 ) {
     // One scroll area for the whole view, so keyboard focus can reach every profile.
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        contents(ui, editor, settings, snapshot, audio, errors);
+        contents(ui, look, editor, settings, snapshot, audio, errors);
     });
 }
 
 fn contents(
     ui: &mut egui::Ui,
+    look: &Look,
     editor: &mut PresetEditor,
     settings: &mut Settings,
     snapshot: &AudioSnapshot,
     audio: &AudioHandle,
     errors: &mut Vec<String>,
 ) {
-    ui.heading("Profiles");
+    let p = &look.p;
+    ui.label(typography::rich("Profiles", Role::LargeTitle, look).color(p.text));
     ui.add(
         egui::Label::new(
-            "A profile stores only what you save in it: app volumes and mutes, and optionally the master level and default devices. Apply it here or with a shortcut (Settings > Global shortcuts).",
+            typography::rich(
+                "A profile stores only what you save in it: app volumes and mutes, and optionally the master level and default devices. Apply it here or with a shortcut (Settings > Global shortcuts).",
+                Role::Footnote,
+                look,
+            )
+            .color(p.text_muted),
         )
         .wrap(),
     );
-    ui.horizontal(|ui| {
-        let label = ui.label("Profile name");
-        crate::ui::widgets::scroll_on_focus(ui.text_edit_singleline(&mut editor.name))
-            .labelled_by(label.id)
-            .on_hover_text("Name for a new profile");
-    });
-    ui.horizontal_wrapped(|ui| {
-        let parts = &mut editor.parts;
-        for (on, text) in [
-            (&mut parts.apps, "App volumes and mutes"),
-            (&mut parts.app_devices, "App devices"),
-            (&mut parts.master, "Master volume"),
-            (&mut parts.output_device, "Default output"),
-            (&mut parts.input_device, "Default input"),
-        ] {
-            crate::ui::widgets::scroll_on_focus(ui.checkbox(on, text));
-        }
-    });
+    ui.add_space(look.m.gap);
     let preview = VolumePreset::capture_profile(&editor.name, snapshot, editor.parts);
     let blocked = if editor.name.trim().is_empty() {
         Some("Enter a profile name to save.")
@@ -141,24 +137,64 @@ fn contents(
     } else {
         None
     };
-    let save =
-        crate::ui::widgets::scroll_on_focus(ui.add_enabled(blocked.is_none(), egui::Button::new("Save current state")));
-    if let Some(reason) = blocked {
-        ui.add(egui::Label::new(egui::RichText::new(reason).small()).wrap());
-    }
-    if save.on_disabled_hover_text(blocked.unwrap_or_default()).clicked() {
-        if name_taken(&settings.presets, &preview.name) {
-            errors.push("A profile with that name already exists. Choose another name.".into());
-        } else {
-            settings.presets.push(preview);
-            editor.name.clear();
+    widgets::card(look).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(typography::rich("Save current levels", Role::CalloutStrong, look).color(p.text));
+        ui.horizontal(|ui| {
+            let label = ui.label(typography::rich("Profile name", Role::Body, look).color(p.text));
+            widgets::scroll_on_focus(
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.name)
+                        .desired_width((ui.available_width() - 4.0).clamp(80.0, 220.0)),
+                ),
+            )
+            .labelled_by(label.id)
+            .on_hover_text("Name for a new profile");
+        });
+        let parts = &mut editor.parts;
+        for (on, text) in [
+            (&mut parts.apps, "App volumes and mutes"),
+            (&mut parts.app_devices, "App devices"),
+            (&mut parts.master, "Master volume"),
+            (&mut parts.output_device, "Default output"),
+            (&mut parts.input_device, "Default input"),
+        ] {
+            widgets::scroll_on_focus(widgets::check_row(ui, look, on, text));
         }
-    }
-    ui.add(egui::Label::new("Automatic rules are off by default. They apply a profile's app levels once to a newly launched process after enabling the rule, and only when its initial audio session is still at 100% and unmuted (so a non-default or Windows-restored level is not overwritten; use Apply now to override). Already-running apps and observed user changes are skipped. Devices and the master level change only when you apply a profile.").wrap());
+        let save = ui
+            .add_enabled_ui(blocked.is_none(), |ui| {
+                widgets::button(ui, look, "Save current state", ButtonKind::Primary)
+            })
+            .inner;
+        if let Some(reason) = blocked {
+            ui.add(egui::Label::new(typography::rich(reason, Role::Footnote, look).color(p.text_muted)).wrap());
+        }
+        if save.on_disabled_hover_text(blocked.unwrap_or_default()).clicked() {
+            if name_taken(&settings.presets, &preview.name) {
+                errors.push("A profile with that name already exists. Choose another name.".into());
+            } else {
+                settings.presets.push(preview);
+                editor.name.clear();
+            }
+        }
+    });
+    ui.add_space(look.m.gap);
+    ui.add(
+        egui::Label::new(
+            typography::rich(
+                "Automatic rules are off by default. They apply a profile's app levels once to a newly launched process after enabling the rule, and only when its initial audio session is still at 100% and unmuted (so a non-default or Windows-restored level is not overwritten; use Apply now to override). Already-running apps and observed user changes are skipped. Devices and the master level change only when you apply a profile.",
+                Role::Footnote,
+                look,
+            )
+            .color(p.text_muted),
+        )
+        .wrap(),
+    );
+    ui.add_space(look.m.gap);
 
     let mut action = None;
     for (index, preset) in settings.presets.iter().enumerate() {
-        ui.push_id(index, |ui| profile_card(ui, editor, index, preset, &mut action));
+        ui.push_id(index, |ui| profile_card(ui, look, editor, index, preset, &mut action));
     }
     let Some(action) = action else { return };
     match action {
@@ -215,100 +251,138 @@ fn contents(
 
 fn profile_card(
     ui: &mut egui::Ui,
+    look: &Look,
     editor: &mut PresetEditor,
     index: usize,
     preset: &VolumePreset,
     action: &mut Option<Action>,
 ) {
     let name = &preset.name;
-    ui.separator();
-    let mut cancel = false;
-    match &mut editor.renaming {
-        Some((i, draft)) if *i == index => {
-            ui.horizontal_wrapped(|ui| {
-                let field = crate::ui::widgets::scroll_on_focus(ui.text_edit_singleline(draft));
-                crate::ui::widgets::set_name(ui, &field, &format!("New name for {name}"));
-                if named_button(ui, "Save name", &format!("Save the new name for {name}")).clicked() {
-                    *action = Some(Action::Rename(index, draft.clone()));
-                }
-                cancel = crate::ui::widgets::scroll_on_focus(ui.button("Cancel")).clicked();
-            });
+    widgets::card(look).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut cancel = false;
+        match &mut editor.renaming {
+            Some((i, draft)) if *i == index => {
+                ui.horizontal_wrapped(|ui| {
+                    let field = widgets::scroll_on_focus(
+                        ui.add(
+                            egui::TextEdit::singleline(draft)
+                                .desired_width((ui.available_width() - 4.0).clamp(80.0, 220.0)),
+                        ),
+                    );
+                    widgets::set_name(ui, &field, &format!("New name for {name}"));
+                    if named_button(
+                        ui,
+                        look,
+                        "Save name",
+                        &format!("Save the new name for {name}"),
+                        ButtonKind::Primary,
+                    )
+                    .clicked()
+                    {
+                        *action = Some(Action::Rename(index, draft.clone()));
+                    }
+                    cancel = widgets::button(ui, look, "Cancel", ButtonKind::Secondary).clicked();
+                });
+            }
+            _ => {
+                ui.label(typography::rich(name, Role::CalloutStrong, look).color(look.p.text));
+            }
         }
-        _ => {
-            ui.label(egui::RichText::new(name).strong());
+        if cancel {
+            editor.renaming = None;
         }
-    }
-    if cancel {
-        editor.renaming = None;
-    }
-    ui.horizontal_wrapped(|ui| {
-        if named_button(ui, "Apply now", &format!("Apply {name} now")).clicked() {
-            *action = Some(Action::Apply(index));
-        }
-        if named_button(ui, "Rename", &format!("Rename profile {name}")).clicked() {
-            *action = Some(Action::StartRename(index));
-        }
-        if named_button(ui, "Duplicate", &format!("Duplicate profile {name}")).clicked() {
-            *action = Some(Action::Duplicate(index));
-        }
-        if named_button(ui, "Delete", &format!("Delete profile {name}")).clicked() {
-            *action = Some(Action::Delete(index));
-        }
-    });
-    if !preset.entries.is_empty() {
-        let mut on = preset.apply_on_start;
-        let auto = crate::ui::widgets::scroll_on_focus(ui.checkbox(&mut on, "Apply once when saved apps start"));
-        auto.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::Checkbox,
-                true,
-                on,
-                format!("Apply {name} once when saved apps start"),
-            )
+        ui.horizontal_wrapped(|ui| {
+            if named_button(ui, look, "Apply now", &format!("Apply {name} now"), ButtonKind::Secondary).clicked() {
+                *action = Some(Action::Apply(index));
+            }
+            if named_button(ui, look, "Rename", &format!("Rename profile {name}"), ButtonKind::Secondary).clicked() {
+                *action = Some(Action::StartRename(index));
+            }
+            if named_button(ui, look, "Duplicate", &format!("Duplicate profile {name}"), ButtonKind::Secondary).clicked()
+            {
+                *action = Some(Action::Duplicate(index));
+            }
+            if named_button(ui, look, "Delete", &format!("Delete profile {name}"), ButtonKind::Destructive).clicked() {
+                *action = Some(Action::Delete(index));
+            }
         });
-        if auto.changed() {
-            *action = Some(if on { Action::EnableRule(index) } else { Action::DisableRule(index) });
-        }
-        if preset.apply_on_start {
-            ui.add(egui::Label::new("Automatic rule enabled — applies once to new launches starting at 100% and unmuted (use Apply now to override remembered levels). Uncheck to stop.").wrap());
-        }
-    }
-    let parts = preset.entries.len()
-        + usize::from(preset.master.is_some())
-        + usize::from(preset.output_device.is_some())
-        + usize::from(preset.input_device.is_some());
-    let collapsed = egui::CollapsingHeader::new(format!("{parts} saved setting(s)")).show(ui, |ui| {
-        let mut row = |ui: &mut egui::Ui, text: String, remove: Action| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&text);
-                if named_button(ui, "Remove", &format!("Remove {text} from {name}")).clicked() {
-                    *action = Some(remove);
-                }
+        if !preset.entries.is_empty() {
+            let mut on = preset.apply_on_start;
+            let auto = widgets::scroll_on_focus(widgets::check_row(
+                ui,
+                look,
+                &mut on,
+                "Apply once when saved apps start",
+            ));
+            auto.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    true,
+                    on,
+                    format!("Apply {name} once when saved apps start"),
+                )
             });
-        };
-        if let Some(master) = preset.master {
-            let level =
-                if master.muted { "muted".to_owned() } else { format!("{}%", crate::audio::to_percent(master.volume)) };
-            row(ui, format!("Master volume: {level}"), Action::RemoveMaster(index));
+            if auto.changed() {
+                *action = Some(if on { Action::EnableRule(index) } else { Action::DisableRule(index) });
+            }
+            if preset.apply_on_start {
+                ui.add(
+                    egui::Label::new(
+                        typography::rich(
+                            "Automatic rule enabled — applies once to new launches starting at 100% and unmuted (use Apply now to override remembered levels). Uncheck to stop.",
+                            Role::Footnote,
+                            look,
+                        )
+                        .color(look.p.text_muted),
+                    )
+                    .wrap(),
+                );
+            }
         }
-        if let Some(device) = &preset.output_device {
-            row(ui, format!("Default output: {}", device.name), Action::RemoveOutput(index));
-        }
-        if let Some(device) = &preset.input_device {
-            row(ui, format!("Default input: {}", device.name), Action::RemoveInput(index));
-        }
-        for (e, entry) in preset.entries.iter().enumerate() {
-            let level = format!(
-                "{}: {}%{}{}",
-                entry.name,
-                crate::audio::to_percent(entry.volume),
-                if entry.muted { ", muted" } else { "" },
-                entry.output.as_ref().map_or(String::new(), |d| format!(", on {}", d.name()))
-            );
-            row(ui, level, Action::RemoveEntry(index, e));
-        }
+        let parts = preset.entries.len()
+            + usize::from(preset.master.is_some())
+            + usize::from(preset.output_device.is_some())
+            + usize::from(preset.input_device.is_some());
+        let collapsed = widgets::disclosure(ui, look, &format!("{parts} saved setting(s)"), |ui| {
+            let mut row = |ui: &mut egui::Ui, text: String, remove: Action| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(typography::rich(&text, Role::Callout, look).color(look.p.text));
+                    if named_button(ui, look, "Remove", &format!("Remove {text} from {name}"), ButtonKind::Secondary)
+                        .clicked()
+                    {
+                        *action = Some(remove);
+                    }
+                });
+            };
+            if let Some(master) = preset.master {
+                let level = if master.muted {
+                    "muted".to_owned()
+                } else {
+                    format!("{}%", crate::audio::to_percent(master.volume))
+                };
+                row(ui, format!("Master volume: {level}"), Action::RemoveMaster(index));
+            }
+            if let Some(device) = &preset.output_device {
+                row(ui, format!("Default output: {}", device.name), Action::RemoveOutput(index));
+            }
+            if let Some(device) = &preset.input_device {
+                row(ui, format!("Default input: {}", device.name), Action::RemoveInput(index));
+            }
+            for (e, entry) in preset.entries.iter().enumerate() {
+                let level = format!(
+                    "{}: {}%{}{}",
+                    entry.name,
+                    crate::audio::to_percent(entry.volume),
+                    if entry.muted { ", muted" } else { "" },
+                    entry.output.as_ref().map_or(String::new(), |d| format!(", on {}", d.name()))
+                );
+                row(ui, level, Action::RemoveEntry(index, e));
+            }
+        });
+        widgets::scroll_on_focus(collapsed.header_response);
     });
-    crate::ui::widgets::scroll_on_focus(collapsed.header_response);
+    ui.add_space(look.m.gap);
 }
 
 #[cfg(test)]
@@ -340,8 +414,10 @@ mod tests {
             }),
             ..Default::default()
         });
+        let look = harness.look;
         let (mut editor, audio, mut errors) = (PresetEditor::default(), AudioHandle::detached(), Vec::new());
-        let frame = harness.run(width, 900.0, |ui| show(ui, &mut editor, &mut settings, snapshot, &audio, &mut errors));
+        let frame =
+            harness.run(width, 900.0, |ui| show(ui, &look, &mut editor, &mut settings, snapshot, &audio, &mut errors));
         (width, frame)
     }
 
@@ -429,8 +505,9 @@ mod tests {
         let mut settings = Settings::default();
         let snapshot = AudioSnapshot::default();
         let (mut editor, audio, mut errors) = (PresetEditor::default(), AudioHandle::detached(), Vec::new());
-        let frame =
-            harness.run(400.0, 500.0, |ui| show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors));
+        let frame = harness.run(400.0, 500.0, |ui| {
+            show(ui, &harness.look, &mut editor, &mut settings, &snapshot, &audio, &mut errors)
+        });
         let save = frame.widgets.iter().find(|w| w.name == "Save current state").expect("Save button");
         assert!(save.disabled);
         assert!(
@@ -465,13 +542,13 @@ mod tests {
                 let (mut editor, audio, mut errors) = (PresetEditor::default(), AudioHandle::detached(), Vec::new());
 
                 let _ = harness.run(width, height, |ui| {
-                    show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                    show(ui, &harness.look, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
                 });
 
                 let mut reached_last = false;
                 for _ in 0..80 {
                     let frame = harness.send_key(width, height, egui::Key::Tab, egui::Modifiers::NONE, |ui| {
-                        show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                        show(ui, &harness.look, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
                     });
                     if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
                         if let Some(b) = widget.bounds {
@@ -484,7 +561,7 @@ mod tests {
                         if widget.name == "Apply Preset Number 7 once when saved apps start" {
                             // Toggle automatic rule with Space.
                             let _ = harness.send_key(width, height, egui::Key::Space, egui::Modifiers::NONE, |ui| {
-                                show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                                show(ui, &harness.look, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
                             });
                             assert!(settings.presets[7].apply_on_start);
                             reached_last = true;
@@ -497,7 +574,7 @@ mod tests {
                 let mut reached_first = false;
                 for _ in 0..80 {
                     let frame = harness.send_key(width, height, egui::Key::Tab, egui::Modifiers::SHIFT, |ui| {
-                        show(ui, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
+                        show(ui, &harness.look, &mut editor, &mut settings, &snapshot, &audio, &mut errors);
                     });
                     if let Some(widget) = frame.widgets.iter().find(|w| w.focused && is_interactive(w.role)) {
                         if let Some(b) = widget.bounds {

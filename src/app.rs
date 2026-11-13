@@ -1089,6 +1089,7 @@ impl eframe::App for MixerApp {
                     }
                     View::Presets => crate::ui::presets::show(
                         ui,
+                        &look,
                         &mut self.preset_editor,
                         &mut self.settings,
                         &snapshot,
