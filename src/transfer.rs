@@ -135,6 +135,8 @@ fn import_notes(path: &str, wanted: &Value, read: &Value, notes: &mut Vec<String
                 import_notes(&format!("{path}[{index}]"), wanted, read, notes);
             }
         }
+        (Value::Number(a), Value::Number(b))
+            if a.as_f64().zip(b.as_f64()).is_some_and(|(x, y)| (x - y).abs() <= 1e-6) => {}
         _ if wanted != read => notes.push(format!("{path}: the value isn't valid, so it was adjusted or omitted.")),
         _ => {}
     }
@@ -465,5 +467,13 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn imports_plain_json_floats_without_false_precision_notes() {
+        let imported =
+            import(br#"{"version":4,"presets":[{"name":"Work","entries":[],"master":{"volume":0.4,"muted":false}}]}"#)
+                .unwrap();
+        assert!(imported.notes.is_empty(), "unexpected notes: {:?}", imported.notes);
     }
 }
