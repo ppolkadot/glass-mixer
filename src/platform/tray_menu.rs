@@ -1,17 +1,18 @@
 //! Native tray popup with a process-private Polaris Semibold font.
 //! Windows still owns navigation, selection, dismissal and menu accessibility.
 
-use super::{fonts::POLARIS_SEMIBOLD, window::Hwnd};
+use super::{fonts::POLARIS_SEMIBOLD, sysprefs::SystemPrefs, window::Hwnd};
+use crate::{settings::Accent, ui::theme};
 use std::cell::Cell;
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
+        Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::*,
         UI::{
             Controls::{
                 DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_GRAYED, ODS_NOACCEL, ODS_SELECTED, ODT_MENU,
             },
-            HiDpi::GetDpiForWindow,
+            HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::*,
         },
@@ -26,11 +27,61 @@ pub const MUTE: u32 = 2;
 pub const EXIT: u32 = 3;
 const ITEMS: [(u32, &str); 3] = [(OPEN, "&Open Mixer"), (MUTE, "&Mute"), (EXIT, "E&xit")];
 
+fn system_palette() -> theme::Palette {
+    let prefs = SystemPrefs::read();
+    theme::palette(prefs.dark || prefs.high_contrast, false, Accent::default(), prefs.high_contrast)
+}
+
+fn colorref(c: egui::Color32) -> COLORREF {
+    COLORREF(u32::from(c.r()) | (u32::from(c.g()) << 8) | (u32::from(c.b()) << 16))
+}
+
+fn mnemonic(label: &str) -> Option<char> {
+    let mut chars = label.chars();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            match chars.next() {
+                Some('&') => continue,
+                Some(key) => return Some(key.to_ascii_lowercase()),
+                None => return None,
+            }
+        }
+    }
+    None
+}
+
+fn menu_char_index(ch: char) -> Option<usize> {
+    let target = ch.to_ascii_lowercase();
+    let mut pos = 0usize;
+    for (id, label) in ITEMS {
+        if id == EXIT {
+            pos += 1;
+        }
+        if mnemonic(label) == Some(target) {
+            return Some(pos);
+        }
+        pos += 1;
+    }
+    None
+}
+
+unsafe fn dpi_at_point(hwnd: HWND, pos: POINT) -> u32 {
+    let monitor = unsafe { MonitorFromPoint(pos, MONITOR_DEFAULTTONEAREST) };
+    let mut dpi_x = 0u32;
+    let mut dpi_y = 0u32;
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_ok() && dpi_x >= 96 {
+        return dpi_x;
+    }
+    unsafe { GetDpiForWindow(hwnd) }.max(96)
+}
+
 struct State {
     menu: HMENU,
     font: Cell<HFONT>,
     resource: HANDLE,
     dpi: Cell<u32>,
+    palette: Cell<theme::Palette>,
+    bg_brush: Cell<HBRUSH>,
 }
 
 pub struct TrayMenu {
@@ -50,6 +101,8 @@ impl TrayMenu {
                     font: Cell::new(HFONT::default()),
                     resource: HANDLE::default(),
                     dpi: Cell::new(96),
+                    palette: Cell::new(system_palette()),
+                    bg_brush: Cell::new(HBRUSH::default()),
                 }),
                 attached: false,
             };
@@ -64,6 +117,7 @@ impl TrayMenu {
                 return Err("Couldn't load Polaris Semibold for the tray menu.".into());
             }
             result.state.set_dpi(GetDpiForWindow(hwnd.get()).max(96))?;
+            result.state.refresh_theme();
             for (id, label) in ITEMS {
                 if id == EXIT {
                     AppendMenuW(menu, MF_SEPARATOR, 0, None).map_err(|e| e.to_string())?;
@@ -104,6 +158,33 @@ impl TrayMenu {
 }
 
 impl State {
+    unsafe fn refresh_theme(&self) {
+        let p = system_palette();
+        self.palette.set(p);
+        let brush = unsafe { CreateSolidBrush(colorref(p.surface)) };
+        if brush.is_invalid() {
+            return;
+        }
+        let info = MENUINFO {
+            cbSize: std::mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_BACKGROUND,
+            hbrBack: brush,
+            ..Default::default()
+        };
+        if unsafe { SetMenuInfo(self.menu, &info) }.is_err() {
+            unsafe {
+                let _ = DeleteObject(brush.into());
+            }
+            return;
+        }
+        let prev = self.bg_brush.replace(brush);
+        if !prev.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(prev.into());
+            }
+        }
+    }
+
     unsafe fn set_dpi(&self, dpi: u32) -> Result<(), String> {
         let prev = self.font.get();
         if dpi == self.dpi.get() && !prev.is_invalid() {
@@ -164,13 +245,14 @@ impl State {
     unsafe fn draw(&self, item: &DRAWITEMSTRUCT) {
         let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
         let disabled = (item.itemState.0 & ODS_DISABLED.0 != 0) || (item.itemState.0 & ODS_GRAYED.0 != 0);
-        let background = if selected { COLOR_HIGHLIGHT } else { COLOR_MENU };
-        let foreground = if disabled {
-            COLOR_GRAYTEXT
-        } else if selected {
-            COLOR_HIGHLIGHTTEXT
+        let p = self.palette.get();
+        let bg = if selected { if p.high_contrast { p.accent } else { p.surface_hover } } else { p.surface };
+        let fg = if disabled {
+            p.text_muted
+        } else if selected && p.high_contrast {
+            p.on_accent
         } else {
-            COLOR_MENUTEXT
+            p.text
         };
         let label = ITEMS.iter().find(|(id, _)| *id == item.itemID).map_or("", |(_, label)| *label);
         let mut text: Vec<u16> = label.encode_utf16().collect();
@@ -179,10 +261,14 @@ impl State {
             if saved == 0 {
                 return;
             }
-            FillRect(item.hDC, &item.rcItem, GetSysColorBrush(background));
+            let brush = CreateSolidBrush(colorref(bg));
+            if !brush.is_invalid() {
+                FillRect(item.hDC, &item.rcItem, brush);
+                let _ = DeleteObject(brush.into());
+            }
             SelectObject(item.hDC, self.font.get().into());
             SetBkMode(item.hDC, TRANSPARENT);
-            SetTextColor(item.hDC, windows::Win32::Foundation::COLORREF(GetSysColor(foreground)));
+            SetTextColor(item.hDC, colorref(fg));
             let mut rect = RECT { left: item.rcItem.left + self.px(30), ..item.rcItem };
             let flags = DT_SINGLELINE
                 | DT_VCENTER
@@ -203,11 +289,12 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPA
     let state = unsafe { &*(data as *const State) };
     match message {
         SHOW_MENU => unsafe {
-            if let Err(e) = state.set_dpi(GetDpiForWindow(hwnd).max(96)) {
-                log::warn!("{e}");
-            }
             let mut pos = POINT::default();
             let _ = GetCursorPos(&mut pos);
+            if let Err(e) = state.set_dpi(dpi_at_point(hwnd, pos)) {
+                log::warn!("{e}");
+            }
+            state.refresh_theme();
             let _ = SetForegroundWindow(hwnd);
             let command = TrackPopupMenu(state.menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pos.x, pos.y, None, hwnd, None);
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
@@ -230,16 +317,10 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPA
             DefSubclassProc(hwnd, message, wp, lp)
         },
         WM_MENUCHAR if lp.0 == state.menu.0 as isize => {
-            let index = match char::from_u32(wp.0 as u32 & 0xffff).map(|c| c.to_ascii_lowercase()) {
-                Some('o') => Some(0),
-                Some('m') => Some(1),
-                Some('x') => Some(3),
-                _ => None,
-            };
-            if let Some(index) = index {
+            if let Some(index) = char::from_u32(wp.0 as u32 & 0xffff).and_then(menu_char_index) {
                 let disabled =
                     unsafe { GetMenuState(state.menu, index as u32, MF_BYPOSITION) } & (MF_DISABLED | MF_GRAYED).0 != 0;
-                if disabled { LRESULT(0) } else { LRESULT((2 << 16) | index) }
+                if disabled { LRESULT(0) } else { LRESULT((2 << 16) | index as isize) }
             } else {
                 LRESULT(0)
             }
@@ -255,6 +336,10 @@ impl Drop for TrayMenu {
                 let _ = RemoveWindowSubclass(self.hwnd.get(), Some(subclass), SUBCLASS_ID);
             }
             let _ = DestroyMenu(self.state.menu);
+            let brush = self.state.bg_brush.get();
+            if !brush.is_invalid() {
+                let _ = DeleteObject(brush.into());
+            }
             let font = self.state.font.get();
             if !font.is_invalid() {
                 let _ = DeleteObject(font.into());
@@ -269,6 +354,16 @@ impl Drop for TrayMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accelerators_and_colorrefs_derive_from_items_and_palette() {
+        assert_eq!(menu_char_index('o'), Some(0));
+        assert_eq!(menu_char_index('O'), Some(0));
+        assert_eq!(menu_char_index('m'), Some(1));
+        assert_eq!(menu_char_index('x'), Some(3));
+        assert_eq!(menu_char_index('e'), None);
+        assert_eq!(colorref(egui::Color32::from_rgb(0x12, 0x34, 0x56)), COLORREF(0x0056_3412));
+    }
 
     #[test]
     fn native_menu_uses_polaris_semibold_and_keeps_strings_and_mute_state() {
@@ -289,6 +384,7 @@ mod tests {
             )
             .unwrap();
             let menu = TrayMenu::new(Hwnd(hwnd.0 as isize)).unwrap();
+            assert!(!menu.state.bg_brush.get().is_invalid(), "MIM_BACKGROUND brush must be initialized");
             let dc = CreateCompatibleDC(None);
             let old = SelectObject(dc, menu.state.font.get().into());
             let mut face = [0u16; 64];
