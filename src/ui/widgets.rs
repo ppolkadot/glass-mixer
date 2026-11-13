@@ -25,6 +25,39 @@ pub mod glyph {
     pub const WARNING: char = '\u{E7BA}';
     pub const CHECK: char = '\u{E73E}';
     pub const SOLO: char = '\u{E7F6}';
+    pub const CHEVRON_DOWN: char = '\u{E70D}';
+    pub const CHEVRON_UP: char = '\u{E70E}';
+    pub const CHEVRON_RIGHT: char = '\u{E76C}';
+    pub const SEARCH: char = '\u{E721}';
+    pub const CLEAR: char = '\u{E711}';
+    pub const INFO: char = '\u{E946}';
+    pub const ERROR: char = '\u{EA39}';
+    pub const PIN: char = '\u{E718}';
+
+    #[cfg(test)]
+    pub const ALL: &[(&str, char)] = &[
+        ("MUTE", MUTE),
+        ("VOL0", VOL0),
+        ("VOL1", VOL1),
+        ("VOL2", VOL2),
+        ("VOL3", VOL3),
+        ("MIC", MIC),
+        ("MIC_OFF", MIC_OFF),
+        ("REFRESH", REFRESH),
+        ("BACK", BACK),
+        ("SPEAKER", SPEAKER),
+        ("WARNING", WARNING),
+        ("CHECK", CHECK),
+        ("SOLO", SOLO),
+        ("CHEVRON_DOWN", CHEVRON_DOWN),
+        ("CHEVRON_UP", CHEVRON_UP),
+        ("CHEVRON_RIGHT", CHEVRON_RIGHT),
+        ("SEARCH", SEARCH),
+        ("CLEAR", CLEAR),
+        ("INFO", INFO),
+        ("ERROR", ERROR),
+        ("PIN", PIN),
+    ];
 
     pub fn volume(volume: f32, muted: bool) -> char {
         if muted {
@@ -61,10 +94,11 @@ pub fn focus_ring(ui: &Ui, rect: Rect, response: &Response, p: &Palette, radius:
         response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
     }
     if response.has_focus() {
+        let (expand, width) = if p.high_contrast { (2.0, 2.0) } else { (2.5, 2.5) };
         ui.painter().rect_stroke(
-            rect.expand(2.0),
+            rect.expand(expand),
             CornerRadius::same(radius),
-            Stroke::new(2.0, p.focus),
+            Stroke::new(width, p.focus),
             StrokeKind::Outside,
         );
     }
@@ -387,6 +421,126 @@ pub fn button(ui: &mut Ui, look: &Look, text: &str, kind: ButtonKind) -> Respons
         }
     }
     scroll_on_focus(ui.add(btn))
+}
+
+/// Disclosure header with a Fluent chevron icon when [`Look::icons`] is true.
+pub fn disclosure<R>(
+    ui: &mut Ui,
+    look: &Look,
+    title: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::CollapsingResponse<R> {
+    let header = egui::CollapsingHeader::new(
+        super::typography::rich(title, super::typography::Role::Body, look).color(look.p.text),
+    );
+    let header = if look.icons {
+        let color = look.p.text_muted;
+        header.icon(move |ui, openness, response| {
+            let g = if openness > 0.5 { glyph::CHEVRON_DOWN } else { glyph::CHEVRON_RIGHT };
+            ui.painter().text(response.rect.center(), Align2::CENTER_CENTER, g, icon_font(11.0), color);
+        })
+    } else {
+        header
+    };
+    let mut resp = header.show(ui, add_contents);
+    resp.header_response = scroll_on_focus(resp.header_response);
+    resp
+}
+
+/// Small chevron painter for `egui::ComboBox::icon` when [`Look::icons`] is true.
+pub fn combo_icon(look: &Look) -> impl FnOnce(&Ui, Rect, &egui::style::WidgetVisuals, bool) {
+    let color = look.p.text_muted;
+    move |ui, rect, _visuals, _open| {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph::CHEVRON_DOWN, icon_font(10.0), color);
+    }
+}
+
+/// Capsule search input with a leading search glyph; returns the `TextEdit` response.
+pub fn search_field(ui: &mut Ui, look: &Look, text: &mut String, hint: &str, width: f32) -> Response {
+    let height = 28.0;
+    let width = width.max(80.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let radius = (height * 0.5) as u8;
+    let p = &look.p;
+    ui.painter().rect_filled(rect, CornerRadius::same(radius), if p.high_contrast { p.surface } else { p.fill });
+    if p.high_contrast {
+        ui.painter().rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    }
+    let icon_space = if look.icons {
+        ui.painter().text(
+            pos2(rect.left() + 14.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            glyph::SEARCH,
+            icon_font(12.0),
+            p.text_muted,
+        );
+        26.0
+    } else {
+        10.0
+    };
+    let inner = Rect::from_min_max(
+        pos2(rect.left() + icon_space, rect.top() + 3.0),
+        pos2(rect.right() - 8.0, rect.bottom() - 3.0),
+    );
+    let mut child =
+        ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let edit = egui::TextEdit::singleline(text)
+        .frame(egui::Frame::NONE)
+        .hint_text(hint)
+        .desired_width(inner.width().max(40.0));
+    let response = scroll_on_focus(child.add(edit));
+    focus_ring(ui, rect, &response, p, radius);
+    response
+}
+
+/// Full-width option row with a trailing checkmark when `on`.
+pub fn check_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str) -> Response {
+    let p = &look.p;
+    let width = ui.available_width().max(80.0);
+    let text_w = (width - 32.0).max(40.0);
+    let mut job = egui::text::LayoutJob::default();
+    let enabled = ui.is_enabled();
+    let fg = if enabled { p.text } else { p.text_muted };
+    job.append(label, 0.0, super::typography::format(super::typography::Role::Body, fg, look));
+    job.wrap.max_width = text_w;
+    job.halign = egui::Align::LEFT;
+    let galley = ui.painter().layout_job(job);
+    let height = (galley.size().y + 10.0).max(28.0);
+    let (rect, mut response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if response.clicked() && enabled {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(look.m.control_radius), p.surface_hover);
+    }
+    painter.galley(pos2(rect.left() + 4.0, rect.center().y - galley.size().y * 0.5), galley, fg);
+    let check_pos = pos2(rect.right() - 12.0, rect.center().y);
+    if p.high_contrast {
+        let box_rect = Rect::from_center_size(check_pos, Vec2::splat(16.0));
+        painter.rect_stroke(box_rect, CornerRadius::same(3), Stroke::new(1.5, fg), StrokeKind::Inside);
+    }
+    if *on {
+        let mark_color = if enabled { p.accent } else { p.accent.gamma_multiply(0.45) };
+        if look.icons {
+            painter.text(check_pos, Align2::CENTER_CENTER, glyph::CHECK, icon_font(14.0), mark_color);
+        } else {
+            super::typography::paint(
+                painter,
+                check_pos,
+                Align2::CENTER_CENTER,
+                "✓",
+                super::typography::Role::CalloutStrong,
+                mark_color,
+                look,
+            );
+        }
+    }
+    focus_ring(ui, rect, &response, p, look.m.control_radius);
+    let (label_owned, selected) = (label.to_string(), *on);
+    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, selected, &label_owned));
+    response
 }
 
 /// A full-width settings row with a label (and optional description) and a switch.
@@ -717,5 +871,44 @@ mod tests {
                 "button '{label}' never received Tab focus: {seen_focused:?}"
             );
         }
+    }
+
+    #[test]
+    fn installed_icon_font_covers_every_glyph_constant() {
+        let h = Harness::new(crate::settings::Density::Comfortable);
+        if !h.look.icons {
+            return;
+        }
+        let mut missing = Vec::new();
+        h.run(240.0, 120.0, |ui| {
+            let font = icon_font(14.0);
+            ui.ctx().fonts_mut(|f| {
+                for &(name, ch) in glyph::ALL {
+                    let s = ch.to_string();
+                    if !f.has_glyphs(&font, &s) {
+                        missing.push((name, ch as u32));
+                    }
+                }
+            });
+        });
+        assert!(missing.is_empty(), "missing icon glyphs: {missing:X?}");
+    }
+
+    #[test]
+    fn check_row_toggles_with_space_and_exposes_state() {
+        let h = Harness::new(crate::settings::Density::Comfortable);
+        let look = &h.look;
+        let mut checked = false;
+        let _ = h.run(320.0, 120.0, |ui| {
+            check_row(ui, look, &mut checked, "Sample option");
+        });
+        let focused = h.send_key(320.0, 120.0, Key::Tab, egui::Modifiers::NONE, |ui| {
+            check_row(ui, look, &mut checked, "Sample option");
+        });
+        assert!(focused.widgets.iter().any(|w| w.focused && w.name == "Sample option"));
+        let _ = h.send_key(320.0, 120.0, Key::Space, egui::Modifiers::NONE, |ui| {
+            check_row(ui, look, &mut checked, "Sample option");
+        });
+        assert!(checked, "Space on focused check_row should toggle it on");
     }
 }
