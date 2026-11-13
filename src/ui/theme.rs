@@ -19,6 +19,16 @@ pub struct Palette {
     /// Opaque-enough fill for popups, inputs and the selected segment.
     pub surface_strong: Color32,
     pub border: Color32,
+    /// Hairlines inside grouped lists.
+    pub separator: Color32,
+    /// Recessed control background: slider track, toggle off, segmented trough, search field.
+    pub fill: Color32,
+    /// Selected segment pill surface.
+    pub raised: Color32,
+    /// Slider thumb and toggle knob fill.
+    pub knob: Color32,
+    /// Soft shadow under knobs, raised segments, and toasts.
+    pub shadow: Color32,
     pub text: Color32,
     pub text_muted: Color32,
     pub track: Color32,
@@ -66,6 +76,11 @@ pub fn palette(dark: bool, glass: bool, accent: Accent, high_contrast: bool) -> 
             surface_hover: hex(0x1a1a1a),
             surface_strong: hex(0x101010),
             border: Color32::WHITE,
+            separator: Color32::WHITE,
+            fill: hex(0x808080),
+            raised: accent,
+            knob: Color32::WHITE,
+            shadow: Color32::TRANSPARENT,
             text: Color32::WHITE,
             text_muted: hex(0xe0e0e0),
             track: hex(0x808080),
@@ -88,6 +103,11 @@ pub fn palette(dark: bool, glass: bool, accent: Accent, high_contrast: bool) -> 
             surface_hover: if glass { Color32::from_rgba_unmultiplied(255, 255, 255, 24) } else { hex(0x2d2d38) },
             surface_strong: hex(0x2b2b35),
             border: Color32::from_rgba_unmultiplied(255, 255, 255, if glass { 22 } else { 18 }),
+            separator: Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+            fill: Color32::from_rgba_unmultiplied(120, 120, 128, 92),
+            raised: Color32::from_rgb(99, 99, 102),
+            knob: Color32::WHITE,
+            shadow: Color32::from_rgba_unmultiplied(0, 0, 0, 90),
             text: hex(0xf4f4f8),
             text_muted: hex(0xb4b4c3),
             track: Color32::from_rgba_unmultiplied(255, 255, 255, 40),
@@ -96,7 +116,7 @@ pub fn palette(dark: bool, glass: bool, accent: Accent, high_contrast: bool) -> 
             on_accent: hex(0x101014),
             danger: hex(0xff8a8a),
             playing: hex(0x4ade80),
-            focus: hex(0xffffff),
+            focus: accent_c,
         }
     } else {
         Palette {
@@ -108,6 +128,11 @@ pub fn palette(dark: bool, glass: bool, accent: Accent, high_contrast: bool) -> 
             surface_hover: if glass { Color32::from_rgba_unmultiplied(255, 255, 255, 200) } else { hex(0xf7f7fb) },
             surface_strong: hex(0xffffff),
             border: Color32::from_rgba_unmultiplied(0, 0, 0, if glass { 20 } else { 24 }),
+            separator: Color32::from_rgba_unmultiplied(0, 0, 0, 26),
+            fill: Color32::from_rgba_unmultiplied(120, 120, 128, 51),
+            raised: Color32::WHITE,
+            knob: Color32::WHITE,
+            shadow: Color32::from_rgba_unmultiplied(0, 0, 0, 40),
             text: hex(0x16161d),
             text_muted: hex(0x52525e),
             track: Color32::from_rgba_unmultiplied(0, 0, 0, 34),
@@ -116,7 +141,7 @@ pub fn palette(dark: bool, glass: bool, accent: Accent, high_contrast: bool) -> 
             on_accent: hex(0xffffff),
             danger: hex(0xc81e1e),
             playing: hex(0x15803d),
-            focus: hex(0x16161d),
+            focus: accent_c,
         }
     }
 }
@@ -130,14 +155,17 @@ pub struct Metrics {
     pub icon: f32,
     pub button: f32,
     pub radius: u8,
+    pub control_radius: u8,
 }
 
 pub fn metrics(density: Density) -> Metrics {
     match density {
         Density::Comfortable => {
-            Metrics { pad: 14.0, gap: 10.0, row_height: 52.0, icon: 28.0, button: 32.0, radius: 10 }
+            Metrics { pad: 14.0, gap: 10.0, row_height: 52.0, icon: 28.0, button: 32.0, radius: 12, control_radius: 8 }
         }
-        Density::Compact => Metrics { pad: 10.0, gap: 6.0, row_height: 40.0, icon: 22.0, button: 28.0, radius: 8 },
+        Density::Compact => {
+            Metrics { pad: 10.0, gap: 6.0, row_height: 40.0, icon: 22.0, button: 28.0, radius: 10, control_radius: 7 }
+        }
     }
 }
 
@@ -159,10 +187,11 @@ pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
     style.spacing.interact_size = Vec2::new(40.0, m.button - 4.0);
     style.spacing.combo_height = 300.0;
     style.spacing.menu_margin = Margin::same(6);
+    style.spacing.scroll = egui::style::ScrollStyle::floating();
     style.interaction.selectable_labels = false;
 
     let r = CornerRadius::same(m.radius);
-    let small = CornerRadius::same(6);
+    let small = CornerRadius::same(m.control_radius);
     let mut v = if p.dark { Visuals::dark() } else { Visuals::light() };
     v.override_text_color = Some(p.text);
     v.weak_text_color = Some(p.text_muted);
@@ -171,9 +200,8 @@ pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
     v.window_stroke = Stroke::new(1.0, p.border);
     v.window_corner_radius = r;
     v.menu_corner_radius = r;
-    let shadow_color = Color32::from_black_alpha(if p.dark { 110 } else { 40 });
-    v.window_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: shadow_color };
-    v.popup_shadow = Shadow { offset: [0, 4], blur: 12, spread: 0, color: shadow_color };
+    v.window_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: p.shadow };
+    v.popup_shadow = Shadow { offset: [0, 4], blur: 12, spread: 0, color: p.shadow };
     v.extreme_bg_color = p.surface_strong;
     v.text_edit_bg_color = Some(p.surface);
     v.faint_bg_color = p.surface;
@@ -191,8 +219,8 @@ pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
     w.noninteractive.corner_radius = small;
     for (wv, fill, stroke) in [
         (&mut w.inactive, p.surface, p.border),
-        (&mut w.hovered, p.surface_hover, p.accent_soft),
-        (&mut w.active, p.surface_hover, p.accent),
+        (&mut w.hovered, p.surface_hover, p.border),
+        (&mut w.active, p.surface_hover, p.border),
         (&mut w.open, p.surface_hover, p.accent),
     ] {
         wv.bg_fill = fill;
@@ -207,4 +235,41 @@ pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
     // native title bar is themed through DWM in `platform::backdrop`.
     ctx.options_mut(|o| o.sync_window_theme = false);
     ctx.all_styles_mut(|s| *s = style.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relative_luminance(c: Color32) -> f32 {
+        let channel = |v: u8| {
+            let s = f32::from(v) / 255.0;
+            if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (l1, l2) = (relative_luminance(a), relative_luminance(b));
+        let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn palette_tokens_meet_wcag_contrast_thresholds() {
+        for dark in [true, false] {
+            for accent in Accent::ALL {
+                let p = palette(dark, false, accent, false);
+                let check = |name: &str, fg: Color32, bg: Color32, min: f32| {
+                    let ratio = contrast(fg, bg);
+                    assert!(ratio >= min, "dark={dark} {accent:?} {name}: {ratio:.2} < {min}");
+                };
+                check("text on base", p.text, p.base, 7.0);
+                check("text_muted on surface", p.text_muted, p.surface, 4.5);
+                check("text on raised", p.text, p.raised, 4.5);
+                check("accent on base", p.accent, p.base, 3.0);
+                check("on_accent on accent", p.on_accent, p.accent, 4.5);
+            }
+        }
+    }
 }
