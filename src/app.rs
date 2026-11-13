@@ -173,6 +173,7 @@ pub struct MixerApp {
     tray_rx: Receiver<TrayAction>,
     exit_listener: Option<ExitListener>,
     view: View,
+    view_shown: View,
     mixer: mixer::MixerState,
     login: LoginState,
     toasts: Vec<Toast>,
@@ -321,6 +322,7 @@ impl MixerApp {
             tray_rx,
             exit_listener,
             view: View::Mixer,
+            view_shown: View::Mixer,
             mixer: mixer::MixerState::default(),
             login: startup::state(),
             toasts,
@@ -971,71 +973,91 @@ impl eframe::App for MixerApp {
                 }
             }
             ui.add_space(look.m.gap);
-            match self.view {
-                View::Devices => {
-                    let mut cx = mixer::MixerCtx {
-                        audio: &self.audio,
-                        snap: &snapshot,
-                        meters: &meters,
-                        look: &look,
-                        settings: &mut self.settings,
-                        icons: &mut self.icons,
-                    };
-                    mixer::show_devices(ui, &mut self.mixer, &mut cx);
-                }
-                View::Mixer => {
-                    let mut cx = mixer::MixerCtx {
-                        audio: &self.audio,
-                        snap: &snapshot,
-                        meters: &meters,
-                        look: &look,
-                        settings: &mut self.settings,
-                        icons: &mut self.icons,
-                    };
-                    if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
-                        self.audio.send(crate::audio::Command::LoadDevices);
-                        self.view = View::Devices;
-                    }
-                }
-                View::Settings => {
-                    let glass = self.glass_status();
-                    let mut cx = settings_view::SettingsCtx {
-                        look: &look,
-                        settings: &mut self.settings,
-                        login: &mut self.login,
-                        glass,
-                        support: self.support,
-                        software_renderer: self.software_renderer,
-                        can_switch_default: snapshot.can_switch_default,
-                        can_route_apps: snapshot.can_route_apps,
-                        confirm_route_reset: &mut self.confirm_route_reset,
-                        transfer: &mut self.transfer_ui,
-                        audio: &self.audio,
-                        icons: &mut self.icons,
-                        settings_path: self.store.path(),
-                        hotkeys: self.hotkeys.as_ref(),
-                        hotkey_editor: &mut self.hotkey_editor,
-                        errors: &mut errors,
-                    };
-                    match settings_view::show(ui, &mut cx) {
-                        settings_view::Outcome::Back => self.view = View::Mixer,
-                        settings_view::Outcome::SaveDiagnostics => save_report = true,
-                        settings_view::Outcome::CopyDiagnostics => copy_report = true,
-                        settings_view::Outcome::ExportSettings => export_now = true,
-                        settings_view::Outcome::CheckImport => check_now = true,
-                        settings_view::Outcome::ApplyImport => import_now = true,
-                        settings_view::Outcome::None => {}
-                    }
-                }
-                View::Presets => crate::ui::presets::show(
-                    ui,
-                    &mut self.preset_editor,
-                    &mut self.settings,
-                    &snapshot,
-                    &self.audio,
-                    &mut errors,
-                ),
+            if self.view != self.view_shown {
+                let ease = theme::motion::ease;
+                ui.ctx().animate_bool_with_time_and_easing(
+                    egui::Id::new(("view", self.view_shown as u8)),
+                    false,
+                    0.0,
+                    ease,
+                );
+                ui.ctx().animate_bool_with_time_and_easing(egui::Id::new(("view", self.view as u8)), false, 0.0, ease);
+                self.view_shown = self.view;
             }
+            let view_t = ui.ctx().animate_bool_with_time_and_easing(
+                egui::Id::new(("view", self.view as u8)),
+                true,
+                theme::duration(ui, theme::motion::VIEW),
+                theme::motion::ease,
+            );
+            ui.scope(|ui| {
+                ui.multiply_opacity(view_t);
+                match self.view {
+                    View::Devices => {
+                        let mut cx = mixer::MixerCtx {
+                            audio: &self.audio,
+                            snap: &snapshot,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut self.settings,
+                            icons: &mut self.icons,
+                        };
+                        mixer::show_devices(ui, &mut self.mixer, &mut cx);
+                    }
+                    View::Mixer => {
+                        let mut cx = mixer::MixerCtx {
+                            audio: &self.audio,
+                            snap: &snapshot,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut self.settings,
+                            icons: &mut self.icons,
+                        };
+                        if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
+                            self.audio.send(crate::audio::Command::LoadDevices);
+                            self.view = View::Devices;
+                        }
+                    }
+                    View::Settings => {
+                        let glass = self.glass_status();
+                        let mut cx = settings_view::SettingsCtx {
+                            look: &look,
+                            settings: &mut self.settings,
+                            login: &mut self.login,
+                            glass,
+                            support: self.support,
+                            software_renderer: self.software_renderer,
+                            can_switch_default: snapshot.can_switch_default,
+                            can_route_apps: snapshot.can_route_apps,
+                            confirm_route_reset: &mut self.confirm_route_reset,
+                            transfer: &mut self.transfer_ui,
+                            audio: &self.audio,
+                            icons: &mut self.icons,
+                            settings_path: self.store.path(),
+                            hotkeys: self.hotkeys.as_ref(),
+                            hotkey_editor: &mut self.hotkey_editor,
+                            errors: &mut errors,
+                        };
+                        match settings_view::show(ui, &mut cx) {
+                            settings_view::Outcome::Back => self.view = View::Mixer,
+                            settings_view::Outcome::SaveDiagnostics => save_report = true,
+                            settings_view::Outcome::CopyDiagnostics => copy_report = true,
+                            settings_view::Outcome::ExportSettings => export_now = true,
+                            settings_view::Outcome::CheckImport => check_now = true,
+                            settings_view::Outcome::ApplyImport => import_now = true,
+                            settings_view::Outcome::None => {}
+                        }
+                    }
+                    View::Presets => crate::ui::presets::show(
+                        ui,
+                        &mut self.preset_editor,
+                        &mut self.settings,
+                        &snapshot,
+                        &self.audio,
+                        &mut errors,
+                    ),
+                }
+            });
         });
 
         if self.settings != before {
