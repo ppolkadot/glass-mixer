@@ -417,6 +417,9 @@ impl MixerApp {
             tracking: self.settings.typeface == crate::settings::Typeface::Polaris,
         };
         if self.style_key != Some(look) {
+            if let Some(h) = self.hwnd {
+                backdrop::set_border(h, self.support, &look.p);
+            }
             theme::apply(ctx, &look.p, &look.m, self.prefs.animations);
             self.style_key = Some(look);
         }
