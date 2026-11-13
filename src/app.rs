@@ -15,7 +15,7 @@ use crate::platform::window::{self, Hwnd};
 use crate::settings::{Backdrop, Settings, SettingsStore, ThemeMode, WindowGeometry};
 use crate::ui::{GlassStatus, Look, mixer, settings_view, theme};
 use crossbeam_channel::Receiver;
-use egui::{Align2, Color32, CornerRadius, Margin, RichText, ViewportCommand};
+use egui::{Align2, Color32, CornerRadius, Margin, ViewportCommand};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 
@@ -716,7 +716,8 @@ impl MixerApp {
         if self.toasts.is_empty() {
             return;
         }
-        let p = self.look.p;
+        let look = self.look;
+        let p = look.p;
         let mut dismiss = None;
         egui::Area::new(egui::Id::new("toasts"))
             .anchor(Align2::CENTER_BOTTOM, [0.0, -12.0])
@@ -734,27 +735,65 @@ impl MixerApp {
                         NoticeLevel::Warning => "Warning: ",
                         NoticeLevel::Error => "Error: ",
                     };
-                    let resp = egui::Frame::NONE
-                        .fill(p.surface_strong)
-                        .stroke(egui::Stroke::new(1.0, accent))
-                        .corner_radius(CornerRadius::same(10))
-                        .inner_margin(Margin::symmetric(12, 8))
-                        .shadow(egui::Shadow {
-                            offset: [0, 4],
-                            blur: 14,
-                            spread: 0,
-                            color: Color32::from_black_alpha(80),
-                        })
-                        .show(ui, |ui| {
-                            ui.set_width(336.0);
-                            ui.label(RichText::new(format!("{prefix}{}", t.text)).color(p.text));
-                        })
-                        .response
-                        .interact(egui::Sense::click())
-                        .on_hover_text("Click to dismiss");
-                    if resp.clicked() {
-                        dismiss = Some(i);
+                    let toast_id = egui::Id::new(("toast", t.text.as_str()));
+                    let seen_id = toast_id.with("seen");
+                    if !ui.ctx().data(|d| d.get_temp::<bool>(seen_id)).unwrap_or(false) {
+                        ui.ctx().data_mut(|d| d.insert_temp(seen_id, true));
+                        ui.ctx().animate_bool_with_time_and_easing(toast_id, false, 0.0, theme::motion::ease);
                     }
+                    let alpha = ui.ctx().animate_bool_with_time_and_easing(
+                        toast_id,
+                        true,
+                        theme::duration(ui, theme::motion::VIEW),
+                        theme::motion::ease,
+                    );
+                    ui.scope(|ui| {
+                        ui.multiply_opacity(alpha);
+                        let resp = egui::Frame::NONE
+                            .fill(p.surface_strong)
+                            .stroke(egui::Stroke::new(1.0, if p.high_contrast { accent } else { p.border }))
+                            .corner_radius(CornerRadius::same(14))
+                            .inner_margin(Margin::symmetric(12, 8))
+                            .shadow(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: p.shadow })
+                            .show(ui, |ui| {
+                                ui.set_width(336.0);
+                                ui.horizontal(|ui| {
+                                    if look.icons {
+                                        let glyph = match t.level {
+                                            NoticeLevel::Info => crate::ui::widgets::glyph::INFO,
+                                            NoticeLevel::Warning => crate::ui::widgets::glyph::WARNING,
+                                            NoticeLevel::Error => crate::ui::widgets::glyph::ERROR,
+                                        };
+                                        let (rect, _) =
+                                            ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::empty());
+                                        ui.painter().text(
+                                            rect.center(),
+                                            Align2::CENTER_CENTER,
+                                            glyph,
+                                            crate::ui::widgets::icon_font(15.0),
+                                            accent,
+                                        );
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            crate::ui::typography::rich(
+                                                format!("{prefix}{}", t.text),
+                                                crate::ui::typography::Role::Callout,
+                                                &look,
+                                            )
+                                            .color(p.text),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            })
+                            .response
+                            .interact(egui::Sense::click())
+                            .on_hover_text("Click to dismiss");
+                        if resp.clicked() {
+                            dismiss = Some(i);
+                        }
+                    });
                     ui.add_space(6.0);
                 }
             });
