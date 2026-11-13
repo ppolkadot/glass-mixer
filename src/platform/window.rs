@@ -5,9 +5,12 @@
 //! window, and `SetForegroundWindow` must run inside the tray click handler to be
 //! allowed by Windows' focus-stealing rules.
 
-use std::ffi::c_void;
+use std::{
+    ffi::c_void,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE, HWND, LPARAM, RECT,
+    CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -15,10 +18,12 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
     IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-    SetWindowPos, ShowWindow,
+    SetWindowPos, ShowWindow, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE,
+    WM_THEMECHANGED,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -208,6 +213,71 @@ pub fn activate_existing_instance() -> bool {
     }
 }
 
+const APPEARANCE_SUBCLASS_ID: usize = 0x474d_4150;
+
+struct WatchState {
+    dirty: AtomicBool,
+    ctx: egui::Context,
+    attached: AtomicBool,
+}
+
+/// Subclasses the main window to wake the UI immediately on Windows appearance
+/// or DPI change notifications (`WM_SETTINGCHANGE`, `WM_THEMECHANGED`,
+/// `WM_DWMCOLORIZATIONCOLORCHANGED`, `WM_DPICHANGED`).
+pub struct AppearanceWatch {
+    hwnd: Hwnd,
+    state: Box<WatchState>,
+}
+
+impl AppearanceWatch {
+    pub fn attach(hwnd: Hwnd, ctx: egui::Context) -> Option<Self> {
+        let state = Box::new(WatchState { dirty: AtomicBool::new(false), ctx, attached: AtomicBool::new(false) });
+        let data = (&*state as *const WatchState) as usize;
+        if unsafe { SetWindowSubclass(hwnd.get(), Some(appearance_subclass), APPEARANCE_SUBCLASS_ID, data) }.as_bool() {
+            state.attached.store(true, Ordering::Release);
+            Some(Self { hwnd, state })
+        } else {
+            None
+        }
+    }
+
+    pub fn take_changed(&self) -> bool {
+        self.state.dirty.swap(false, Ordering::AcqRel)
+    }
+}
+
+impl Drop for AppearanceWatch {
+    fn drop(&mut self) {
+        if self.state.attached.swap(false, Ordering::AcqRel) {
+            unsafe {
+                let _ = RemoveWindowSubclass(self.hwnd.get(), Some(appearance_subclass), APPEARANCE_SUBCLASS_ID);
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn appearance_subclass(
+    hwnd: HWND,
+    message: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _: usize,
+    data: usize,
+) -> LRESULT {
+    let state = unsafe { &*(data as *const WatchState) };
+    match message {
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DWMCOLORIZATIONCOLORCHANGED | WM_DPICHANGED => {
+            state.dirty.store(true, Ordering::Release);
+            state.ctx.request_repaint();
+        }
+        WM_NCDESTROY if state.attached.swap(false, Ordering::AcqRel) => unsafe {
+            let _ = RemoveWindowSubclass(hwnd, Some(appearance_subclass), APPEARANCE_SUBCLASS_ID);
+        },
+        _ => {}
+    }
+    unsafe { DefSubclassProc(hwnd, message, wp, lp) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +293,41 @@ mod tests {
     #[test]
     fn no_other_copy_of_the_test_binary_has_a_mixer_window() {
         assert!(instance_pids(&std::env::current_exe().unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn appearance_watch_marks_dirty_on_system_and_dpi_messages() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, HWND_MESSAGE, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE,
+        };
+        use windows::core::w;
+
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("appearance-watch-test"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                1,
+                1,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let watch =
+                AppearanceWatch::attach(Hwnd(hwnd.0 as isize), egui::Context::default()).expect("subclass must attach");
+            assert!(!watch.take_changed());
+            for msg in [WM_SETTINGCHANGE, WM_THEMECHANGED, WM_DWMCOLORIZATIONCOLORCHANGED, WM_DPICHANGED] {
+                let _ = SendMessageW(hwnd, msg, Some(WPARAM(0)), Some(LPARAM(0)));
+                assert!(watch.take_changed(), "message {msg:#x} must set dirty");
+                assert!(!watch.take_changed(), "take_changed must clear dirty");
+            }
+            drop(watch);
+            DestroyWindow(hwnd).unwrap();
+        }
     }
 }

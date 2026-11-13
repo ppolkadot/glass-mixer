@@ -21,7 +21,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
-const PREFS_INTERVAL: Duration = Duration::from_secs(2);
+const PREFS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Meters repaint the window on every change. A software renderer rasterizes
 /// each frame on the CPU, so at meter rates the controls themselves would lag.
@@ -170,6 +170,7 @@ pub struct MixerApp {
     applied: Option<Applied>,
     backdrop_rejection: BackdropRejection,
     hwnd: Option<Hwnd>,
+    appearance_watch: Option<window::AppearanceWatch>,
     tray: Option<Tray>,
     tray_rx: Receiver<TrayAction>,
     exit_listener: Option<ExitListener>,
@@ -319,6 +320,7 @@ impl MixerApp {
             applied: None,
             backdrop_rejection: BackdropRejection::default(),
             hwnd,
+            appearance_watch: hwnd.and_then(|h| window::AppearanceWatch::attach(h, ctx.clone())),
             tray,
             tray_rx,
             exit_listener,
@@ -681,6 +683,7 @@ impl MixerApp {
         {
             log::error!("saving settings on exit failed: {e}");
         }
+        self.appearance_watch = None;
         self.tray = None;
         self.hotkeys = None;
         self.foreground = None;
@@ -951,7 +954,8 @@ impl eframe::App for MixerApp {
         }
 
         if shown {
-            if self.prefs_checked.elapsed() >= PREFS_INTERVAL {
+            let notified = self.appearance_watch.as_ref().is_some_and(window::AppearanceWatch::take_changed);
+            if notified || self.prefs_checked.elapsed() >= PREFS_INTERVAL {
                 self.prefs_checked = Instant::now();
                 let prefs = SystemPrefs::read();
                 if prefs != self.prefs {
@@ -959,8 +963,7 @@ impl eframe::App for MixerApp {
                     self.prefs = prefs;
                 }
             }
-            // Windows doesn't notify eframe of theme or transparency changes, so
-            // re-read them while visible.
+            // Win32 appearance/DPI messages trigger an immediate repaint; keep a slow fallback timer.
             ctx.request_repaint_after(PREFS_INTERVAL);
         }
         self.track_window(ctx, shown);
