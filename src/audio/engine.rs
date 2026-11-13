@@ -1319,16 +1319,27 @@ impl Engine {
             }
             let mut route = Route::Unknown;
             for process in self.processes_of(&app.key) {
-                let known = self.routes.entry(process).or_insert_with(|| match routing.get(process.0, Flow::Output) {
-                    Ok(Some(id)) => Route::Device(id),
-                    Ok(None) => Route::SystemDefault,
-                    Err(e) => {
-                        log::debug!("couldn't read the device preference of process {}: {e}", process.0);
-                        Route::Unknown
+                let known = if let Some(cached) = self.routes.get(&process) {
+                    cached.clone()
+                } else {
+                    match routing.get(process.0, Flow::Output) {
+                        Ok(Some(id)) => {
+                            let r = Route::Device(id);
+                            self.routes.insert(process, r.clone());
+                            r
+                        }
+                        Ok(None) => {
+                            self.routes.insert(process, Route::SystemDefault);
+                            Route::SystemDefault
+                        }
+                        Err(e) => {
+                            log::debug!("couldn't read the device preference of process {}: {e}", process.0);
+                            Route::Unknown
+                        }
                     }
-                });
-                if *known != Route::Unknown {
-                    route = known.clone();
+                };
+                if known != Route::Unknown {
+                    route = known;
                     break;
                 }
             }
