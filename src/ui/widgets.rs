@@ -420,7 +420,7 @@ pub fn segmented<T: PartialEq + Copy>(
         } else {
             p.text_muted
         };
-        let font = if selected { semibold(13.0) } else { FontId::proportional(13.0) };
+        let font = semibold(13.0);
         painter.text(seg.center(), Align2::CENTER_CENTER, *label, font, color);
         focus_ring(ui, seg, &response, p, 6);
         let label_owned = label.to_string();

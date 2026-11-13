@@ -90,7 +90,7 @@ fn private_names(i: &Inputs) -> Vec<(String, &'static str)> {
         add(&profile.name, "<profile>");
         for entry in &profile.entries {
             add(&entry.name, "<app>");
-            if let Some(device) = &entry.output {
+            if let Some(device) = entry.output.as_ref().and_then(|route| route.device()) {
                 add(&device.name, "<device>");
             }
         }
@@ -140,6 +140,27 @@ fn redact(text: &str, names: &[(String, &'static str)], profile: Option<&str>) -
         out = replace_ignoring_case(&out, name, placeholder);
     }
     out
+}
+
+/// Historical messages can name apps/devices that are no longer in the snapshot.
+/// Share their severity and Windows error codes, never their free-form contents.
+fn historical_detail(text: &str) -> String {
+    let severity = ["[ERROR]", "[WARN]", "[INFO]", "[DEBUG]", "[TRACE]"]
+        .into_iter()
+        .find(|level| text.contains(level))
+        .unwrap_or("");
+    let codes: Vec<&str> = text
+        .match_indices("0x")
+        .filter_map(|(at, _)| {
+            let code = text.get(at..at + 10)?;
+            code[2..].bytes().all(|b| b.is_ascii_hexdigit()).then_some(code)
+        })
+        .collect();
+    let mut summary = format!("{severity} Event details omitted for privacy").trim_start().to_owned();
+    if !codes.is_empty() {
+        summary.push_str(&format!(" (Windows errors: {})", codes.join(", ")));
+    }
+    summary
 }
 
 /// UTC date and time from Unix seconds (proleptic Gregorian calendar).
@@ -308,7 +329,7 @@ fn build_with_profile(i: &Inputs, profile: Option<&str>) -> String {
             NoticeLevel::Warning => "warning",
             NoticeLevel::Error => "error",
         };
-        line(format!("[{level}] {}", hide(&n.text)));
+        line(format!("[{level}] {}", historical_detail(&n.text)));
     }
 
     line(String::new());
@@ -317,7 +338,7 @@ fn build_with_profile(i: &Inputs, profile: Option<&str>) -> String {
         line("no log available".into());
     }
     for l in i.log_tail {
-        line(hide(l));
+        line(historical_detail(l));
     }
     out
 }
@@ -451,6 +472,38 @@ mod tests {
     }
 
     #[test]
+    fn historical_names_and_paths_are_not_in_shared_reports() {
+        let settings = Settings::default();
+        let snapshot = AudioSnapshot::default();
+        let notices = [RecentNotice {
+            level: NoticeLevel::Warning,
+            text: "Alice Private Hearing Aid disconnected (0x88890004)".into(),
+        }];
+        let log = vec![
+            r#"[INFO] solo started for Exe("d:\\Private Client\\secret.exe")"#.into(),
+            "[INFO] Output switched to Alice Private Hearing Aid".into(),
+        ];
+        let report = build_with_profile(
+            &Inputs {
+                settings: &settings,
+                snapshot: &snapshot,
+                prefs: &prefs(),
+                renderer: "OpenGL",
+                software_renderer: false,
+                hotkeys: None,
+                notices: &notices,
+                log_tail: &log,
+                unix_seconds: 0,
+            },
+            None,
+        );
+        for private in ["Alice", "Private", "secret.exe"] {
+            assert!(!report.contains(private), "{private} leaked into {report}");
+        }
+        assert!(report.contains("0x88890004"), "Windows error codes remain useful");
+    }
+
+    #[test]
     fn the_report_has_the_facts_and_none_of_the_private_names() {
         let mut settings = Settings::default();
         settings.pinned_apps.push(
@@ -523,10 +576,10 @@ mod tests {
             "App rows: 2",
             "Pinned apps: 1; renamed apps: 1; pinned outputs: 0; profiles: 1",
             "AppMute (Ctrl+Alt+1): Windows could not register this shortcut",
-            "[error] Couldn't change the device of <app>",
+            "[error] Event details omitted for privacy",
             "Device read errors: 1",
             "<device>: Device unavailable: 0x88890004",
-            "profile <profile> applied from %USERPROFILE%\\AppData",
+            "[INFO] Event details omitted for privacy",
         ] {
             assert!(report.contains(expected), "missing {expected:?} in:\n{report}");
         }

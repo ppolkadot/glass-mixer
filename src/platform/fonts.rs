@@ -15,7 +15,7 @@ pub const ICONS: &str = "icons";
 
 /// Embedded unmodified; its license (`assets/fonts/LICENSE.txt`) ships with every package.
 static POLARIS_REGULAR: &[u8] = include_bytes!("../../assets/fonts/SaltedFluttersPolaris-Regular.otf");
-static POLARIS_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/SaltedFluttersPolaris-Semibold.otf");
+pub(super) static POLARIS_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/SaltedFluttersPolaris-Semibold.otf");
 
 /// Fonts read from the Windows Fonts folder; any of them can be missing.
 #[derive(Default)]

@@ -907,12 +907,13 @@ impl eframe::App for MixerApp {
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.view, View::Mixer, "Mixer");
-                if ui.selectable_value(&mut self.view, View::Devices, "Devices").clicked() {
+                let menu_text = |text| RichText::new(text).font(crate::ui::widgets::semibold(14.0));
+                ui.selectable_value(&mut self.view, View::Mixer, menu_text("Mixer"));
+                if ui.selectable_value(&mut self.view, View::Devices, menu_text("Devices")).clicked() {
                     self.audio.send(crate::audio::Command::LoadDevices);
                 }
-                ui.selectable_value(&mut self.view, View::Presets, "Presets");
-                if ui.selectable_value(&mut self.view, View::Settings, "Settings").clicked() {
+                ui.selectable_value(&mut self.view, View::Presets, menu_text("Presets"));
+                if ui.selectable_value(&mut self.view, View::Settings, menu_text("Settings")).clicked() {
                     // Task Manager can change the launch-at-login state behind our back.
                     self.login = startup::state();
                 }

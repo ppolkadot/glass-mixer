@@ -11,6 +11,7 @@ pub mod single_instance;
 pub mod startup;
 pub mod sysprefs;
 pub mod tray;
+mod tray_menu;
 pub mod window;
 
 use windows::core::HSTRING;

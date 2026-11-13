@@ -1138,9 +1138,11 @@ impl Engine {
             if self.processes_of(&entry.key).is_empty() {
                 continue;
             }
-            if !self.outputs.iter().any(|d| d.id.eq_ignore_ascii_case(&device.id)) {
-                outcome.notes.push(format!("{} isn't connected for {}", device.name, entry.name));
-            } else if let Err(e) = self.route_app(&entry.key, Some(&device.id)) {
+            if let Some(choice) = device.device()
+                && !self.outputs.iter().any(|d| d.id.eq_ignore_ascii_case(&choice.id))
+            {
+                outcome.notes.push(format!("{} isn't connected for {}", choice.name, entry.name));
+            } else if let Err(e) = self.route_app(&entry.key, device.device().map(|d| d.id.as_str())) {
                 outcome.notes.push(format!("{}'s device ({e})", entry.name));
             }
         }
@@ -1374,16 +1376,11 @@ impl Engine {
                 Err(e) if is_fatal(e.code()) => return Err(e),
                 Err(e) => {
                     log::debug!("couldn't read {} for a reduction: {e}", s.name);
-                    continue;
-                }
-            };
-            if let Some(target) = self.reductions.ledger.reconcile(&s.instance_id, current, wanted)
-                && let Err(e) = write_level(s, target)
-            {
-                if is_fatal(e.code()) {
                     return Err(e);
                 }
-                log::warn!("couldn't change {} for a reduction: {e}", s.name);
+            };
+            if let Some(target) = self.reductions.ledger.reconcile(&s.instance_id, current, wanted) {
+                write_reduction(&mut self.reductions.ledger, s, current, target, wanted.is_none())?;
             }
         }
         let sessions = &self.sessions;
@@ -1638,7 +1635,7 @@ fn release_in(ledger: &mut Ledger, sets: &[&SessionSet]) {
         };
         let current = Level { volume, muted: muted.as_bool() };
         if let Some(base) = ledger.reconcile(&s.instance_id, current, None)
-            && write_level(s, base).is_err()
+            && write_reduction(ledger, s, current, base, true).is_err()
         {
             failed += 1;
         }
@@ -1648,10 +1645,22 @@ fn release_in(ledger: &mut Ledger, sets: &[&SessionSet]) {
     }
 }
 
-fn write_level(session: &Session, level: Level) -> WinResult<()> {
+fn write_reduction(
+    ledger: &mut Ledger,
+    session: &Session,
+    current: Level,
+    level: Level,
+    restoring: bool,
+) -> WinResult<()> {
     unsafe {
         session.simple.SetMasterVolume(level.volume, &OWN_EVENT_CONTEXT)?;
-        session.simple.SetMute(level.muted, &OWN_EVENT_CONTEXT)
+        ledger.record_written(&session.instance_id, Level { volume: level.volume, muted: current.muted });
+        session.simple.SetMute(level.muted, &OWN_EVENT_CONTEXT)?;
+        ledger.record_written(&session.instance_id, level);
+        if restoring {
+            ledger.finish_restore(&session.instance_id);
+        }
+        Ok(())
     }
 }
 

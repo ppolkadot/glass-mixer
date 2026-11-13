@@ -224,9 +224,37 @@ pub struct PresetEntry {
     pub name: String,
     pub volume: f32,
     pub muted: bool,
-    /// The output device to set for the app; `None` leaves its device alone.
+    /// The app's output choice, including system default; `None` leaves it alone.
     #[serde(default, deserialize_with = "read_optional", skip_serializing_if = "Option::is_none")]
-    pub output: Option<DeviceChoice>,
+    pub output: Option<AppOutput>,
+}
+
+/// Missing means leave unchanged; an explicit default resets the app's route.
+/// Device objects retain the representation used by older profiles.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AppOutput {
+    Device(DeviceChoice),
+    Default(SystemDefault),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SystemDefault {
+    #[serde(rename = "system_default")]
+    Follow,
+}
+
+impl AppOutput {
+    pub fn device(&self) -> Option<&DeviceChoice> {
+        match self {
+            Self::Device(device) => Some(device),
+            Self::Default(_) => None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        self.device().map_or("System default", |device| device.name.as_str())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -264,7 +292,7 @@ pub struct VolumePreset {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CaptureParts {
     pub apps: bool,
-    /// Each saved app's own output device, when it isn't the system default.
+    /// Each saved app's output choice, including following the system default.
     pub app_devices: bool,
     pub master: bool,
     pub output_device: bool,
@@ -322,10 +350,14 @@ impl VolumePreset {
         if parts.apps && parts.app_devices {
             for entry in &mut profile.entries {
                 let route = snapshot.apps.iter().find(|a| normalized_key(&a.key).as_ref() == Some(&entry.key));
-                if let Some(super::Route::Device(id)) = route.map(|a| &a.route) {
-                    let name = snapshot.outputs.iter().find(|d| &d.id == id).map_or("Saved device", |d| &d.name);
-                    entry.output = Some(DeviceChoice { id: id.clone(), name: name.to_owned() });
-                }
+                entry.output = match route.map(|a| &a.route) {
+                    Some(super::Route::Device(id)) => {
+                        let name = snapshot.outputs.iter().find(|d| &d.id == id).map_or("Saved device", |d| &d.name);
+                        Some(AppOutput::Device(DeviceChoice { id: id.clone(), name: name.to_owned() }))
+                    }
+                    Some(super::Route::SystemDefault) => Some(AppOutput::Default(SystemDefault::Follow)),
+                    _ => None,
+                };
             }
         }
         if parts.master {
@@ -924,7 +956,10 @@ mod tests {
         let all = CaptureParts { apps: true, app_devices: true, master: true, output_device: true, input_device: true };
         let full = VolumePreset::capture_profile("Full", &snapshot, all);
         assert_eq!(full.entries.len(), 1);
-        assert_eq!(full.entries[0].output, Some(DeviceChoice { id: "tv".into(), name: "TV".into() }));
+        assert_eq!(
+            full.entries[0].output,
+            Some(AppOutput::Device(DeviceChoice { id: "tv".into(), name: "TV".into() }))
+        );
         let levels_only =
             VolumePreset::capture_profile("L", &snapshot, CaptureParts { apps: true, ..Default::default() });
         assert_eq!(levels_only.entries[0].output, None, "an app's device is saved only when asked for");
@@ -934,6 +969,27 @@ mod tests {
         let devices =
             VolumePreset::capture_profile("D", &snapshot, CaptureParts { output_device: true, ..Default::default() });
         assert!(devices.entries.is_empty() && devices.master.is_none() && !devices.is_empty());
+    }
+
+    #[test]
+    fn app_device_capture_keeps_an_explicit_system_default_choice() {
+        let app = PinnedApp { key: exe("a.exe"), name: "A".into(), exe_path: None, aumid: None }.placeholder();
+        let snapshot = super::super::AudioSnapshot { apps: vec![app], ..Default::default() };
+        let profile = VolumePreset::capture_profile(
+            "Default",
+            &snapshot,
+            CaptureParts { apps: true, app_devices: true, ..Default::default() },
+        );
+        assert!(profile.entries[0].output.is_some(), "System default is a saved route, not leave unchanged");
+        assert_eq!(profile.entries[0].output, Some(AppOutput::Default(SystemDefault::Follow)));
+        let serialized = serde_json::to_string(&profile).unwrap();
+        assert!(serialized.contains(r#""output":"system_default""#));
+        assert_eq!(serde_json::from_str::<VolumePreset>(&serialized).unwrap(), profile);
+        let old: PresetEntry = serde_json::from_str(
+            r#"{"key":{"exe":"a.exe"},"name":"A","volume":0.5,"muted":false,"output":{"id":"tv","name":"TV"}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.output.unwrap().device().unwrap().id, "tv", "older device objects still load");
     }
 
     #[test]

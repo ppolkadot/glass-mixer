@@ -93,7 +93,9 @@ To build it yourself, see [Build from source](#build-from-source).
   anything is replaced.
 - A diagnostic report (Settings > About) for bug reports. It hides app, device
   and profile names and your user folder, is made on your PC and is never sent
-  anywhere.
+  anywhere. Historical log and notice text is omitted; severity and Windows
+  error codes remain available without exposing names of apps or devices that
+  are no longer connected.
 
 **Accessibility**
 

@@ -14,6 +14,7 @@ use crate::{
 use serde_json::Value;
 use std::{
     io,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -95,16 +96,7 @@ pub fn import(bytes: &[u8]) -> Result<Import, String> {
             continue;
         }
         let Some(read) = kept.get(field) else { continue }; // not a setting this version knows
-        match (wanted, read) {
-            (Value::Array(wanted), Value::Array(read)) if wanted.len() != read.len() => {
-                notes.push(format!("{field}: {} of {} entries could be read.", read.len(), wanted.len()));
-            }
-            (Value::Array(_), Value::Array(_)) => {}
-            _ if differs(wanted, read) => {
-                notes.push(format!("{field}: the value isn't valid, so the default is used."));
-            }
-            _ => {}
-        }
+        import_notes(field, wanted, read, &mut notes);
     }
     settings.version = SETTINGS_VERSION;
     settings.window = None;
@@ -126,15 +118,25 @@ pub fn read_import_file(path: &Path) -> Result<Import, String> {
     import(&bytes)
 }
 
-/// Whether a value that was read back differs from what the file said, comparing
-/// only what the file mentions (a field it leaves out gets its default, which is fine).
-fn differs(wanted: &Value, read: &Value) -> bool {
+/// Reports discarded or adjusted values at every nesting level, comparing only
+/// fields the file mentions (an omitted field gets its default).
+fn import_notes(path: &str, wanted: &Value, read: &Value, notes: &mut Vec<String>) {
     match (wanted, read) {
         (Value::Object(wanted), Value::Object(read)) => {
-            wanted.iter().any(|(key, value)| read.get(key).is_some_and(|other| differs(value, other)))
+            for (key, value) in wanted {
+                import_notes(&format!("{path}.{key}"), value, read.get(key).unwrap_or(&Value::Null), notes);
+            }
         }
-        (Value::Array(wanted), Value::Array(read)) => wanted.len() != read.len(),
-        _ => wanted != read,
+        (Value::Array(wanted), Value::Array(read)) if wanted.len() != read.len() => {
+            notes.push(format!("{path}: {} of {} entries could be read.", read.len(), wanted.len()));
+        }
+        (Value::Array(wanted), Value::Array(read)) => {
+            for (index, (wanted, read)) in wanted.iter().zip(read).enumerate() {
+                import_notes(&format!("{path}[{index}]"), wanted, read, notes);
+            }
+        }
+        _ if wanted != read => notes.push(format!("{path}: the value isn't valid, so it was adjusted or omitted.")),
+        _ => {}
     }
 }
 
@@ -182,8 +184,42 @@ fn file_name(prefix: &str, unix_seconds: u64) -> String {
 /// the newest [`KEEP_BACKUPS`]; exports the user asked for are never deleted.
 pub fn save(dir: &Path, prefix: &str, unix_seconds: u64, text: &str) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(file_name(prefix, unix_seconds));
-    std::fs::write(&path, text)?;
+    let name = file_name(prefix, unix_seconds);
+    let stem = name.trim_end_matches(".json");
+    // Pruning can remove the original unsuffixed name. Continue after the
+    // surviving suffixes so a new backup is never sorted as the oldest one.
+    let mut suffix = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let existing = entry.file_name();
+        let Some(tail) = existing.to_str().and_then(|n| n.strip_suffix(".json")).and_then(|n| n.strip_prefix(stem))
+        else {
+            continue;
+        };
+        let index = if tail.is_empty() { Some(0) } else { tail.strip_prefix('-').and_then(|n| n.parse::<u64>().ok()) };
+        if let Some(index) = index {
+            suffix = suffix.max(
+                index
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "No backup filename available"))?,
+            );
+        }
+    }
+    let (path, mut file) = loop {
+        let name = if suffix == 0 { name.clone() } else { format!("{stem}-{suffix:020}.json") };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => break (path, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => suffix = suffix.checked_add(1).ok_or(e)?,
+            Err(e) => return Err(e),
+        }
+    };
+    if let Err(e) = file.write_all(text.as_bytes()).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    drop(file);
     if prefix == BACKUP_PREFIX {
         let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
             .filter_map(Result::ok)
@@ -194,7 +230,7 @@ pub fn save(dir: &Path, prefix: &str, unix_seconds: u64, text: &str) -> io::Resu
                     .is_some_and(|n| n.starts_with(BACKUP_PREFIX) && n.ends_with(".json"))
             })
             .collect();
-        backups.sort();
+        backups.sort_by_key(|p| p.file_stem().map(|s| s.to_owned()));
         let excess = backups.len().saturating_sub(KEEP_BACKUPS);
         for old in &backups[..excess] {
             let _ = std::fs::remove_file(old);
@@ -313,7 +349,7 @@ mod tests {
         assert!(notes.contains("wheel_step: the value isn't valid"), "{notes}");
         assert!(notes.contains("typeface: the value isn't valid"), "{notes}");
         assert!(notes.contains("pinned_apps: 2 of 3 entries could be read"), "{notes}");
-        assert!(notes.contains("solo: the value isn't valid"), "{notes}");
+        assert!(notes.contains("solo.keep_percent: the value isn't valid"), "{notes}");
         assert!(
             !notes.contains("theme") && !notes.contains("window"),
             "valid and machine fields aren't flagged: {notes}"
@@ -386,5 +422,48 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("1 pinned app(s), 1 renamed app(s), 1 pinned output(s)"), "{lines:?}");
         assert!(lines[1].starts_with("1 profile(s)"), "{lines:?}");
+    }
+
+    #[test]
+    fn saves_in_the_same_second_preserve_each_backup_and_export() {
+        let dir = temp_dir("collisions");
+        for prefix in [BACKUP_PREFIX, EXPORT_PREFIX] {
+            let a = save(&dir, prefix, 1_700_000_000, "first").unwrap();
+            let b = save(&dir, prefix, 1_700_000_000, "second").unwrap();
+            assert_ne!(a, b);
+            assert_eq!(std::fs::read_to_string(a).unwrap(), "first");
+            assert_eq!(std::fs::read_to_string(b).unwrap(), "second");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn imports_report_invalid_nested_profile_parts_even_when_the_profile_survives() {
+        let imported = import(
+            br#"{"version":4,"presets":[{"name":"Night","entries":[],"master":{"volume":"loud","muted":false}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(imported.settings.presets.len(), 1);
+        assert!(imported.settings.presets[0].master.is_none());
+        assert!(imported.notes.iter().any(|note| note.contains("presets[0].master")), "{:?}", imported.notes);
+    }
+
+    #[test]
+    fn pruning_same_second_backups_never_removes_the_just_saved_backup() {
+        let dir = temp_dir("collision-retention");
+        let mut saved = Vec::new();
+        for n in 0..KEEP_BACKUPS + 4 {
+            let path = save(&dir, BACKUP_PREFIX, 1_700_000_000, &n.to_string()).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), n.to_string());
+            saved.push(path);
+        }
+        for (n, path) in saved.iter().enumerate() {
+            if n < saved.len() - KEEP_BACKUPS {
+                assert!(!path.exists());
+            } else {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), n.to_string());
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

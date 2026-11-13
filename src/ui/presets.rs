@@ -303,7 +303,7 @@ fn profile_card(
                 entry.name,
                 crate::audio::to_percent(entry.volume),
                 if entry.muted { ", muted" } else { "" },
-                entry.output.as_ref().map_or(String::new(), |d| format!(", on {}", d.name))
+                entry.output.as_ref().map_or(String::new(), |d| format!(", on {}", d.name()))
             );
             row(ui, level, Action::RemoveEntry(index, e));
         }

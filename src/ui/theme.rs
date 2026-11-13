@@ -146,7 +146,7 @@ pub fn apply(ctx: &egui::Context, p: &Palette, m: &Metrics, animations: bool) {
         text_styles: [
             (TextStyle::Heading, FontId::new(17.0, FontFamily::Name(crate::platform::fonts::SEMIBOLD.into()))),
             (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+            (TextStyle::Button, FontId::new(14.0, FontFamily::Name(crate::platform::fonts::SEMIBOLD.into()))),
             (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
             (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
         ]
