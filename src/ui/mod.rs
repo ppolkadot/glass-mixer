@@ -1,5 +1,6 @@
 //! User interface: design system, widgets and views.
 
+pub mod hotkey_editor;
 pub mod mixer;
 pub mod presets;
 pub mod settings_view;

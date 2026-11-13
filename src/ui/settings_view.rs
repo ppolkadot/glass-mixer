@@ -7,10 +7,11 @@ use super::{
 };
 use crate::audio::{AudioHandle, Command};
 use crate::platform::backdrop::Support;
-use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
+use crate::platform::hotkeys::HotkeyService;
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode, Typeface};
+use crate::ui::hotkey_editor::HotkeyEditor;
 use egui::{Align, Align2, Key, Layout, Sense, Stroke, Ui, Vec2, ViewportCommand};
 use std::path::Path;
 
