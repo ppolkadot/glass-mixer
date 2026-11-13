@@ -62,7 +62,7 @@ pub struct Tray {
     normal: Icon,
     muted: Icon,
     last_tooltip: String,
-    last_muted: Option<bool>,
+    last_state: Option<(bool, bool)>,
     notices: NoticeGate,
     guid: u128,
 }
@@ -120,7 +120,7 @@ impl Tray {
             normal,
             muted,
             last_tooltip: String::new(),
-            last_muted: None,
+            last_state: None,
             notices: NoticeGate::default(),
             guid,
         })
@@ -171,11 +171,14 @@ impl Tray {
             self.last_tooltip = tooltip;
         }
         let muted = snapshot.output.as_ref().is_some_and(|o| o.muted);
-        self.menu.update(muted, snapshot.output.is_some());
-        if self.last_muted != Some(muted) {
-            let icon = if muted { self.muted.clone() } else { self.normal.clone() };
-            let _ = self.icon.set_icon(Some(icon));
-            self.last_muted = Some(muted);
+        let enabled = snapshot.output.is_some();
+        if self.last_state != Some((muted, enabled)) {
+            self.menu.update(muted, enabled);
+            if self.last_state.is_none_or(|(was_muted, _)| was_muted != muted) {
+                let icon = if muted { self.muted.clone() } else { self.normal.clone() };
+                let _ = self.icon.set_icon(Some(icon));
+            }
+            self.last_state = Some((muted, enabled));
         }
     }
 }
