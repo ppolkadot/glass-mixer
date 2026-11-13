@@ -8,6 +8,10 @@ on:
   push:
     branches: [main, experiments, 'codex/**']
   pull_request:
+  schedule:
+    # Weekly on Mondays at 06:00 UTC, so newly disclosed RustSec advisories
+    # are caught even when the repository has had no pushes that week.
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -29,6 +33,7 @@ jobs:
   # docs/TESTING.md.
   windows:
     name: Windows (${{ matrix.os }})
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -99,6 +104,7 @@ jobs:
 
   # The oldest Rust that Cargo.toml's `rust-version` promises must still build it.
   msrv:
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
