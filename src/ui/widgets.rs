@@ -78,10 +78,6 @@ pub fn icon_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(ICONS.into()))
 }
 
-pub fn semibold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
-}
-
 pub fn scroll_on_focus(response: Response) -> Response {
     if response.gained_focus() {
         response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
@@ -772,7 +768,13 @@ pub fn fallback_tile(ui: &Ui, rect: Rect, name: &str, look: &Look, glyph_char: O
                 .find(|c| c.is_alphanumeric())
                 .map(|c| c.to_uppercase().collect())
                 .unwrap_or_else(|| "?".into());
-            painter.text(rect.center(), Align2::CENTER_CENTER, initial, semibold(rect.width() * 0.5), Color32::WHITE);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                initial,
+                FontId::new(rect.width() * 0.5, FontFamily::Name(SEMIBOLD.into())),
+                Color32::WHITE,
+            );
         }
     }
 }

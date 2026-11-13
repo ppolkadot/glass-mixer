@@ -85,7 +85,14 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
                     &cx.settings.presets,
                     &cx.settings.hotkeys,
                 );
-                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service, &slots);
+                cx.hotkey_editor.show(
+                    ui,
+                    &look,
+                    &mut cx.settings.hotkeys,
+                    &mut cx.settings.hotkey_step,
+                    service,
+                    &slots,
+                );
             } else {
                 ui.label(
                     typography::rich("Global shortcuts are unavailable in this session.", Role::Footnote, &look)
