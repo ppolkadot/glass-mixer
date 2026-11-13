@@ -651,10 +651,13 @@ impl MixerApp {
         if !shown {
             return;
         }
-        let rects = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
-        let outer_pos = rects.0.zip(self.hwnd).and_then(|(_, h)| window::outer_position(h));
-        let inner_size = rects.1.map(|inner| (inner.width(), inner.height()));
-        if record_window_geometry(&mut self.settings, shown, outer_pos, inner_size) {
+        let (outer, inner, maximized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.maximized.unwrap_or(false))
+        });
+        let outer_pos = outer.zip(self.hwnd).and_then(|(_, h)| window::outer_position(h));
+        let inner_size = inner.map(|inner| (inner.width(), inner.height()));
+        if record_window_geometry(&mut self.settings, shown, maximized, outer_pos, inner_size) {
             self.mark_dirty();
         }
     }
@@ -748,10 +751,11 @@ fn send_audio_preferences(audio: &AudioHandle, settings: &Settings) {
 fn record_window_geometry(
     settings: &mut Settings,
     shown: bool,
+    maximized: bool,
     outer_pos: Option<(f32, f32)>,
     inner_size: Option<(f32, f32)>,
 ) -> bool {
-    if !shown {
+    if !shown || maximized {
         return false;
     }
     let (Some((x, y)), Some((width, height))) = (outer_pos, inner_size) else {
@@ -1133,24 +1137,28 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !record_window_geometry(&mut settings, false, Some((200.0, 220.0)), Some((480.0, 720.0))),
+            !record_window_geometry(&mut settings, false, false, Some((200.0, 220.0)), Some((480.0, 720.0))),
             "hidden windows must not overwrite saved geometry"
         );
         assert!(
-            !record_window_geometry(&mut settings, true, Some((200.0, 220.0)), Some((0.0, 720.0))),
+            !record_window_geometry(&mut settings, true, true, Some((0.0, 0.0)), Some((1920.0, 1080.0))),
+            "maximized frames must not overwrite saved normal geometry"
+        );
+        assert!(
+            !record_window_geometry(&mut settings, true, false, Some((200.0, 220.0)), Some((0.0, 720.0))),
             "minimized/zero-width inner rect must be ignored"
         );
         assert!(
-            record_window_geometry(&mut settings, true, Some((100.0, 120.0)), Some((480.0, 720.0))),
+            record_window_geometry(&mut settings, true, false, Some((100.0, 120.0)), Some((480.0, 720.0))),
             "legacy logical coordinates upgrade to physical once"
         );
         assert!(settings.window_position_physical);
         assert!(
-            !record_window_geometry(&mut settings, true, Some((100.2, 120.1)), Some((480.0, 720.0))),
+            !record_window_geometry(&mut settings, true, false, Some((100.2, 120.1)), Some((480.0, 720.0))),
             "sub-pixel jitter does not dirty settings"
         );
         assert!(
-            record_window_geometry(&mut settings, true, Some((140.0, 160.0)), Some((500.0, 740.0))),
+            record_window_geometry(&mut settings, true, false, Some((140.0, 160.0)), Some((500.0, 740.0))),
             "real move/resize updates geometry"
         );
         assert_eq!(settings.window, Some(WindowGeometry { x: 140.0, y: 160.0, width: 500.0, height: 740.0 }));
