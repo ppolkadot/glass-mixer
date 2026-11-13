@@ -352,6 +352,43 @@ pub fn icon_button(
     response.on_hover_text(label)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonKind {
+    Primary,
+    Secondary,
+    Destructive,
+    Plain,
+}
+
+/// Semantic push button styled by [`ButtonKind`] and the active palette.
+pub fn button(ui: &mut Ui, look: &Look, text: &str, kind: ButtonKind) -> Response {
+    let p = &look.p;
+    let enabled = ui.is_enabled();
+    let (fill, fg) = match kind {
+        ButtonKind::Primary => (p.accent, p.on_accent),
+        ButtonKind::Secondary => (p.fill, p.text),
+        ButtonKind::Destructive => (p.fill, p.danger),
+        ButtonKind::Plain => (Color32::TRANSPARENT, p.accent),
+    };
+    let fg = if enabled { fg } else { fg.gamma_multiply(0.45) };
+    let label = super::typography::rich(text, super::typography::Role::CalloutStrong, look).color(fg);
+    let mut btn =
+        egui::Button::new(label).corner_radius(CornerRadius::same(look.m.control_radius)).min_size(vec2(0.0, 28.0));
+    if kind == ButtonKind::Plain {
+        btn = btn.frame(false);
+    } else {
+        btn = btn.fill(if enabled { fill } else { fill.gamma_multiply(0.45) });
+        if p.high_contrast {
+            let stroke = match kind {
+                ButtonKind::Destructive => p.danger,
+                _ => p.border,
+            };
+            btn = btn.stroke(Stroke::new(1.0, stroke));
+        }
+    }
+    scroll_on_focus(ui.add(btn))
+}
+
 /// A full-width settings row with a label (and optional description) and a switch.
 pub fn toggle_row(ui: &mut Ui, look: &Look, on: &mut bool, label: &str, description: Option<&str>) -> Response {
     let p = &look.p;
@@ -641,5 +678,44 @@ mod tests {
                 assert!(w >= sample_w + 2.0, "percent_width {w} too narrow for {sample:?} ({sample_w})");
             }
         });
+    }
+
+    #[test]
+    fn button_kinds_render_are_named_and_are_focusable() {
+        let h = Harness::new(crate::settings::Density::Comfortable);
+        let look = &h.look;
+        let cases = [
+            (ButtonKind::Primary, "Primary"),
+            (ButtonKind::Secondary, "Secondary"),
+            (ButtonKind::Destructive, "Destructive"),
+            (ButtonKind::Plain, "Plain"),
+        ];
+        let draw = |ui: &mut Ui| {
+            ui.horizontal(|ui| {
+                for (kind, label) in cases {
+                    button(ui, look, label, kind);
+                }
+            });
+        };
+        let frame = h.run(480.0, 120.0, draw);
+        for (_, label) in cases {
+            assert!(
+                frame.widgets.iter().any(|w| w.role == egui::accesskit::Role::Button && w.name == label),
+                "missing Button '{label}'"
+            );
+        }
+        let mut seen_focused = Vec::new();
+        for _ in 0..cases.len() {
+            let f = h.send_key(480.0, 120.0, Key::Tab, egui::Modifiers::NONE, draw);
+            if let Some(w) = f.widgets.iter().find(|w| w.focused) {
+                seen_focused.push(w.name.clone());
+            }
+        }
+        for (_, label) in cases {
+            assert!(
+                seen_focused.iter().any(|n| n == label),
+                "button '{label}' never received Tab focus: {seen_focused:?}"
+            );
+        }
     }
 }
