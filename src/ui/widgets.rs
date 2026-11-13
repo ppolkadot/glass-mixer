@@ -448,7 +448,7 @@ pub fn disclosure<R>(
 }
 
 /// Small chevron painter for `egui::ComboBox::icon` when [`Look::icons`] is true.
-pub fn combo_icon(look: &Look) -> impl FnOnce(&Ui, Rect, &egui::style::WidgetVisuals, bool) {
+pub fn combo_icon(look: &Look) -> impl FnOnce(&Ui, Rect, &egui::style::WidgetVisuals, bool) + use<> {
     let color = look.p.text_muted;
     move |ui, rect, _visuals, _open| {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph::CHEVRON_DOWN, icon_font(10.0), color);

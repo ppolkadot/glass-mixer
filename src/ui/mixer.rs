@@ -8,7 +8,7 @@
 
 use super::Look;
 use super::typography::{self, Role};
-use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label, semibold};
+use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label};
 use crate::audio::{
     Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, BalanceState, Command, EndpointState, Flow, Meters, Route,
     ServiceStatus, matches_filter, show_with_idle_filter, to_percent,
@@ -228,11 +228,14 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
         if let ServiceStatus::Unavailable(message) = &cx.snap.status {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(glyph::WARNING).font(widgets::icon_font(16.0)).color(look.p.danger));
-                ui.label(RichText::new(message).color(look.p.text));
+                ui.label(typography::rich(message, Role::Callout, look).color(look.p.text));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Glass Mixer keeps retrying automatically.").small().color(look.p.text_muted));
-                if ui.button("Retry now").clicked() {
+                ui.label(
+                    typography::rich("Glass Mixer keeps retrying automatically.", Role::Footnote, look)
+                        .color(look.p.text_muted),
+                );
+                if widgets::button(ui, look, "Retry now", widgets::ButtonKind::Secondary).clicked() {
                     cx.audio.send(Command::Refresh);
                 }
             });
@@ -245,11 +248,16 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
                 ui.label(RichText::new(glyph::SOLO).font(widgets::icon_font(14.0)).color(look.p.accent));
                 // The button is placed first, so a long name truncates instead of pushing it out.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::scroll_on_focus(ui.small_button("End solo")).clicked() {
+                    if widgets::scroll_on_focus(widgets::button(ui, look, "End solo", widgets::ButtonKind::Secondary))
+                        .clicked()
+                    {
                         cx.audio.send(Command::EndSolo);
                     }
                     let text = format!("Solo: {name}. Other apps are lowered.");
-                    ui.add(egui::Label::new(RichText::new(&text).color(look.p.text)).truncate()).on_hover_text(text);
+                    ui.add(
+                        egui::Label::new(typography::rich(&text, Role::Callout, look).color(look.p.text)).truncate(),
+                    )
+                    .on_hover_text(text);
                 });
             });
         }
@@ -257,13 +265,15 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(glyph::MIC).font(widgets::icon_font(14.0)).color(look.p.accent));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let off = widgets::scroll_on_focus(ui.small_button("Turn off"));
+                    let off =
+                        widgets::scroll_on_focus(widgets::button(ui, look, "Turn off", widgets::ButtonKind::Secondary));
                     widgets::set_name(ui, &off, "Turn off microphone ducking");
                     if off.clicked() {
                         cx.settings.mic_ducking.enabled = false;
                     }
                     let text = "Microphone ducking: apps are lowered while you talk.";
-                    ui.add(egui::Label::new(RichText::new(text).color(look.p.text)).truncate()).on_hover_text(text);
+                    ui.add(egui::Label::new(typography::rich(text, Role::Callout, look).color(look.p.text)).truncate())
+                        .on_hover_text(text);
                 });
             });
         }
@@ -276,17 +286,23 @@ fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
             Some(ep) => {
                 endpoint_row(ui, st, cx, Flow::Output, ep, false);
                 // Balance and sound properties need room; they live in the Devices view.
-                if ui.link("Balance and sound properties").clicked() {
+                if widgets::button(ui, look, "Balance and sound properties", widgets::ButtonKind::Plain).clicked() {
                     open_devices = true;
                 }
             }
             None if cx.snap.status == ServiceStatus::Starting => {
-                ui.label(RichText::new("Connecting to Windows audio…").color(look.p.text_muted));
+                ui.label(
+                    typography::rich("Connecting to Windows audio…", Role::Callout, look).color(look.p.text_muted),
+                );
             }
             None => {
                 ui.label(
-                    RichText::new("No output device is available. Connect speakers or headphones.")
-                        .color(look.p.text_muted),
+                    typography::rich(
+                        "No output device is available. Connect speakers or headphones.",
+                        Role::Callout,
+                        look,
+                    )
+                    .color(look.p.text_muted),
                 );
             }
         }
@@ -343,11 +359,16 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
         Flow::Output => "output",
         Flow::Input => "input",
     };
+    let look = cx.look;
     ui.add_enabled_ui(can_switch, |ui| {
-        let response = egui::ComboBox::from_id_salt(("device", kind))
+        let mut combo = egui::ComboBox::from_id_salt(("device", kind))
             .width(width.max(80.0))
             .truncate()
-            .selected_text(RichText::new(&selected).font(semibold(14.0)))
+            .selected_text(typography::rich(&selected, Role::CalloutStrong, look));
+        if look.icons {
+            combo = combo.icon(widgets::combo_icon(look));
+        }
+        let response = combo
             .show_ui(ui, |ui| {
                 for d in devices {
                     if ui
@@ -763,12 +784,10 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 if pinned || soloed { (52.0, m.button + ui.spacing().item_spacing.x) } else { (84.0, 0.0) };
             let name_w = (ui.available_width() * 0.34 - solo_room).clamp(name_min, 210.0);
             let (nrect, nresp) = ui.allocate_exact_size(vec2(name_w, m.row_height - 10.0), Sense::click());
-            let mut job = LayoutJob::simple_singleline(name.clone(), semibold(14.0), p.text);
-            job.wrap = egui::text::TextWrapping::truncate_at_width(name_w - 4.0);
+            let mut job = LayoutJob::single_section(name.clone(), typography::format(Role::Headline, p.text, look));
+            let chevron_w = if look.icons { 14.0 } else { 4.0 };
+            job.wrap = egui::text::TextWrapping::truncate_at_width((name_w - chevron_w).max(20.0));
             let galley = ui.painter().layout_job(job);
-            let compact = m.row_height < 46.0;
-            let name_y = if compact { nrect.center().y - galley.size().y / 2.0 } else { nrect.top() + 3.0 };
-            ui.painter().galley(pos2(nrect.left() + 2.0, name_y), galley, p.text);
             let (status, status_color) = if app.muted {
                 ("Muted", p.danger)
             } else if app.activity == Activity::Playing {
@@ -776,6 +795,25 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             } else {
                 ("Idle", p.text_muted)
             };
+            let mut extras = Vec::new();
+            if app.session_count > 1 {
+                extras.push(format!("{} streams", app.session_count));
+            }
+            match &cx.snap.solo {
+                Some(solo) if *solo == app.key => extras.push("Solo".to_owned()),
+                Some(_) if app.key != AppKey::System => extras.push("lowered by Solo".to_owned()),
+                _ => {}
+            }
+            if cx.snap.background_lowered.contains(&app.key) {
+                extras.push("lowered in background".to_owned());
+            }
+            if cx.snap.mic_ducking && cx.settings.mic_ducking.targets.contains(&app.key) {
+                extras.push("lowered while you talk".to_owned());
+            }
+            let show_status = status != "Idle" || !extras.is_empty();
+            let compact = m.row_height < 46.0 || !show_status;
+            let name_y = if compact { nrect.center().y - galley.size().y / 2.0 } else { nrect.top() + 3.0 };
+            ui.painter().galley(pos2(nrect.left() + 2.0, name_y), galley, p.text);
             if !compact {
                 let sy = nrect.top() + 24.0;
                 let mut x = nrect.left() + 2.0;
@@ -783,22 +821,27 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                     ui.painter().circle_filled(pos2(x + 3.0, sy + 7.5), 3.0, p.playing);
                     x += 10.0;
                 }
-                let mut text = status.to_string();
-                if app.session_count > 1 {
-                    text.push_str(&format!(" · {} streams", app.session_count));
-                }
-                match &cx.snap.solo {
-                    Some(solo) if *solo == app.key => text.push_str(" · Solo"),
-                    Some(_) if app.key != AppKey::System => text.push_str(" · lowered by Solo"),
-                    _ => {}
-                }
-                if cx.snap.background_lowered.contains(&app.key) {
-                    text.push_str(" · lowered in background");
-                }
-                if cx.snap.mic_ducking && cx.settings.mic_ducking.targets.contains(&app.key) {
-                    text.push_str(" · lowered while you talk");
-                }
-                ui.painter().text(pos2(x, sy), Align2::LEFT_TOP, text, FontId::proportional(12.0), status_color);
+                let text = if status == "Idle" {
+                    extras.join(" · ")
+                } else if extras.is_empty() {
+                    status.to_owned()
+                } else {
+                    format!("{status} · {}", extras.join(" · "))
+                };
+                let mut sjob = LayoutJob::single_section(text, typography::format(Role::Footnote, status_color, look));
+                sjob.wrap = egui::text::TextWrapping::truncate_at_width((nrect.right() - chevron_w - x).max(20.0));
+                let sgalley = ui.painter().layout_job(sjob);
+                ui.painter().galley(pos2(x, sy), sgalley, status_color);
+            }
+            if look.icons {
+                let g = if expanded { glyph::CHEVRON_DOWN } else { glyph::CHEVRON_RIGHT };
+                ui.painter().text(
+                    pos2(nrect.right() - 6.0, nrect.center().y),
+                    Align2::CENTER_CENTER,
+                    g,
+                    widgets::icon_font(10.0),
+                    p.text_muted,
+                );
             }
             let details = if expanded { "Hide details" } else { "Show details" };
             widgets::focus_ring(ui, nrect, &nresp, p, 6);
@@ -1044,10 +1087,15 @@ fn output_choice(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppE
         ui.add_space(indent);
         ui.label(RichText::new("Output").color(p.text_muted));
         ui.add_enabled_ui(cx.snap.can_route_apps && app.route != Route::Unknown, |ui| {
-            let response = egui::ComboBox::from_id_salt(("app-output", &app.key))
+            let look = cx.look;
+            let mut combo = egui::ComboBox::from_id_salt(("app-output", &app.key))
                 .width((ui.available_width() - 8.0).clamp(80.0, 240.0))
                 .truncate()
-                .selected_text(label(&shown))
+                .selected_text(typography::rich(label(&shown), Role::CalloutStrong, look));
+            if look.icons {
+                combo = combo.icon(widgets::combo_icon(look));
+            }
+            let response = combo
                 .show_ui(ui, |ui| {
                     let options = std::iter::once(None).chain(cx.snap.outputs.iter().map(|d| Some(d.id.clone())));
                     for option in options {
