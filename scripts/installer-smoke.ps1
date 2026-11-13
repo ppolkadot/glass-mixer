@@ -133,6 +133,7 @@ try {
     $variant = $variant.Replace('ValueName: "GlassMixer"', 'ValueName: "GlassMixerSmoke"')
     $variant = $variant.Replace("'GlassMixer'", "'GlassMixerSmoke'")
     $variant = $variant.Replace('{userappdata}\GlassMixer', '{userappdata}\GlassMixerSmoke')
+    $variant = $variant.Replace('{localappdata}\GlassMixer', '{localappdata}\GlassMixerSmoke')
 
     # Refuse to go on if anything of the real installation is still in the variant.
     $leaks = @()

@@ -73,10 +73,13 @@ var
   Exe: String;
   ResultCode: Integer;
 begin
+  Result := '';
   Exe := ExpandConstant('{app}\glass-mixer.exe');
   if FileExists(Exe) then
-    Exec(Exe, '--exit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Result := '';
+  begin
+    if (not Exec(Exe, '--exit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+      Result := 'Glass Mixer is still running and could not be closed automatically. Close it from the tray icon and try again.';
+  end;
 end;
 
 // Remove the launch-at-login entry even if it was enabled from inside the app,
@@ -90,6 +93,9 @@ begin
     // Silent uninstalls keep settings (a suppressed message box would default to Yes).
     if (not UninstallSilent) and
        (MsgBox('Also remove your Glass Mixer settings?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+    begin
       DelTree(ExpandConstant('{userappdata}\GlassMixer'), True, True, True);
+      DelTree(ExpandConstant('{localappdata}\GlassMixer'), True, True, True);
+    end;
   end;
 end;
