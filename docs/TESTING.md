@@ -24,7 +24,7 @@ The release verification below is kept as the earlier record of the pre-fix buil
   - `scripts/package.ps1`, `scripts/verify-package.ps1 -RequireInstaller`, and
     `scripts/check-version.ps1 -Tag v0.6.0 -Exe target\release\glass-mixer.exe`:
     passed. Executable `26,758,656` bytes, portable ZIP `14,427,560` bytes,
-    installer `12,333,484` bytes; checksums are in
+    installer `12,333,764` bytes; checksums are in
     [releases/0.6.0.md](releases/0.6.0.md). All unsigned.
 - **New regressions:**
   - F1: none executable locally. A read-only `gh release view v0.5.0` failed
