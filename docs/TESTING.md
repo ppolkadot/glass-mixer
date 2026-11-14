@@ -10,21 +10,21 @@
 ## 0.6.0 readiness fixes (2026-11-13, `codex/0.6.0-readiness-fixes`)
 
 Fixes for findings F1-F7 from `docs/superpowers/plans/2026-11-13-0.6.0-readiness-remediation.md`,
-and for four further findings (F8-F11) from a follow-up review.
+and for five further findings (F8-F12) from follow-up reviews.
 The release verification below is kept as the earlier record of the pre-fix build.
 
 - **Gate**, with every step's exit status checked (all exit 0):
   - `cargo fmt --check`: passed.
   - `cargo clippy --locked --all-targets -- -D warnings`: passed.
-  - `cargo test --locked`: **235** library tests passed (3 ignored), **5** binary
+  - `cargo test --locked`: **236** library tests passed (3 ignored), **5** binary
     tests passed, **1** source-encoding test passed, and the **13** hardware
     integration tests stayed ignored.
   - `git diff --check`, `scripts/check-version.ps1 -Tag v0.6.0`, and the
     PowerShell AST parse of every `scripts/*.ps1`: passed.
   - `scripts/package.ps1`, `scripts/verify-package.ps1 -RequireInstaller`, and
     `scripts/check-version.ps1 -Tag v0.6.0 -Exe target\release\glass-mixer.exe`:
-    passed. Executable `26,758,656` bytes, portable ZIP `14,427,744` bytes,
-    installer `12,331,543` bytes; checksums are in
+    passed. Executable `26,758,656` bytes, portable ZIP `14,427,560` bytes,
+    installer `12,333,484` bytes; checksums are in
     [releases/0.6.0.md](releases/0.6.0.md). All unsigned.
 - **New regressions:**
   - F1: none executable locally. A read-only `gh release view v0.5.0` failed
@@ -69,6 +69,10 @@ The release verification below is kept as the earlier record of the pre-fix buil
   - F11: a profile rename is keyed by the profile's name instead of its list
     position, so duplicating or importing profiles can't move it to another one
     (`ui::presets::tests::a_rename_follows_its_profile_when_another_is_inserted_before_it`).
+  - F12: applying an import discards every unsaved profile-rename draft (and
+    the other editor drafts), because an imported profile can share the name of
+    the one being renamed
+    (`app::tests::an_import_discards_a_rename_draft_even_for_a_profile_of_the_same_name`).
 - **Not run:** live GUI checks (`scripts/verify-ui.ps1`, `scripts/lifecycle.ps1`,
   `scripts/hotkey-smoke.ps1`), the installer lifecycle
   (`scripts/installer-smoke.ps1`), the hardware audio tests, a real audio-service

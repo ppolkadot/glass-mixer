@@ -69,7 +69,7 @@ Package details and checksums are in [the release record](docs/releases/0.6.0.md
   an unreadable audio session is retried on a capped backoff instead of
   spinning; a per-app device change that only partly succeeds says so;
   "App devices" in a new profile is available only with app volumes and
-  mutes; and a profile rename stays on its profile when others are duplicated.
+  mutes; and a profile rename stays on its profile when others are duplicated, and is discarded when an import replaces the profiles.
 - **Code organization:** extracted `platform/hotkey_model.rs`,
   `ui/hotkey_editor.rs`, `ui/toasts.rs`, and `src/audio/engine/*` submodules,
   and removed dead endpoint commands and registry mono helpers.
