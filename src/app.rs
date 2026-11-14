@@ -118,7 +118,7 @@ pub struct MixerApp {
     exiting: bool,
     has_icon_font: bool,
     look: Look,
-    style_key: Option<Look>,
+    style_key: Option<(Look, bool)>,
     shut_down: bool,
     /// Started with `--minimized`: hide once eframe has shown the (cloaked) window.
     pending_start_hide: bool,
@@ -347,15 +347,13 @@ impl MixerApp {
             icons: self.has_icon_font,
             tracking: self.settings.typeface == crate::settings::Typeface::Polaris,
         };
-        if self.style_key != Some(look) {
+        if apply_style_if_changed(ctx, &mut self.style_key, look, self.prefs.animations) {
             if let Some(h) = self.hwnd {
                 backdrop::set_border(h, self.support, &look.p);
             }
-            theme::apply(ctx, &look.p, &look.m, self.prefs.animations);
             if let Some(tray) = self.tray.as_ref() {
                 tray.set_palette(look.p);
             }
-            self.style_key = Some(look);
         }
         self.look = look;
     }
@@ -988,9 +986,35 @@ impl Drop for MixerApp {
     }
 }
 
+/// Applies the egui style unless this exact look and animation preference is
+/// already applied. Returns whether it was applied.
+fn apply_style_if_changed(ctx: &egui::Context, seen: &mut Option<(Look, bool)>, look: Look, animations: bool) -> bool {
+    let key = (look, animations);
+    if *seen == Some(key) {
+        return false;
+    }
+    theme::apply(ctx, &look.p, &look.m, animations);
+    *seen = Some(key);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Density;
+
+    #[test]
+    fn animation_preference_invalidates_the_style_without_a_palette_change() {
+        let h = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let mut seen = None;
+        assert!(apply_style_if_changed(&h.ctx, &mut seen, h.look, true));
+        assert!(h.ctx.global_style().animation_time > 0.0);
+        assert!(apply_style_if_changed(&h.ctx, &mut seen, h.look, false));
+        assert_eq!(h.ctx.global_style().animation_time, 0.0);
+        assert!(!apply_style_if_changed(&h.ctx, &mut seen, h.look, false));
+        assert!(apply_style_if_changed(&h.ctx, &mut seen, h.look, true));
+        assert!(h.ctx.global_style().animation_time > 0.0);
+    }
 
     #[test]
     fn meters_run_while_shown_except_with_a_software_renderer() {
