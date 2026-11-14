@@ -14,14 +14,16 @@ use crate::{
 use serde_json::Value;
 use std::{
     io,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
 /// Version of the export wrapper, separate from the settings' own version.
 pub const EXPORT_FORMAT: u64 = 1;
-const MAX_IMPORT_BYTES: usize = 1024 * 1024;
-const TOO_LARGE: &str = "The file is too large to be a Glass Mixer export (over 1 MB).";
+/// The most a saved transfer file or an imported file may hold. Export and import
+/// share it, so every export that was saved can be imported again.
+const MAX_IMPORT_BYTES: usize = 32 * 1024 * 1024;
+const TOO_LARGE: &str = "The settings transfer file is too large (over 32 MiB).";
 /// Where this window sits belongs to this PC: it is neither exported nor imported.
 const MACHINE_FIELDS: [&str; 2] = ["window", "window_position_physical"];
 /// Automatic copies made before an import replaces the settings; older ones are deleted.
@@ -107,14 +109,23 @@ pub fn import(bytes: &[u8]) -> Result<Import, String> {
 /// Reads and checks the export at `path`. A file that is missing, isn't a file or
 /// is too large is refused without reading it all.
 pub fn read_import_file(path: &Path) -> Result<Import, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("Couldn't open the file: {e}."))?;
+    let before_open = std::fs::metadata(path).map_err(|e| format!("Couldn't open the file: {e}."))?;
+    if !before_open.is_file() {
+        return Err("That path isn't a file.".into());
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("Couldn't open the file: {e}."))?;
+    let meta = file.metadata().map_err(|e| format!("Couldn't inspect the file: {e}."))?;
     if !meta.is_file() {
         return Err("That path isn't a file.".into());
     }
     if meta.len() > MAX_IMPORT_BYTES as u64 {
         return Err(TOO_LARGE.into());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read the file: {e}."))?;
+    // Bounded even if the file grows after the checks above.
+    let mut bytes = Vec::new();
+    file.take(MAX_IMPORT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Couldn't read the file: {e}."))?;
     import(&bytes)
 }
 
@@ -185,6 +196,10 @@ fn file_name(prefix: &str, unix_seconds: u64) -> String {
 /// Writes `text` as `<prefix>-<date>.json` in `dir`. Automatic backups keep only
 /// the newest [`KEEP_BACKUPS`]; exports the user asked for are never deleted.
 pub fn save(dir: &Path, prefix: &str, unix_seconds: u64, text: &str) -> io::Result<PathBuf> {
+    // Refuse before touching the disk: a file the importer would reject is no backup.
+    if matches!(prefix, EXPORT_PREFIX | BACKUP_PREFIX) && text.len() > MAX_IMPORT_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, TOO_LARGE));
+    }
     std::fs::create_dir_all(dir)?;
     let name = file_name(prefix, unix_seconds);
     let stem = name.trim_end_matches(".json");
@@ -469,6 +484,46 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_large_supported_profile_collection_round_trips() {
+        let apps: Vec<_> = (0..64)
+            .map(|n| {
+                PinnedApp {
+                    key: AppKey::Exe(format!(r"c:\program files\application {n}\application-{n}.exe")),
+                    name: format!("Application number {n}"),
+                    exe_path: None,
+                    aumid: None,
+                }
+                .placeholder()
+            })
+            .collect();
+        let settings = Settings {
+            presets: (0..128)
+                .map(|n| VolumePreset::capture(&format!("Profile {n}"), &apps).sanitize().unwrap())
+                .collect(),
+            ..Default::default()
+        };
+        let text = export(&settings, "0.6.0");
+        assert!(text.len() > 1024 * 1024);
+        let imported = import(text.as_bytes()).expect("own supported export");
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+        assert_eq!(imported.settings.presets, settings.presets);
+    }
+
+    #[test]
+    fn oversized_transfer_files_are_refused_before_creating_the_destination() {
+        let base = temp_dir("oversize-save");
+        let text = "x".repeat(MAX_IMPORT_BYTES + 1);
+        for prefix in [EXPORT_PREFIX, BACKUP_PREFIX] {
+            let dir = base.join(prefix);
+            let err = save(&dir, prefix, 1_700_000_000, &text).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), TOO_LARGE);
+            assert!(!dir.exists(), "the destination directory must not be created");
+        }
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

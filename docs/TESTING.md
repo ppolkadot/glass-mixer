@@ -135,7 +135,7 @@ Machine: Windows 11 build 26200, with only the HDMI output active.
   export importing back unchanged, plain settings files and UTF-8 BOM and UTF-16
   files being accepted, ten kinds of file being refused with a reason (empty,
   not JSON, an array, no marker, no settings, no version, bad format number, not
-  text, over 1 MB), newer export formats and settings versions being refused,
+  text, over 32 MiB), newer export formats and settings versions being refused,
   unreadable values and list entries being reported rather than replaced
   silently, the window position of this PC being kept, only the automatic
   backups being pruned, and a path that is missing, a folder or too large being

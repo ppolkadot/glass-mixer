@@ -113,7 +113,7 @@ missing pins can both be moved.
 `transfer.rs` exports the preferences as versioned JSON (`glass_mixer_export`
 and the settings, without the window position and size, which belong to the PC)
 and checks imports before anything changes. A file is refused, with a reason, if
-it is not text or JSON, over 1 MB, not an export or a settings file, or from a
+it is not text or JSON, over 32 MiB, not an export or a settings file, or from a
 newer export format or settings version. It is read leniently, as every settings
 file is, but anything it could not read is listed (a list with unreadable
 entries, a value that fell back to its default) instead of being replaced
