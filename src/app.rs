@@ -352,6 +352,9 @@ impl MixerApp {
                 backdrop::set_border(h, self.support, &look.p);
             }
             theme::apply(ctx, &look.p, &look.m, self.prefs.animations);
+            if let Some(tray) = self.tray.as_ref() {
+                tray.set_palette(look.p);
+            }
             self.style_key = Some(look);
         }
         self.look = look;
@@ -777,16 +780,18 @@ impl eframe::App for MixerApp {
             toast.expiry.tick(shown, toast_now);
         }
 
-        if shown {
-            let notified = self.appearance_watch.as_ref().is_some_and(window::AppearanceWatch::take_changed);
-            if notified || self.prefs_checked.elapsed() >= PREFS_INTERVAL {
-                self.prefs_checked = Instant::now();
-                let prefs = SystemPrefs::read();
-                if prefs != self.prefs {
-                    log::info!("system preferences changed: {prefs:?}");
-                    self.prefs = prefs;
-                }
+        // A notification is consumed even while the window is hidden, so a System
+        // theme change reaches the tray without an idle polling loop.
+        let notified = self.appearance_watch.as_ref().is_some_and(window::AppearanceWatch::take_changed);
+        if notified || (shown && self.prefs_checked.elapsed() >= PREFS_INTERVAL) {
+            self.prefs_checked = Instant::now();
+            let prefs = SystemPrefs::read();
+            if prefs != self.prefs {
+                log::info!("system preferences changed: {prefs:?}");
+                self.prefs = prefs;
             }
+        }
+        if shown {
             // Win32 appearance/DPI messages trigger an immediate repaint; keep a slow fallback timer.
             ctx.request_repaint_after(PREFS_INTERVAL);
         }

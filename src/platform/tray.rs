@@ -126,6 +126,11 @@ impl Tray {
         })
     }
 
+    /// Gives the popup menu the application's palette.
+    pub fn set_palette(&self, palette: crate::ui::theme::Palette) {
+        self.menu.set_palette(palette);
+    }
+
     /// Shell-managed notifications honor Windows suppression policy. No AUMID,
     /// shortcut registration, activation handler or elevation is needed.
     pub fn notify(&mut self, level: NoticeLevel, text: &str) {

@@ -117,7 +117,8 @@ impl TrayMenu {
                 return Err("Couldn't load Polaris Semibold for the tray menu.".into());
             }
             result.state.set_dpi(GetDpiForWindow(hwnd.get()).max(96))?;
-            result.state.refresh_theme();
+            // A startup fallback; the application supplies its own palette through `set_palette`.
+            result.state.apply_palette(system_palette());
             for (id, label) in ITEMS {
                 if id == EXIT {
                     AppendMenuW(menu, MF_SEPARATOR, 0, None).map_err(|e| e.to_string())?;
@@ -151,6 +152,14 @@ impl TrayMenu {
         }
     }
 
+    /// Uses the application's palette (its theme, accent and contrast policy) for
+    /// the popup. Opening the popup never replaces it.
+    pub fn set_palette(&self, palette: theme::Palette) {
+        if self.state.palette.get() != palette {
+            unsafe { self.state.apply_palette(palette) };
+        }
+    }
+
     /// The event handler runs on the UI thread, as does this window subclass.
     pub fn show(hwnd: Hwnd) -> u32 {
         unsafe { SendMessageW(hwnd.get(), SHOW_MENU, None, None).0 as u32 }
@@ -158,10 +167,9 @@ impl TrayMenu {
 }
 
 impl State {
-    unsafe fn refresh_theme(&self) {
-        let p = system_palette();
+    unsafe fn apply_palette(&self, p: theme::Palette) {
         self.palette.set(p);
-        let brush = unsafe { CreateSolidBrush(colorref(p.surface)) };
+        let brush = unsafe { CreateSolidBrush(colorref(p.surface_strong)) };
         if brush.is_invalid() {
             return;
         }
@@ -246,7 +254,7 @@ impl State {
         let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
         let disabled = (item.itemState.0 & ODS_DISABLED.0 != 0) || (item.itemState.0 & ODS_GRAYED.0 != 0);
         let p = self.palette.get();
-        let bg = if selected { if p.high_contrast { p.accent } else { p.surface_hover } } else { p.surface };
+        let bg = if selected { if p.high_contrast { p.accent } else { p.surface_hover } } else { p.surface_strong };
         let fg = if disabled {
             p.text_muted
         } else if selected && p.high_contrast {
@@ -294,7 +302,6 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPA
             if let Err(e) = state.set_dpi(dpi_at_point(hwnd, pos)) {
                 log::warn!("{e}");
             }
-            state.refresh_theme();
             let _ = SetForegroundWindow(hwnd);
             let command = TrackPopupMenu(state.menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pos.x, pos.y, None, hwnd, None);
             let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
@@ -403,6 +410,15 @@ mod tests {
                 "&Open Mixer",
                 "accessible strings remain attached to owner-drawn items"
             );
+            for palette in [
+                theme::palette(false, false, Accent::Coral, false),
+                theme::palette(true, false, Accent::Teal, false),
+                theme::palette(true, false, Accent::default(), true),
+            ] {
+                menu.set_palette(palette);
+                assert_eq!(menu.state.palette.get(), palette);
+                assert!(!menu.state.bg_brush.get().is_invalid());
+            }
             menu.update(true, false);
             let flags = GetMenuState(menu.state.menu, MUTE, MF_BYCOMMAND);
             assert_ne!(flags & MF_CHECKED.0, 0);
