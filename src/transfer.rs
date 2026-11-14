@@ -226,6 +226,7 @@ pub fn save(dir: &Path, prefix: &str, unix_seconds: u64, text: &str) -> io::Resu
         let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
             .filter_map(Result::ok)
             .map(|e| e.path())
+            .filter(|p| p != &path && p.is_file())
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
@@ -233,7 +234,8 @@ pub fn save(dir: &Path, prefix: &str, unix_seconds: u64, text: &str) -> io::Resu
             })
             .collect();
         backups.sort_by_key(|p| p.file_stem().map(|s| s.to_owned()));
-        let excess = backups.len().saturating_sub(KEEP_BACKUPS);
+        // The backup just written always survives; keep the newest older ones beside it.
+        let excess = backups.len().saturating_sub(KEEP_BACKUPS.saturating_sub(1));
         for old in &backups[..excess] {
             let _ = std::fs::remove_file(old);
         }
@@ -466,6 +468,33 @@ mod tests {
                 assert_eq!(std::fs::read_to_string(path).unwrap(), n.to_string());
             }
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retention_preserves_the_current_backup_after_a_clock_rollback() {
+        let dir = temp_dir("clock-rollback");
+        for n in 0..KEEP_BACKUPS {
+            save(&dir, BACKUP_PREFIX, 1_700_000_100 + n as u64, "older content").unwrap();
+        }
+        let current = save(&dir, BACKUP_PREFIX, 1_700_000_099, "current content").unwrap();
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "current content");
+        let files = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(files, KEEP_BACKUPS);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retention_ignores_directories_that_match_the_backup_pattern() {
+        let dir = temp_dir("backup-directory");
+        let decoy = dir.join("glass-mixer-before-import-19990101-000000.json");
+        std::fs::create_dir_all(&decoy).unwrap();
+        for n in 0..=KEEP_BACKUPS as u64 {
+            save(&dir, BACKUP_PREFIX, 1_700_000_000 + n, "older content").unwrap();
+        }
+        assert!(decoy.is_dir(), "a directory is not a backup file");
+        let files = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.path().is_file()).count();
+        assert_eq!(files, KEEP_BACKUPS, "the directory does not consume a file-retention slot");
         let _ = std::fs::remove_dir_all(dir);
     }
 
