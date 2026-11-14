@@ -810,8 +810,7 @@ impl eframe::App for MixerApp {
         let meters = self.audio.meters();
         if let Some(imported) = self.import_to_apply.take() {
             self.settings = imported;
-            self.mixer.forget_drafts();
-            self.hotkey_editor = HotkeyEditor::default();
+            forget_import_drafts(&mut self.mixer, &mut self.hotkey_editor, &mut self.preset_editor);
             ui.ctx().request_repaint();
         }
         let mut errors = Vec::new();
@@ -986,6 +985,19 @@ impl Drop for MixerApp {
     }
 }
 
+/// Drops every unsaved edit that refers to the settings an import just replaced.
+/// An imported profile may share a name with the one being renamed, so its draft
+/// can't be told apart from the old one and must not carry over.
+fn forget_import_drafts(
+    mixer: &mut mixer::MixerState,
+    hotkeys: &mut HotkeyEditor,
+    presets: &mut crate::ui::presets::PresetEditor,
+) {
+    mixer.forget_drafts();
+    *hotkeys = HotkeyEditor::default();
+    *presets = crate::ui::presets::PresetEditor::default();
+}
+
 /// Applies the egui style unless this exact look and animation preference is
 /// already applied. Returns whether it was applied.
 fn apply_style_if_changed(ctx: &egui::Context, seen: &mut Option<(Look, bool)>, look: Look, animations: bool) -> bool {
@@ -1002,6 +1014,33 @@ fn apply_style_if_changed(ctx: &egui::Context, seen: &mut Option<(Look, bool)>, 
 mod tests {
     use super::*;
     use crate::settings::Density;
+
+    #[test]
+    fn an_import_discards_a_rename_draft_even_for_a_profile_of_the_same_name() {
+        use crate::audio::{AudioHandle, AudioSnapshot, preferences::VolumePreset};
+        use crate::ui::presets::{self, PresetEditor};
+        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
+        let (audio, snapshot) = (AudioHandle::detached(), AudioSnapshot::default());
+        // The imported settings hold a different profile that is also named "Work".
+        let mut imported = Settings {
+            presets: vec![VolumePreset { name: "Work".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let mut rename_fields = |editor: &mut PresetEditor| {
+            let mut errors = Vec::new();
+            let frame = harness.run(500.0, 900.0, |ui| {
+                presets::show(ui, &harness.look, editor, &mut imported, &snapshot, &audio, &mut errors)
+            });
+            frame.widgets.iter().filter(|w| w.name.starts_with("New name for ")).count()
+        };
+        let mut editor = PresetEditor::default();
+        editor.start_rename_for_test("Work");
+        assert_eq!(rename_fields(&mut editor), 1, "without the reset the draft attaches to the imported profile");
+
+        let (mut mixer, mut hotkeys) = (mixer::MixerState::default(), HotkeyEditor::default());
+        forget_import_drafts(&mut mixer, &mut hotkeys, &mut editor);
+        assert_eq!(rename_fields(&mut editor), 0, "an import must not keep an old rename draft");
+    }
 
     #[test]
     fn animation_preference_invalidates_the_style_without_a_palette_change() {

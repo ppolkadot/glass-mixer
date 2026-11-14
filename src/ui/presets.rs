@@ -24,6 +24,13 @@ pub struct PresetEditor {
     renaming: Option<(String, String)>,
 }
 
+#[cfg(test)]
+impl PresetEditor {
+    pub fn start_rename_for_test(&mut self, name: &str) {
+        self.renaming = Some((name.to_owned(), format!("{name} 2")));
+    }
+}
+
 impl Default for PresetEditor {
     fn default() -> Self {
         Self { name: String::new(), parts: CaptureParts { apps: true, ..CaptureParts::default() }, renaming: None }
