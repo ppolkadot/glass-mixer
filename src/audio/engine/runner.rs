@@ -117,7 +117,7 @@ pub(super) struct Runner {
     solo: Option<AppKey>,
     solo_level: Reduction,
     focus_rules: Vec<(AppKey, Reduction)>,
-    focus: FocusSettle<AppKey>,
+    focus: FocusSettle<u32>,
     mic: Option<MicDucking>,
     mic_gate: MicGate,
     last_mic_poll: Instant,
@@ -195,11 +195,9 @@ impl Runner {
                 return;
             }
             Command::ForegroundChanged { pid } => {
-                if let Some(engine) = self.engine.as_ref()
-                    && !self.focus_rules.is_empty()
-                {
-                    self.focus.report(engine.key_for_pid(*pid), Instant::now());
-                }
+                // Kept as a PID so it survives an engine outage; the settled PID is
+                // resolved to an app by the current engine in `sync_automation`.
+                self.focus.report(*pid, Instant::now());
                 return;
             }
             Command::SetMicDucking(config) => {
@@ -444,9 +442,10 @@ impl Runner {
     /// Hands the current automation state to the engine and re-reads levels.
     fn sync_automation(&mut self) {
         let Some(engine) = self.engine.as_mut() else { return };
+        let foreground = self.focus.applied().map(|pid| engine.key_for_pid(*pid));
         let r = &mut engine.reductions;
         r.focus_rules.clone_from(&self.focus_rules);
-        r.foreground = self.focus.applied().cloned();
+        r.foreground = foreground;
         r.mic = self.mic.as_ref().map(|m| (m.reduction, m.targets.clone()));
         r.mic_active = self.mic.is_some() && self.mic_gate.active();
         self.dirty.values = true;
@@ -485,4 +484,25 @@ pub(super) fn push_coalesced(commands: &mut Vec<Command>, cmd: Command) {
     };
     commands.retain(|c| !same_target(c, &cmd));
     commands.push(cmd);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_reports_are_kept_without_an_engine() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut runner = Runner::new(tx, Arc::new(Shared::default()));
+        runner.apply(Command::SetFocusRules(vec![(AppKey::Pid(42), Reduction { factor: 0.3, mute: false })]));
+        runner.apply(Command::ForegroundChanged { pid: 42 });
+        assert!(runner.engine.is_none());
+        assert!(runner.focus.due(FOCUS_SETTLE).is_some(), "outage must not drop foreground");
+
+        runner.apply(Command::ForegroundChanged { pid: 99 });
+        assert!(runner.focus.settle(FOCUS_SETTLE, Instant::now() + FOCUS_SETTLE));
+        assert_eq!(runner.focus.applied(), Some(&99), "the latest report wins");
+        runner.apply(Command::SetFocusRules(Vec::new()));
+        assert!(runner.focus.applied().is_none(), "disabling rules clears focus");
+    }
 }
