@@ -7,6 +7,56 @@
 > old ones: `107a305` is now `ea9c816`, `e47b328` is `209e563`, `518cd33` is `2561aee`
 > and `41f656d` is `86fdb9b`.
 
+## 0.6.0 readiness fixes (2026-11-13, `codex/0.6.0-readiness-fixes`)
+
+Fixes for findings F1-F7 from `docs/superpowers/plans/2026-11-13-0.6.0-readiness-remediation.md`.
+The release verification below is kept as the earlier record of the pre-fix build.
+
+- **Gate**, with every step's exit status checked (all exit 0):
+  - `cargo fmt --check`: passed.
+  - `cargo clippy --locked --all-targets -- -D warnings`: passed.
+  - `cargo test --locked`: **232** library tests passed (3 ignored), **5** binary
+    tests passed, **1** source-encoding test passed, and the **13** hardware
+    integration tests stayed ignored.
+  - `git diff --check`, `scripts/check-version.ps1 -Tag v0.6.0`, and the
+    PowerShell AST parse of every `scripts/*.ps1`: passed.
+  - `scripts/package.ps1`, `scripts/verify-package.ps1 -RequireInstaller`, and
+    `scripts/check-version.ps1 -Tag v0.6.0 -Exe target\release\glass-mixer.exe`:
+    passed. Executable `26,751,488` bytes, portable ZIP `14,425,512` bytes,
+    installer `12,331,469` bytes; checksums are in
+    [releases/0.6.0.md](releases/0.6.0.md). All unsigned.
+- **New regressions:**
+  - F1: none executable locally. A read-only `gh release view v0.5.0` failed
+    with no checkout and no `GH_REPO` ("no git remotes found") and succeeded
+    with `GH_REPO=ppolkadot/glass-mixer`. The publish job itself has not run on
+    GitHub.
+  - F2: `transfer::tests::retention_preserves_the_current_backup_after_a_clock_rollback`
+    (a backdated save survives retention) and
+    `retention_ignores_directories_that_match_the_backup_pattern`.
+  - F3: `transfer::tests::a_large_supported_profile_collection_round_trips`
+    (128 profiles, over 1 MiB, imports back with no notes) and
+    `oversized_transfer_files_are_refused_before_creating_the_destination`.
+    Import reads at most the limit plus one byte from the opened handle.
+  - F4: `audio::engine::runner::tests::foreground_reports_are_kept_without_an_engine`
+    (the latest PID survives an absent engine; disabling rules clears it). It
+    runs without COM, so the final PID-to-app mapping on a live session is not
+    covered.
+  - F5: `audio::engine::tests::failed_restoration_remains_pending_until_success_or_user_intervention`,
+    `reduction_retry_wakes_without_messages_and_resets_after_success`,
+    `reduction_retry_backoff_never_exceeds_the_cap`, and
+    `reduction_retry_deadline_is_ignored_while_the_engine_is_absent`.
+  - F6: the palette loop in
+    `platform::tray_menu::tests::native_menu_uses_polaris_semibold_and_keeps_strings_and_mute_state`
+    (a message-only window; the stored palette and background brush follow
+    `set_palette`).
+  - F7: `app::tests::animation_preference_invalidates_the_style_without_a_palette_change`.
+- **Not run:** live GUI checks (`scripts/verify-ui.ps1`, `scripts/lifecycle.ps1`,
+  `scripts/hotkey-smoke.ps1`), the installer lifecycle
+  (`scripts/installer-smoke.ps1`), the hardware audio tests, a real audio-service
+  interruption, live Windows theme or animation switching, mixed-DPI tray
+  behavior, and the hosted tag-triggered publish job. `docs/VALIDATION_MATRIX.md`
+  is unchanged because none of those scenarios was rerun.
+
 ## 0.6.0 release verification (2026-11-13, `main`)
 
 - **Gate**, with every step's exit status checked:

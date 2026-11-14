@@ -56,6 +56,16 @@ Package details and checksums are in [the release record](docs/releases/0.6.0.md
   workflow actions to commit SHAs, added a weekly `cargo audit` schedule, split
   release build/publish permissions, and required a release record in
   `scripts/check-version.ps1`.
+- **Readiness fixes:** the draft-release job now names its repository
+  explicitly (`GH_REPO`); the automatic backup just written always survives
+  retention, even if the clock moved back; export and import share one 32 MiB
+  limit, so every saved export imports again and an oversized one is refused
+  before any file is created; foreground-app reports survive an audio-service
+  outage and are resolved after recovery; failed background-lowering restores
+  retry on their own with a capped backoff while healthy state keeps
+  publishing; the tray menu follows the app's selected theme, accent, and
+  high-contrast setting, including while the window is hidden; and changing
+  only the Windows animation preference now reapplies the style immediately.
 - **Code organization:** extracted `platform/hotkey_model.rs`,
   `ui/hotkey_editor.rs`, `ui/toasts.rs`, and `src/audio/engine/*` submodules,
   and removed dead endpoint commands and registry mono helpers.
