@@ -18,8 +18,10 @@ use crate::{
 pub struct PresetEditor {
     name: String,
     parts: CaptureParts,
-    /// The profile being renamed and the new name typed so far.
-    renaming: Option<(usize, String)>,
+    /// The profile being renamed (by its current name, which is unique, so
+    /// inserting or importing profiles can't move the draft to another one) and
+    /// the new name typed so far.
+    renaming: Option<(String, String)>,
 }
 
 impl Default for PresetEditor {
@@ -127,6 +129,10 @@ fn contents(
         .wrap(),
     );
     ui.add_space(look.m.gap);
+    // A device is saved on an app's entry, so it can't be saved without the apps.
+    if !editor.parts.apps {
+        editor.parts.app_devices = false;
+    }
     let preview = VolumePreset::capture_profile(&editor.name, snapshot, editor.parts);
     let blocked = if editor.name.trim().is_empty() {
         Some("Enter a profile name to save.")
@@ -152,9 +158,28 @@ fn contents(
             .on_hover_text("Name for a new profile");
         });
         let parts = &mut editor.parts;
+        widgets::scroll_on_focus(widgets::check_row(ui, look, &mut parts.apps, "App volumes and mutes"));
+        let apps_on = parts.apps;
+        ui.add_enabled_ui(apps_on, |ui| {
+            widgets::scroll_on_focus(widgets::check_row(ui, look, &mut parts.app_devices, "App devices"))
+                .on_disabled_hover_text(
+                    "App devices are saved with app volumes and mutes. Turn those on to include them.",
+                );
+        });
+        if !apps_on {
+            ui.add(
+                egui::Label::new(
+                    typography::rich(
+                        "App devices are saved with app volumes and mutes. Turn those on to include them.",
+                        Role::Footnote,
+                        look,
+                    )
+                    .color(p.text_muted),
+                )
+                .wrap(),
+            );
+        }
         for (on, text) in [
-            (&mut parts.apps, "App volumes and mutes"),
-            (&mut parts.app_devices, "App devices"),
             (&mut parts.master, "Master volume"),
             (&mut parts.output_device, "Default output"),
             (&mut parts.input_device, "Default input"),
@@ -192,6 +217,12 @@ fn contents(
     );
     ui.add_space(look.m.gap);
 
+    // A rename draft for a profile that is gone (replaced by an import) is dropped.
+    if let Some((target, _)) = &editor.renaming
+        && !settings.presets.iter().any(|p| p.name.eq_ignore_ascii_case(target))
+    {
+        editor.renaming = None;
+    }
     let mut action = None;
     for (index, preset) in settings.presets.iter().enumerate() {
         ui.push_id(index, |ui| profile_card(ui, look, editor, index, preset, &mut action));
@@ -199,7 +230,10 @@ fn contents(
     let Some(action) = action else { return };
     match action {
         Action::Apply(i) => audio.send(Command::ApplyPreset(settings.presets[i].clone())),
-        Action::StartRename(i) => editor.renaming = Some((i, settings.presets[i].name.clone())),
+        Action::StartRename(i) => {
+            let name = settings.presets[i].name.clone();
+            editor.renaming = Some((name.clone(), name));
+        }
         Action::Rename(i, new) => {
             let new: String = new.trim().chars().take(80).collect();
             let old = settings.presets[i].name.clone();
@@ -262,7 +296,7 @@ fn profile_card(
         ui.set_width(ui.available_width());
         let mut cancel = false;
         match &mut editor.renaming {
-            Some((i, draft)) if *i == index => {
+            Some((target, draft)) if target.eq_ignore_ascii_case(name) => {
                 ui.horizontal_wrapped(|ui| {
                     let field = widgets::scroll_on_focus(
                         ui.add(
@@ -471,6 +505,58 @@ mod tests {
         assert_eq!(settings.hotkeys, vec![shortcut("Games"), shortcut("Work")]);
         retarget_shortcuts(&mut settings, "Work", None);
         assert_eq!(settings.hotkeys, vec![shortcut("Games")]);
+    }
+
+    /// The names of the profiles whose rename field is on screen.
+    fn rename_fields(settings: &mut Settings, editor: &mut PresetEditor) -> Vec<String> {
+        let harness = Harness::new(Density::Comfortable);
+        let (audio, mut errors, snapshot) = (AudioHandle::detached(), Vec::new(), AudioSnapshot::default());
+        let frame =
+            harness.run(500.0, 900.0, |ui| show(ui, &harness.look, editor, settings, &snapshot, &audio, &mut errors));
+        frame.widgets.iter().filter_map(|w| w.name.strip_prefix("New name for ")).map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_rename_follows_its_profile_when_another_is_inserted_before_it() {
+        let mut settings =
+            Settings { presets: vec![preset("A", vec![], false), preset("B", vec![], false)], ..Default::default() };
+        let mut editor = PresetEditor { renaming: Some(("B".into(), "B2".into())), ..Default::default() };
+        assert_eq!(rename_fields(&mut settings, &mut editor), ["B"]);
+
+        // Duplicating A inserts "A copy" ahead of B, moving B to index 2.
+        let copy = preset("A copy", vec![], false);
+        settings.presets.insert(1, copy);
+        assert_eq!(settings.presets[2].name, "B");
+        assert_eq!(rename_fields(&mut settings, &mut editor), ["B"], "still B, not the new copy");
+        assert_eq!(editor.renaming.as_ref().map(|(_, draft)| draft.as_str()), Some("B2"));
+
+        // If the profile is replaced (an import), the stale draft is dropped.
+        settings.presets = vec![preset("C", vec![], false)];
+        assert!(rename_fields(&mut settings, &mut editor).is_empty());
+        assert!(editor.renaming.is_none());
+    }
+
+    #[test]
+    fn app_devices_need_app_volumes_and_say_so() {
+        let harness = Harness::new(Density::Comfortable);
+        let mut settings = Settings::default();
+        let snapshot = AudioSnapshot::default();
+        let mut editor = PresetEditor {
+            parts: CaptureParts { apps: false, app_devices: true, ..CaptureParts::default() },
+            ..Default::default()
+        };
+        let audio = AudioHandle::detached();
+        let mut errors = Vec::new();
+        let frame = harness.run(500.0, 900.0, |ui| {
+            show(ui, &harness.look, &mut editor, &mut settings, &snapshot, &audio, &mut errors)
+        });
+        assert!(!editor.parts.app_devices, "a device-only selection is cleared");
+        let devices = frame.widgets.iter().find(|w| w.name == "App devices").expect("the App devices option");
+        assert!(devices.disabled);
+        assert!(
+            frame.widgets.iter().any(|w| w.name.contains("saved with app volumes and mutes")),
+            "the dependency must be explained"
+        );
     }
 
     #[test]

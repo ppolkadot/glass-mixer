@@ -293,6 +293,7 @@ pub struct VolumePreset {
 pub struct CaptureParts {
     pub apps: bool,
     /// Each saved app's output choice, including following the system default.
+    /// It is stored on the app entries, so it has no effect without `apps`.
     pub app_devices: bool,
     pub master: bool,
     pub output_device: bool,
