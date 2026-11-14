@@ -97,6 +97,42 @@ pub(crate) fn run(rx: Receiver<Msg>, tx: Sender<Msg>, shared: Arc<Shared>) {
     log::info!("audio engine thread exiting");
 }
 
+/// When to run another reduction pass after a nonfatal read or write failed. It is
+/// independent of the structural retry (`retry_at`): a failed reduction must not
+/// withhold a healthy snapshot, and a healthy one must not hide a failed reduction.
+struct ReductionRetry {
+    at: Option<Instant>,
+    backoff: Duration,
+}
+
+impl Default for ReductionRetry {
+    fn default() -> Self {
+        Self { at: None, backoff: Duration::from_millis(250) }
+    }
+}
+
+impl ReductionRetry {
+    /// Records the outcome of a pass: schedules the next one with a growing,
+    /// capped delay while failures remain, and starts over once none do.
+    fn note(&mut self, pending: bool, now: Instant) {
+        if pending {
+            self.at = Some(now + self.backoff);
+            self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
+        } else {
+            *self = Self::default();
+        }
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if self.at.is_some_and(|at| now >= at) {
+            self.at = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub(super) struct Runner {
     pub(super) engine: Option<Engine>,
     tx: Sender<Msg>,
@@ -104,6 +140,7 @@ pub(super) struct Runner {
     dirty: Dirty,
     retry_at: Option<Instant>,
     backoff: Duration,
+    reduction_retry: ReductionRetry,
     delayed_rebuild: Option<Instant>,
     device_events: Coalesce,
     pub(super) last_meter_poll: Instant,
@@ -132,6 +169,7 @@ impl Runner {
             dirty: Dirty::default(),
             retry_at: Some(Instant::now()),
             backoff: Duration::from_millis(250),
+            reduction_retry: ReductionRetry::default(),
             delayed_rebuild: None,
             device_events: Coalesce::default(),
             last_meter_poll: Instant::now(),
@@ -326,6 +364,9 @@ impl Runner {
 
     fn maintain(&mut self) {
         let now = Instant::now();
+        if self.reduction_retry.take_due(now) {
+            self.dirty.values = true;
+        }
         if self.delayed_rebuild.is_some_and(|t| now >= t) {
             self.delayed_rebuild = None;
             self.dirty.rebuild = true;
@@ -336,6 +377,7 @@ impl Runner {
         if self.dirty.rebuild {
             self.dirty = Dirty::default();
             self.engine = None;
+            self.reduction_retry = ReductionRetry::default();
             self.retry_at = Some(now);
         }
 
@@ -373,9 +415,11 @@ impl Runner {
         let engine = self.engine.as_mut().expect("engine present");
         let result = engine.refresh(dirty, &self.shared).and_then(|()| engine.snapshot(&self.shared));
         let engine_solo = engine.reductions.solo.clone();
+        let reduction_retry_pending = engine.reduction_retry_pending;
         match result {
             Ok(snapshot) => {
                 self.solo = engine_solo;
+                self.reduction_retry.note(reduction_retry_pending, now);
                 self.backoff = Duration::from_millis(250);
                 if self.was_unavailable {
                     self.was_unavailable = false;
@@ -386,6 +430,7 @@ impl Runner {
             Err(e) if is_fatal(e.code()) => {
                 log::warn!("fatal audio error, rebuilding: {e}");
                 self.engine = None;
+                self.reduction_retry = ReductionRetry::default();
                 self.fail(format!("Audio devices are reinitializing ({})", e.message()));
             }
             Err(e) => {
@@ -418,6 +463,11 @@ impl Runner {
         };
         if let Some(t) = self.retry_at
             && (self.engine.is_none() || self.dirty.any())
+        {
+            consider(t);
+        }
+        if let Some(t) = self.reduction_retry.at
+            && self.engine.is_some()
         {
             consider(t);
         }
@@ -504,5 +554,42 @@ mod tests {
         assert_eq!(runner.focus.applied(), Some(&99), "the latest report wins");
         runner.apply(Command::SetFocusRules(Vec::new()));
         assert!(runner.focus.applied().is_none(), "disabling rules clears focus");
+    }
+
+    #[test]
+    fn reduction_retry_wakes_without_messages_and_resets_after_success() {
+        let now = Instant::now();
+        let mut retry = ReductionRetry::default();
+        retry.note(true, now);
+        assert!(!retry.take_due(now + Duration::from_millis(249)));
+        assert!(retry.take_due(now + Duration::from_millis(250)));
+        retry.note(true, now + Duration::from_millis(250));
+        assert_eq!(retry.at, Some(now + Duration::from_millis(750)));
+        retry.note(false, now + Duration::from_millis(300));
+        assert!(retry.at.is_none());
+        retry.note(true, now + Duration::from_millis(400));
+        assert_eq!(retry.at, Some(now + Duration::from_millis(650)));
+    }
+
+    #[test]
+    fn reduction_retry_backoff_never_exceeds_the_cap() {
+        let now = Instant::now();
+        let mut retry = ReductionRetry::default();
+        for _ in 0..20 {
+            retry.note(true, now);
+            assert!(retry.at.is_some_and(|at| at <= now + MAX_BACKOFF));
+        }
+        retry.note(false, now);
+        assert!(retry.at.is_none());
+    }
+
+    #[test]
+    fn reduction_retry_deadline_is_ignored_while_the_engine_is_absent() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut runner = Runner::new(tx, Arc::new(Shared::default()));
+        runner.retry_at = None;
+        assert!(runner.next_timeout().is_none());
+        runner.reduction_retry.at = Some(Instant::now());
+        assert!(runner.next_timeout().is_none(), "no engine, no retry wake");
     }
 }

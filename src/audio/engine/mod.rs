@@ -88,6 +88,9 @@ pub(super) struct Engine {
     /// Set by `cycle_output`, so the resulting switch is announced.
     announce_output_until: Option<Instant>,
     reductions: Reductions,
+    /// Set by the last reduction pass when a nonfatal read or write failed and
+    /// another pass is needed; the runner schedules it.
+    reduction_retry_pending: bool,
     routing: Option<AppRouting>,
     /// Each process's device preference as last read from (or written to)
     /// Windows. Read once per process: Windows doesn't notify changes.
@@ -135,6 +138,7 @@ impl Engine {
             announce_output_until: None,
             routing,
             routes: HashMap::new(),
+            reduction_retry_pending: false,
             reductions: Reductions {
                 solo: None,
                 solo_level: Reduction { factor: 0.2, mute: false },
@@ -948,6 +952,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(is_fatal(err.code()));
+    }
+
+    #[test]
+    fn failed_restoration_remains_pending_until_success_or_user_intervention() {
+        use crate::audio::attenuation::Level;
+        use std::cell::Cell;
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        let key = AppKey::Exe("music.exe".into());
+        let session = ();
+        let base = Level { volume: 0.8, muted: false };
+        let lowered = Level { volume: 0.2, muted: true };
+        let current = Cell::new(lowered);
+        let fail_mute = Cell::new(true);
+        let mut reductions = Reductions {
+            solo: None,
+            solo_level: Reduction { factor: 0.25, mute: true },
+            focus_rules: Vec::new(),
+            foreground: None,
+            mic: None,
+            mic_active: false,
+            ledger: Ledger::default(),
+        };
+        let _ = reductions.ledger.reconcile("s", base, Some(Reduction { factor: 0.25, mute: true }));
+        reductions.ledger.record_written("s", lowered);
+        let run_pass = |r: &mut Reductions| {
+            execute_reductions(
+                r,
+                [(&session, "s", "Music", &key)].into_iter(),
+                |_| Ok(current.get()),
+                |_, volume| {
+                    current.set(Level { volume, ..current.get() });
+                    Ok(())
+                },
+                |_, muted| {
+                    if fail_mute.replace(false) {
+                        Err(windows::core::Error::from_hresult(E_ACCESSDENIED))
+                    } else {
+                        current.set(Level { muted, ..current.get() });
+                        Ok(())
+                    }
+                },
+            )
+        };
+        assert!(run_pass(&mut reductions).unwrap());
+        assert!(reductions.ledger.contains("s"));
+        assert!(!run_pass(&mut reductions).unwrap());
+        assert_eq!(current.get(), base);
+        assert!(reductions.ledger.is_empty());
+
+        let _ = reductions.ledger.reconcile("s", base, Some(Reduction { factor: 0.25, mute: true }));
+        reductions.ledger.record_written("s", lowered);
+        current.set(lowered);
+        fail_mute.set(true);
+        assert!(run_pass(&mut reductions).unwrap());
+        let user = Level { volume: 0.3, muted: false };
+        current.set(user);
+        assert!(!run_pass(&mut reductions).unwrap());
+        assert_eq!(current.get(), user);
+        assert!(reductions.ledger.is_empty());
     }
 
     #[test]

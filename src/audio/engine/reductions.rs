@@ -76,6 +76,7 @@ impl Engine {
 
     /// Writes the reductions that should apply now and undoes those that ended.
     pub(super) fn apply_reductions(&mut self, shared: &Shared) -> WinResult<()> {
+        self.reduction_retry_pending = false;
         if let Some(key) = &self.reductions.solo
             && !self.all_sessions().any(|s| &s.key == key)
         {
@@ -87,7 +88,7 @@ impl Engine {
             return Ok(());
         }
         let sessions = iter_sessions(&self.sessions).map(|s| (s, s.instance_id.as_str(), s.name.as_str(), &s.key));
-        execute_reductions(
+        self.reduction_retry_pending = execute_reductions(
             &mut self.reductions,
             sessions,
             |s| unsafe {
@@ -95,7 +96,8 @@ impl Engine {
             },
             |s, v| unsafe { s.simple.SetMasterVolume(v, &OWN_EVENT_CONTEXT) },
             |s, m| unsafe { s.simple.SetMute(m, &OWN_EVENT_CONTEXT) },
-        )
+        )?;
+        Ok(())
     }
 
     /// Puts back every level a reduction changed (when it is still the written
@@ -131,13 +133,15 @@ pub(super) fn release_in(ledger: &mut Ledger, sets: &[&SessionSet]) {
     }
 }
 
+/// Returns `true` when a nonfatal read or write failed, so another pass is needed.
 pub(super) fn execute_reductions<'a, S: 'a>(
     reductions: &mut Reductions,
     sessions: impl Iterator<Item = (&'a S, &'a str, &'a str, &'a AppKey)> + Clone,
     mut read_level: impl FnMut(&S) -> WinResult<Level>,
     mut set_volume: impl FnMut(&S, f32) -> WinResult<()>,
     mut set_mute: impl FnMut(&S, bool) -> WinResult<()>,
-) -> WinResult<()> {
+) -> WinResult<bool> {
+    let mut retry_needed = false;
     for (s, instance_id, name, key) in sessions.clone() {
         let wanted = reductions.wanted(key);
         if wanted.is_none() && !reductions.ledger.contains(instance_id) {
@@ -148,6 +152,7 @@ pub(super) fn execute_reductions<'a, S: 'a>(
             Err(e) if is_fatal(e.code()) => return Err(e),
             Err(e) => {
                 log::debug!("couldn't read {name} for a reduction: {e}");
+                retry_needed = true;
                 continue;
             }
         };
@@ -166,10 +171,11 @@ pub(super) fn execute_reductions<'a, S: 'a>(
                 return Err(e);
             }
             log::warn!("couldn't change {name} for a reduction: {e}");
+            retry_needed = true;
         }
     }
     reductions.ledger.retain(|id| sessions.clone().any(|(_, instance_id, _, _)| instance_id == id));
-    Ok(())
+    Ok(retry_needed)
 }
 
 fn write_reduction_with(
