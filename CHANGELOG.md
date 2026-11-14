@@ -65,7 +65,11 @@ Package details and checksums are in [the release record](docs/releases/0.6.0.md
   retry on their own with a capped backoff while healthy state keeps
   publishing; the tray menu follows the app's selected theme, accent, and
   high-contrast setting, including while the window is hidden; and changing
-  only the Windows animation preference now reapplies the style immediately.
+  only the Windows animation preference now reapplies the style immediately;
+  an unreadable audio session is retried on a capped backoff instead of
+  spinning; a per-app device change that only partly succeeds says so;
+  "App devices" in a new profile is available only with app volumes and
+  mutes; and a profile rename stays on its profile when others are duplicated.
 - **Code organization:** extracted `platform/hotkey_model.rs`,
   `ui/hotkey_editor.rs`, `ui/toasts.rs`, and `src/audio/engine/*` submodules,
   and removed dead endpoint commands and registry mono helpers.

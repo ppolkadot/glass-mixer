@@ -9,21 +9,22 @@
 
 ## 0.6.0 readiness fixes (2026-11-13, `codex/0.6.0-readiness-fixes`)
 
-Fixes for findings F1-F7 from `docs/superpowers/plans/2026-11-13-0.6.0-readiness-remediation.md`.
+Fixes for findings F1-F7 from `docs/superpowers/plans/2026-11-13-0.6.0-readiness-remediation.md`,
+and for four further findings (F8-F11) from a follow-up review.
 The release verification below is kept as the earlier record of the pre-fix build.
 
 - **Gate**, with every step's exit status checked (all exit 0):
   - `cargo fmt --check`: passed.
   - `cargo clippy --locked --all-targets -- -D warnings`: passed.
-  - `cargo test --locked`: **232** library tests passed (3 ignored), **5** binary
+  - `cargo test --locked`: **235** library tests passed (3 ignored), **5** binary
     tests passed, **1** source-encoding test passed, and the **13** hardware
     integration tests stayed ignored.
   - `git diff --check`, `scripts/check-version.ps1 -Tag v0.6.0`, and the
     PowerShell AST parse of every `scripts/*.ps1`: passed.
   - `scripts/package.ps1`, `scripts/verify-package.ps1 -RequireInstaller`, and
     `scripts/check-version.ps1 -Tag v0.6.0 -Exe target\release\glass-mixer.exe`:
-    passed. Executable `26,751,488` bytes, portable ZIP `14,425,512` bytes,
-    installer `12,331,469` bytes; checksums are in
+    passed. Executable `26,758,656` bytes, portable ZIP `14,427,744` bytes,
+    installer `12,331,543` bytes; checksums are in
     [releases/0.6.0.md](releases/0.6.0.md). All unsigned.
 - **New regressions:**
   - F1: none executable locally. A read-only `gh release view v0.5.0` failed
@@ -42,14 +43,32 @@ The release verification below is kept as the earlier record of the pre-fix buil
     runs without COM, so the final PID-to-app mapping on a live session is not
     covered.
   - F5: `audio::engine::tests::failed_restoration_remains_pending_until_success_or_user_intervention`,
-    `reduction_retry_wakes_without_messages_and_resets_after_success`,
-    `reduction_retry_backoff_never_exceeds_the_cap`, and
-    `reduction_retry_deadline_is_ignored_while_the_engine_is_absent`.
+    `snapshot_retry_wakes_without_messages_and_resets_after_success`,
+    `snapshot_retry_backoff_never_exceeds_the_cap`, and
+    `snapshot_retry_deadline_is_ignored_while_the_engine_is_absent`.
   - F6: the palette loop in
     `platform::tray_menu::tests::native_menu_uses_polaris_semibold_and_keeps_strings_and_mute_state`
     (a message-only window; the stored palette and background brush follow
     `set_palette`).
   - F7: `app::tests::animation_preference_invalidates_the_style_without_a_palette_change`.
+  - F8: a session that is listed but unreadable no longer re-queues
+    `SessionsChanged` on every snapshot (a busy loop that bypassed the backoff).
+    The engine flags it and the runner retries on its capped backoff, the same
+    timer as F5 (`audio::engine::runner::tests::snapshot_retry_*`). The snapshot read itself needs COM, so the
+    unreadable-session path is covered by reading the code and by those timer
+    tests, not by a fault-injection test.
+  - F9: a partly failed per-app routing now returns a warning that names the
+    failed operation and the count changed, and keeps the successful changes
+    (`audio::engine::routing::tests::partial_routing_failures_are_reported_and_total_failures_are_errors`).
+    Profile application reports it in its notes.
+  - F10: "App devices" can't be saved without "App volumes and mutes", because
+    a device is stored on an app entry. The option is disabled with an
+    explanation and a device-only selection is cleared
+    (`ui::presets::tests::app_devices_need_app_volumes_and_say_so`). Device-only
+    profile entries were not added.
+  - F11: a profile rename is keyed by the profile's name instead of its list
+    position, so duplicating or importing profiles can't move it to another one
+    (`ui::presets::tests::a_rename_follows_its_profile_when_another_is_inserted_before_it`).
 - **Not run:** live GUI checks (`scripts/verify-ui.ps1`, `scripts/lifecycle.ps1`,
   `scripts/hotkey-smoke.ps1`), the installer lifecycle
   (`scripts/installer-smoke.ps1`), the hardware audio tests, a real audio-service
