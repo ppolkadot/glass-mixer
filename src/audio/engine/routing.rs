@@ -33,8 +33,9 @@ impl Engine {
         Ok(None)
     }
 
-    /// Sets (or resets) the output of every process of the app.
-    pub(super) fn route_app(&mut self, key: &AppKey, device: Option<&str>) -> Result<(), ApplyError> {
+    /// Sets (or resets) the output of every process of the app. `Ok(Some(warning))`
+    /// means some processes were changed and others still running were not.
+    pub(super) fn route_app(&mut self, key: &AppKey, device: Option<&str>) -> Result<Option<String>, ApplyError> {
         let routing = self.routing.as_ref().ok_or_else(|| {
             ApplyError::Message("Choosing a device per app isn't supported on this version of Windows.".into())
         })?;
@@ -46,6 +47,7 @@ impl Engine {
         }
         let name = self.app_name(key).unwrap_or_else(|| "the app".into());
         let mut set = 0;
+        let mut failed = 0;
         let mut first_error = None;
         for (pid, created) in processes {
             match routing.set(pid, Flow::Output, device) {
@@ -56,15 +58,13 @@ impl Engine {
                 }
                 // A helper process may exit between listing and routing it.
                 Err(e) if created.is_none_or(|t| process::is_running(pid, t)) => {
+                    failed += 1;
                     first_error.get_or_insert(e);
                 }
                 Err(_) => {}
             }
         }
-        match first_error {
-            Some(e) if set == 0 => Err(ApplyError::Windows(format!("Couldn't change the device of {name}"), e)),
-            _ => Ok(()),
-        }
+        route_result(&name, set, failed, first_error)
     }
 
     /// Every process with a session of the app, with its creation time when known.
@@ -125,5 +125,42 @@ impl Engine {
             }
             app.route = route;
         }
+    }
+}
+
+/// The outcome of routing an app's processes: nothing changed is an error, and a
+/// partial change keeps what succeeded but says what did not.
+fn route_result(
+    name: &str,
+    set: usize,
+    failed: usize,
+    first_error: Option<windows::core::Error>,
+) -> Result<Option<String>, ApplyError> {
+    let Some(e) = first_error else { return Ok(None) };
+    let error = ApplyError::Windows(format!("Couldn't change the device of {name}"), e);
+    if set == 0 {
+        return Err(error);
+    }
+    let text = error.to_string();
+    Ok(Some(format!(
+        "{}. The device was changed for {set} of its {} processes.",
+        text.trim_end_matches('.'),
+        set + failed
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::E_ACCESSDENIED;
+
+    #[test]
+    fn partial_routing_failures_are_reported_and_total_failures_are_errors() {
+        let denied = || Some(windows::core::Error::from_hresult(E_ACCESSDENIED));
+        assert!(matches!(route_result("Music", 2, 0, None), Ok(None)));
+        let warning = route_result("Music", 1, 1, denied()).unwrap().expect("a partial change warns");
+        assert!(warning.contains("Couldn't change the device of Music"), "{warning}");
+        assert!(warning.contains("changed for 1 of its 2 processes"), "{warning}");
+        assert!(matches!(route_result("Music", 0, 2, denied()), Err(ApplyError::Windows(..))));
     }
 }

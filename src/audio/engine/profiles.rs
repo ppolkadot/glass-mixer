@@ -74,8 +74,12 @@ impl Engine {
                 && !self.outputs.iter().any(|d| d.id.eq_ignore_ascii_case(&choice.id))
             {
                 outcome.notes.push(format!("{} isn't connected for {}", choice.name, entry.name));
-            } else if let Err(e) = self.route_app(&entry.key, device.device().map(|d| d.id.as_str())) {
-                outcome.notes.push(format!("{}'s device ({e})", entry.name));
+            } else {
+                match self.route_app(&entry.key, device.device().map(|d| d.id.as_str())) {
+                    Ok(None) => {}
+                    Ok(Some(warning)) => outcome.notes.push(format!("{}'s device ({warning})", entry.name)),
+                    Err(e) => outcome.notes.push(format!("{}'s device ({e})", entry.name)),
+                }
             }
         }
         Ok(outcome)

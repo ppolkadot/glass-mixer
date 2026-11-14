@@ -91,6 +91,10 @@ pub(super) struct Engine {
     /// Set by the last reduction pass when a nonfatal read or write failed and
     /// another pass is needed; the runner schedules it.
     reduction_retry_pending: bool,
+    /// Set by the last snapshot when a session couldn't be read for a nonfatal
+    /// reason that may pass; the runner schedules another read with a backoff
+    /// instead of this engine re-queuing itself in a tight loop.
+    session_retry_pending: bool,
     routing: Option<AppRouting>,
     /// Each process's device preference as last read from (or written to)
     /// Windows. Read once per process: Windows doesn't notify changes.
@@ -139,6 +143,7 @@ impl Engine {
             routing,
             routes: HashMap::new(),
             reduction_retry_pending: false,
+            session_retry_pending: false,
             reductions: Reductions {
                 solo: None,
                 solo_level: Reduction { factor: 0.2, mute: false },
@@ -256,8 +261,10 @@ impl Engine {
     fn snapshot(&mut self, shared: &Shared) -> WinResult<AudioSnapshot> {
         self.apply_start_rules(shared)?;
         self.apply_reductions(shared)?;
+        self.session_retry_pending = false;
         let mut facts = Vec::new();
         let mut needs_sync = false;
+        let mut unreadable = false;
         let default_id = self.output.as_ref().map(|ep| ep.id.as_str());
         let on_default: HashSet<&AppKey> = self
             .sessions
@@ -280,13 +287,16 @@ impl Engine {
                     Ok(Some(f)) => facts.push(f),
                     Ok(None) => needs_sync = true,
                     Err(e) if is_fatal(e.code()) => return Err(e),
+                    // Re-enumerating can't fix a session that is still listed but
+                    // unreadable, so retry on the runner's backoff, not by message.
                     Err(e) => {
                         log::debug!("skipping session {}: {e}", s.instance_id);
-                        needs_sync = true;
+                        unreadable = true;
                     }
                 }
             }
         }
+        self.session_retry_pending = unreadable;
         if needs_sync {
             let _ = self.tx.send(Msg::SessionsChanged);
         }
@@ -336,7 +346,7 @@ impl Engine {
     }
 
     /// Applies a command. Returns whether device lists must be re-read.
-    fn apply(&mut self, cmd: &Command) -> Result<bool, ApplyError> {
+    fn apply(&mut self, cmd: &Command, shared: &Shared) -> Result<bool, ApplyError> {
         let ctx = &OWN_EVENT_CONTEXT;
         match cmd {
             Command::ToggleInputMute => {
@@ -431,7 +441,9 @@ impl Engine {
                 self.mark_key_intervened(&key);
             }
             Command::SetAppOutput { key, device } => {
-                self.route_app(key, device.as_deref())?;
+                if let Some(warning) = self.route_app(key, device.as_deref())? {
+                    shared.push_notice(NoticeLevel::Warning, warning);
+                }
                 return Ok(true);
             }
             Command::ResetAllAppDevices => {
