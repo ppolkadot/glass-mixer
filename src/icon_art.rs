@@ -10,14 +10,20 @@ pub fn render_app_icon(size: u32, muted: bool) -> Vec<u8> {
     let s = size as f32;
     let mut out = vec![0u8; (size * size * 4) as usize];
 
-    // Gradient endpoints (top-left -> bottom-right).
+    // Single-hue tonal gradient endpoints (top-left -> bottom-right).
     let (c0, c1) =
-        if muted { ([0x6b, 0x72, 0x80], [0x37, 0x41, 0x51]) } else { ([0x8b, 0x5c, 0xf6], [0x06, 0xb6, 0xd4]) };
-    let corner = 0.24 * s;
-    let bar_w = 0.12 * s;
-    let bar_bottom = 0.76 * s;
-    let bars = [(0.31, 0.47), (0.50, 0.25), (0.69, 0.38)];
-    let bar_alpha = if muted { 0.55 } else { 0.96 };
+        if muted { ([0x64, 0x6b, 0x78], [0x37, 0x3f, 0x4d]) } else { ([0x7c, 0x5c, 0xff], [0x4c, 0x2f, 0xd9]) };
+    let corner = 0.225 * s;
+    let track_top = 0.24 * s;
+    let track_bottom = 0.76 * s;
+    let track_half_w = 0.0375 * s;
+    let track_half_h = (track_bottom - track_top) / 2.0;
+    let track_cy = (track_top + track_bottom) / 2.0;
+    let knob_r = 0.090 * s;
+    let knob_gap = knob_r + 0.025 * s;
+    let faders = [(0.29, 0.56), (0.50, 0.36), (0.71, 0.48)];
+    let track_alpha = if muted { 0.30 } else { 0.42 };
+    let fill_alpha = if muted { 0.55 } else { 0.96 };
 
     for py in 0..size {
         for px in 0..size {
@@ -32,25 +38,39 @@ pub fn render_app_icon(size: u32, muted: bool) -> Vec<u8> {
                         continue;
                     }
                     let t = ((x + y) / (2.0 * s)).clamp(0.0, 1.0);
-                    let mut rgb = [
+                    let mut bg_rgb = [
                         lerp(c0[0] as f32, c1[0] as f32, t) / 255.0,
                         lerp(c0[1] as f32, c1[1] as f32, t) / 255.0,
                         lerp(c0[2] as f32, c1[2] as f32, t) / 255.0,
                     ];
+                    if d > -0.045 * s && y < 0.35 * s {
+                        let rim = (1.0 - y / (0.35 * s)).clamp(0.0, 1.0) * 0.14;
+                        bg_rgb = mix(bg_rgb, [1.0, 1.0, 1.0], rim);
+                    }
+                    let mut rgb = bg_rgb;
 
-                    for (cx, top) in bars {
-                        let cx = cx * s;
-                        let top = top * s;
-                        let half_h = (bar_bottom - top) / 2.0;
-                        let db = sd_round_box(x - cx, y - (top + half_h), bar_w / 2.0, half_h, bar_w / 2.0);
-                        if db <= 0.0 {
-                            rgb = mix(rgb, [1.0, 1.0, 1.0], bar_alpha);
+                    for (fx, fy) in faders {
+                        let cx = fx * s;
+                        let ky = fy * s;
+                        let dx = x - cx;
+                        let dk = (dx * dx + (y - ky) * (y - ky)).sqrt();
+                        if dk <= knob_r {
+                            rgb = mix(bg_rgb, [1.0, 1.0, 1.0], fill_alpha);
+                        } else if dk > knob_gap {
+                            let dt = sd_round_box(dx, y - track_cy, track_half_w, track_half_h, track_half_w);
+                            if dt <= 0.0 {
+                                let alpha = if y > ky { fill_alpha } else { track_alpha };
+                                rgb = mix(bg_rgb, [1.0, 1.0, 1.0], alpha);
+                            }
                         }
                     }
 
                     if muted {
                         let dl = sd_segment(x, y, 0.22 * s, 0.22 * s, 0.78 * s, 0.78 * s);
-                        if dl <= 0.055 * s {
+                        if dl <= 0.095 * s {
+                            rgb = bg_rgb;
+                        }
+                        if dl <= 0.050 * s {
                             rgb = [1.0, 1.0, 1.0];
                         }
                     }

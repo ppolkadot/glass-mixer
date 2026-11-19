@@ -5,14 +5,12 @@ pub mod backdrop;
 pub mod exit_request;
 pub mod fonts;
 pub mod foreground;
-pub mod hotkey_model;
 pub mod hotkeys;
 pub mod icons;
 pub mod single_instance;
 pub mod startup;
 pub mod sysprefs;
 pub mod tray;
-mod tray_menu;
 pub mod window;
 
 use windows::core::HSTRING;

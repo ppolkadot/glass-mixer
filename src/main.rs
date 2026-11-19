@@ -25,11 +25,9 @@ fn main() -> ExitCode {
     }
 
     let Some(_instance) = single_instance::acquire() else {
-        if should_activate_existing(&args, dev_profile_active()) {
-            log::info!("another instance is running; activating it");
+        log::info!("another instance is running; activating it");
+        if !dev_profile_active() {
             window::activate_existing_instance();
-        } else {
-            log::info!("another instance is running; leaving it undisturbed");
         }
         return ExitCode::SUCCESS;
     };
@@ -42,7 +40,7 @@ fn main() -> ExitCode {
         log::info!("first run: using default settings");
     }
     let settings = outcome.into_settings();
-    if should_repair_startup_path(cfg!(debug_assertions), dev_profile_active()) {
+    if !dev_profile_active() {
         startup::repair_path_if_enabled();
     }
 
@@ -90,14 +88,6 @@ fn main() -> ExitCode {
 fn dev_profile_active() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("GLASS_MIXER_DEV_PROFILE").is_some_and(|dir| std::path::Path::new(&dir).is_absolute())
-}
-
-fn should_repair_startup_path(debug_build: bool, dev_profile: bool) -> bool {
-    !debug_build && !dev_profile
-}
-
-fn should_activate_existing(args: &[String], dev_profile: bool) -> bool {
-    !dev_profile && !args.iter().skip(1).any(|a| a == startup::MINIMIZED_ARG)
 }
 
 fn wants_wgpu_fallback(args: &[String], dev_profile: bool, dev_renderer: Option<&str>) -> bool {
@@ -300,14 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn minimized_or_dev_profile_second_launch_skips_activation() {
-        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert!(should_activate_existing(&args(&["glass-mixer.exe"]), false));
-        assert!(!should_activate_existing(&args(&["glass-mixer.exe", startup::MINIMIZED_ARG]), false));
-        assert!(!should_activate_existing(&args(&["glass-mixer.exe"]), true));
-    }
-
-    #[test]
     fn restored_position_uses_the_target_monitors_dpi() {
         let monitors = [
             MonitorArea { left: 0, top: 0, right: 1920, bottom: 1080, scale: 1.0 },
@@ -318,13 +300,5 @@ mod tests {
         assert_eq!(restore_position(WindowGeometry { x: 1100.0, ..g }, false, &monitors), None);
         assert_eq!(restore_position(WindowGeometry { x: 2200.0, y: 200.0, ..g }, true, &monitors), Some((2200, 200)));
         assert_eq!(restore_position(WindowGeometry { x: 5000.0, ..g }, true, &monitors), None);
-    }
-
-    #[test]
-    fn startup_path_repair_is_skipped_in_debug_builds_and_dev_profiles() {
-        assert!(should_repair_startup_path(false, false));
-        assert!(!should_repair_startup_path(true, false));
-        assert!(!should_repair_startup_path(false, true));
-        assert!(!should_repair_startup_path(true, true));
     }
 }

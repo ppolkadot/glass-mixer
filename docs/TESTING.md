@@ -7,135 +7,6 @@
 > old ones: `107a305` is now `ea9c816`, `e47b328` is `209e563`, `518cd33` is `2561aee`
 > and `41f656d` is `86fdb9b`.
 
-## 0.6.0 readiness fixes (2026-11-13, `codex/0.6.0-readiness-fixes`)
-
-Fixes for findings F1-F7 from `docs/superpowers/plans/2026-11-13-0.6.0-readiness-remediation.md`,
-and for five further findings (F8-F12) from follow-up reviews.
-The release verification below is kept as the earlier record of the pre-fix build.
-
-- **Gate**, with every step's exit status checked (all exit 0):
-  - `cargo fmt --check`: passed.
-  - `cargo clippy --locked --all-targets -- -D warnings`: passed.
-  - `cargo test --locked`: **236** library tests passed (3 ignored), **5** binary
-    tests passed, **1** source-encoding test passed, and the **13** hardware
-    integration tests stayed ignored.
-  - `git diff --check`, `scripts/check-version.ps1 -Tag v0.6.0`, and the
-    PowerShell AST parse of every `scripts/*.ps1`: passed.
-  - `scripts/package.ps1`, `scripts/verify-package.ps1 -RequireInstaller`, and
-    `scripts/check-version.ps1 -Tag v0.6.0 -Exe target\release\glass-mixer.exe`:
-    passed. Executable `26,758,656` bytes, portable ZIP `14,427,560` bytes,
-    installer `12,333,764` bytes; checksums are in
-    [releases/0.6.0.md](releases/0.6.0.md). All unsigned.
-- **New regressions:**
-  - F1: none executable locally. A read-only `gh release view v0.5.0` failed
-    with no checkout and no `GH_REPO` ("no git remotes found") and succeeded
-    with `GH_REPO=ppolkadot/glass-mixer`. The publish job itself has not run on
-    GitHub.
-  - F2: `transfer::tests::retention_preserves_the_current_backup_after_a_clock_rollback`
-    (a backdated save survives retention) and
-    `retention_ignores_directories_that_match_the_backup_pattern`.
-  - F3: `transfer::tests::a_large_supported_profile_collection_round_trips`
-    (128 profiles, over 1 MiB, imports back with no notes) and
-    `oversized_transfer_files_are_refused_before_creating_the_destination`.
-    Import reads at most the limit plus one byte from the opened handle.
-  - F4: `audio::engine::runner::tests::foreground_reports_are_kept_without_an_engine`
-    (the latest PID survives an absent engine; disabling rules clears it). It
-    runs without COM, so the final PID-to-app mapping on a live session is not
-    covered.
-  - F5: `audio::engine::tests::failed_restoration_remains_pending_until_success_or_user_intervention`,
-    `snapshot_retry_wakes_without_messages_and_resets_after_success`,
-    `snapshot_retry_backoff_never_exceeds_the_cap`, and
-    `snapshot_retry_deadline_is_ignored_while_the_engine_is_absent`.
-  - F6: the palette loop in
-    `platform::tray_menu::tests::native_menu_uses_polaris_semibold_and_keeps_strings_and_mute_state`
-    (a message-only window; the stored palette and background brush follow
-    `set_palette`).
-  - F7: `app::tests::animation_preference_invalidates_the_style_without_a_palette_change`.
-  - F8: a session that is listed but unreadable no longer re-queues
-    `SessionsChanged` on every snapshot (a busy loop that bypassed the backoff).
-    The engine flags it and the runner retries on its capped backoff, the same
-    timer as F5 (`audio::engine::runner::tests::snapshot_retry_*`). The snapshot read itself needs COM, so the
-    unreadable-session path is covered by reading the code and by those timer
-    tests, not by a fault-injection test.
-  - F9: a partly failed per-app routing now returns a warning that names the
-    failed operation and the count changed, and keeps the successful changes
-    (`audio::engine::routing::tests::partial_routing_failures_are_reported_and_total_failures_are_errors`).
-    Profile application reports it in its notes.
-  - F10: "App devices" can't be saved without "App volumes and mutes", because
-    a device is stored on an app entry. The option is disabled with an
-    explanation and a device-only selection is cleared
-    (`ui::presets::tests::app_devices_need_app_volumes_and_say_so`). Device-only
-    profile entries were not added.
-  - F11: a profile rename is keyed by the profile's name instead of its list
-    position, so duplicating or importing profiles can't move it to another one
-    (`ui::presets::tests::a_rename_follows_its_profile_when_another_is_inserted_before_it`).
-  - F12: applying an import discards every unsaved profile-rename draft (and
-    the other editor drafts), because an imported profile can share the name of
-    the one being renamed
-    (`app::tests::an_import_discards_a_rename_draft_even_for_a_profile_of_the_same_name`).
-- **Not run:** live GUI checks (`scripts/verify-ui.ps1`, `scripts/lifecycle.ps1`,
-  `scripts/hotkey-smoke.ps1`), the installer lifecycle
-  (`scripts/installer-smoke.ps1`), the hardware audio tests, a real audio-service
-  interruption, live Windows theme or animation switching, mixed-DPI tray
-  behavior, and the hosted tag-triggered publish job. `docs/VALIDATION_MATRIX.md`
-  is unchanged because none of those scenarios was rerun.
-
-## 0.6.0 release verification (2026-11-13, `main`)
-
-- **Gate**, with every step's exit status checked:
-  - `cargo fmt --check`: passed.
-  - `cargo clippy --locked --all-targets -- -D warnings`: passed (0 warnings
-    across library, binary, integration tests, and examples).
-  - `cargo test --locked`: **222** library tests passed (3 ignored), **5**
-    binary tests passed, **1** source-encoding test passed (`tests/source_encoding.rs`),
-    and the **13** real-hardware integration tests (`12` in `tests/audio_integration.rs`,
-    `1` in `tests/devices_integration.rs`) remained ignored as expected without
-    --ignored.
-  - New and expanded 0.6.0 tests cover:
-    - Font & typography: Polaris Bold weight chain (`platform::fonts`), 9 semantic
-      `Role` mappings, `polaris_tracking` interpolation/clamping, and zeroed
-      tracking when disabled (`ui::typography`), plus dynamic `percent_width`
-      measurement (`ui::widgets`).
-    - Theme & widgets: WCAG contrast thresholds for all palettes, reduced-motion
-      zero duration helper (`ui::theme`), semantic button kinds/names/focus,
-      segmented pill tabs, toggle row, disclosure chevron, combo icon, search
-      field, check row, icon glyph coverage, and 2.5 pt focus rings (`ui::widgets`).
-    - Views & toasts: toast deduplication, 3-toast cap, and visibility-frozen
-      expiry (`ui::toasts`), Mixer grouped cards/search/details/empty state,
-      Devices disclosure/controls, Presets cards/focus scrolling, Settings
-      minimum-width layout/shortcuts/backup/diagnostics, and standalone
-      `HotkeyEditor` (`ui::hotkey_editor`).
-    - Platform & performance: immediate `WM_SETTINGCHANGE`/`WM_DPICHANGED`/
-      `WM_DWMCOLORIZATIONCOLORCHANGED` wake signaling (`platform::window`),
-      theme/DPI-aware tray menu and derived `&` mnemonics (`platform::tray_menu`),
-      `DWMWA_BORDER_COLOR` calculation and retry keys (`platform::backdrop`),
-      unchanged tray menu state skip (`app`), and `settings_seen` diffing.
-    - Reliability & hardening: non-fatal reduction errors and Solo preservation
-      across rebuilds (`audio::engine`), early return on `LoadDevices` when
-      engine unavailable, non-caching of transient `Route::Unknown`, bounded UTF-16
-      slice in `file_description`, `SetStreamVolume` coalescing, engine thread
-      panic safety, `mic_ducking.targets` normalization and cap (`settings`),
-      `1e-6` float tolerance in `import_notes` (`transfer`), failed-save
-      `dirty_since` preservation and rate-limited toast, maximized geometry
-      preservation, `--minimized` second-instance non-activation, unfocused visible
-      window raising, and skipping startup path repair in debug builds / dev
-      profiles (`main`).
-  - `scripts/package.ps1` (with Inno Setup 6.7.3), `scripts/check-version.ps1`,
-    and `scripts/verify-package.ps1` ran and passed, producing and verifying
-    the release executable (`26,747,392` bytes, `25.5` MB), portable ZIP
-    (`14,423,400` bytes), installer (`12,329,429` bytes, `11.8` MB),
-    `THIRD-PARTY-NOTICES.txt` (168 crates), and `SHA256SUMS.txt` (all unsigned).
-- **Environment limitations (not run in this non-interactive sandbox):**
-  - Live desktop automation scripts (`scripts/verify-ui.ps1`,
-    `scripts/lifecycle.ps1`, `scripts/hotkey-smoke.ps1`) require an interactive
-    desktop foreground window (`GetForegroundWindow() != 0`), which is unavailable
-    in this sandbox session.
-  - The 13 `#[ignore]` hardware audio integration tests (`tests/audio_integration.rs`
-    and `tests/devices_integration.rs`) require physical Windows audio endpoints.
-  - `scripts/installer-smoke.ps1` was not run interactively in this sandbox
-    (`scripts/check-version.ps1` and `scripts/installer-smoke.ps1` were checked
-    for PowerShell parser syntax and clean behavior in WP-K3/WP-K6).
-
 ## Stage 6: release readiness (2026-11-06, `experiments`)
 
 Machine: Windows 11 build 26200, HDMI output active, one monitor at 100 %. See
@@ -208,7 +79,7 @@ Machine: Windows 11 build 26200, with only the HDMI output active.
   export importing back unchanged, plain settings files and UTF-8 BOM and UTF-16
   files being accepted, ten kinds of file being refused with a reason (empty,
   not JSON, an array, no marker, no settings, no version, bad format number, not
-  text, over 32 MiB), newer export formats and settings versions being refused,
+  text, over 1 MB), newer export formats and settings versions being refused,
   unreadable values and list entries being reported rather than replaced
   silently, the window position of this PC being kept, only the automatic
   backups being pruned, and a path that is missing, a folder or too large being
@@ -308,6 +179,7 @@ published 0.4.0 release; this checks the merged tree.
   shutdown leaves it restored for a fresh engine. Removing the restore in
   `Engine::drop` makes it fail (checked, then reverted).
 
+<<<<<<< HEAD
 ## Stages 3 and 4: controls, profiles, routing and ducking (2026-11-05, branch `stage3-4/features`)
 
 Pinned outputs and cycling, the wheel step, app and profile shortcuts, per-stream
@@ -428,7 +300,7 @@ unreadable sessions, device-notification coalescing, and the hotkey test guard.
 - Not run: a Bluetooth reconnect burst (the coalescing is unit-tested only), an
   app with several stereo sessions at different balances on real hardware,
   saturation over a real long-running session, and Windows 10.
-
+=======
 ## 0.4.0 final review corrections (2026-10-20, `experiments`, based on `86fdb9b`)
 
 The three review findings have focused regression coverage. New tests first
@@ -473,6 +345,7 @@ run for `86fdb9b` covers only the audit baseline. Package hashes are in the
 Not run in this correction pass: the installed upgrade/uninstall flow,
 Windows 10, and the hardware audio matrix. The live exit matrix checks process
 handling but does not replace an installed upgrade/uninstall test.
+>>>>>>> 7a1486f61c90b027c7cd53a88efec8e3bc9fb074
 
 ## 0.4.0 verification: audit fixes (2026-10-20, branch `fix/audit-findings`)
 

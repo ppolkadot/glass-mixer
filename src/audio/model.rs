@@ -330,10 +330,10 @@ pub fn friendly_exe_name(path: &std::path::Path) -> String {
 /// Tray tooltip text. Windows truncates tooltips at 127 UTF-16 units.
 pub fn tray_tooltip(snapshot: &AudioSnapshot) -> String {
     let text = match (&snapshot.status, &snapshot.output) {
-        (ServiceStatus::Unavailable(_), _) => "Glass Mixer — audio service unavailable".to_string(),
-        (_, None) => "Glass Mixer — no output device".to_string(),
-        (_, Some(out)) if out.muted => format!("Glass Mixer — Muted · {}", out.name),
-        (_, Some(out)) => format!("Glass Mixer — {}% · {}", to_percent(out.volume), out.name),
+        (ServiceStatus::Unavailable(_), _) => "Glass Mixer: audio service unavailable".to_string(),
+        (_, None) => "Glass Mixer: no output device".to_string(),
+        (_, Some(out)) if out.muted => format!("Glass Mixer: Muted · {}", out.name),
+        (_, Some(out)) => format!("Glass Mixer: {}% · {}", to_percent(out.volume), out.name),
     };
     truncate_utf16(&text, 127)
 }
@@ -561,11 +561,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(tray_tooltip(&snap), "Glass Mixer — 46% · Speakers");
+        assert_eq!(tray_tooltip(&snap), "Glass Mixer: 46% · Speakers");
         snap.output.as_mut().unwrap().muted = true;
-        assert_eq!(tray_tooltip(&snap), "Glass Mixer — Muted · Speakers");
+        assert_eq!(tray_tooltip(&snap), "Glass Mixer: Muted · Speakers");
         snap.output = None;
-        assert_eq!(tray_tooltip(&snap), "Glass Mixer — no output device");
+        assert_eq!(tray_tooltip(&snap), "Glass Mixer: no output device");
         snap.output =
             Some(EndpointState { id: "x".into(), name: "N".repeat(300), volume: 1.0, muted: false, balance: None });
         let t = tray_tooltip(&snap);

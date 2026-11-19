@@ -65,6 +65,14 @@ pub enum Command {
         flow: Flow,
         volume: f32,
     },
+    SetEndpointMute {
+        flow: Flow,
+        muted: bool,
+    },
+    SetEndpointBalance {
+        flow: Flow,
+        balance: f32,
+    },
     ToggleOutputMute,
     SetDefaultDevice {
         flow: Flow,
@@ -182,7 +190,6 @@ pub(crate) enum Msg {
 pub(crate) type Listener = Arc<dyn Fn() + Send + Sync>;
 type EngineThread = (JoinHandle<()>, Receiver<()>);
 
-#[derive(Default)]
 pub(crate) struct Shared {
     snapshot: Mutex<Arc<AudioSnapshot>>,
     meters: Mutex<Arc<Meters>>,
@@ -240,10 +247,6 @@ impl Shared {
         self.meters_wanted.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn take_notices(&self) -> Vec<Notice> {
-        self.notices.lock().drain(..).collect()
-    }
-
     fn notify(&self) {
         let listeners = self.listeners.lock().clone();
         for l in listeners {
@@ -279,7 +282,7 @@ impl AudioHandle {
             std::thread::Builder::new()
                 .name("audio-engine".into())
                 .spawn(move || {
-                    run_guarded(&shared, || engine::run(rx, tx, shared.clone()));
+                    engine::run(rx, tx, shared);
                     let _ = done_tx.send(());
                 })
                 .expect("failed to spawn audio thread")
@@ -315,7 +318,7 @@ impl AudioHandle {
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
-        self.shared.take_notices()
+        self.shared.notices.lock().drain(..).collect()
     }
 
     /// Registers a callback invoked (from the engine thread) whenever new state is published.
@@ -344,31 +347,5 @@ impl AudioHandle {
             }
             Err(_) => log::warn!("audio engine did not stop within 2s; detaching"),
         }
-    }
-}
-
-fn run_guarded(shared: &Shared, f: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
-        log::error!("audio engine thread panicked");
-        shared.publish(AudioSnapshot {
-            status: ServiceStatus::Unavailable("The audio engine stopped unexpectedly.".into()),
-            ..Default::default()
-        });
-        shared.push_notice(NoticeLevel::Error, "The audio engine stopped unexpectedly. Restart Glass Mixer.");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn engine_panic_publishes_unavailable_and_error_notice() {
-        let audio = AudioHandle::detached();
-        run_guarded(&audio.shared, || panic!("boom"));
-        assert!(matches!(audio.snapshot().status, ServiceStatus::Unavailable(ref msg) if msg.contains("unexpectedly")));
-        let notices = audio.take_notices();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].level, NoticeLevel::Error);
     }
 }

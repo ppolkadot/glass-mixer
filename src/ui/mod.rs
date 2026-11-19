@@ -1,14 +1,11 @@
 //! User interface: design system, widgets and views.
 
-pub mod hotkey_editor;
 pub mod mixer;
 pub mod presets;
 pub mod settings_view;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod theme;
-pub mod toasts;
-pub mod typography;
 pub mod widgets;
 
 /// Everything a view needs to know about the current appearance.
@@ -18,8 +15,6 @@ pub struct Look {
     pub m: theme::Metrics,
     /// Whether the Segoe icon font is available (otherwise text fallbacks are drawn).
     pub icons: bool,
-    /// Whether to apply Polaris tracking offsets to interface text.
-    pub tracking: bool,
 }
 
 /// Why the glass effect is or isn't showing; explained in Settings.
@@ -38,12 +33,10 @@ impl GlassStatus {
         match self {
             GlassStatus::Active => "Translucent window using the Windows backdrop",
             GlassStatus::TurnedOff => "Using a solid background",
-            GlassStatus::TransparencyOff => "Windows transparency effects are off, so a solid background is used",
-            GlassStatus::HighContrast => "High contrast is on, so a solid background is used",
-            GlassStatus::Unsupported => "Not supported on this version of Windows; using a solid background",
-            GlassStatus::RendererFallback => {
-                "OpenGL could not start; using the fallback renderer with a solid background"
-            }
+            GlassStatus::TransparencyOff => "Windows transparency is off; using a solid background",
+            GlassStatus::HighContrast => "High contrast is on; using a solid background",
+            GlassStatus::Unsupported => "Unsupported on this version of Windows",
+            GlassStatus::RendererFallback => "Fallback renderer active; using a solid background",
         }
     }
 }

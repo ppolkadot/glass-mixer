@@ -5,7 +5,6 @@
 //! via Win32 and sending mute commands straight to the audio engine. Exit is
 //! forwarded to the app so shutdown goes through one path.
 
-use super::tray_menu::{self, TrayMenu};
 use super::window::{self, Hwnd};
 use crate::audio::NoticeLevel;
 use crate::audio::{AudioHandle, AudioSnapshot, Command, tray_tooltip};
@@ -15,6 +14,7 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::UI::Shell::{
     NIF_GUID, NIF_INFO, NIF_REALTIME, NIIF_ERROR, NIIF_INFO, NIIF_NOSOUND, NIIF_RESPECT_QUIET_TIME, NIIF_WARNING,
@@ -58,11 +58,11 @@ pub enum TrayAction {
 
 pub struct Tray {
     icon: TrayIcon,
-    menu: TrayMenu,
+    mute_item: CheckMenuItem,
     normal: Icon,
     muted: Icon,
     last_tooltip: String,
-    last_state: Option<(bool, bool)>,
+    last_muted: Option<bool>,
     notices: NoticeGate,
     guid: u128,
 }
@@ -80,7 +80,11 @@ impl Tray {
         actions: Sender<TrayAction>,
         ctx: egui::Context,
     ) -> Result<Self, String> {
-        let menu = TrayMenu::new(hwnd)?;
+        let open = MenuItem::with_id("open", "Open mixer", true, None);
+        let mute_item = CheckMenuItem::with_id("mute", "Mute", true, false, None);
+        let exit = MenuItem::with_id("exit", "Exit", true, None);
+        let menu = Menu::new();
+        menu.append_items(&[&open, &mute_item, &PredefinedMenuItem::separator(), &exit]).map_err(|e| e.to_string())?;
 
         let normal = make_icon(false)?;
         let muted = make_icon(true)?;
@@ -91,44 +95,40 @@ impl Tray {
             .with_guid(guid)
             .with_icon(normal.clone())
             .with_tooltip("Glass Mixer")
-            .with_menu_on_right_click(false)
+            .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()
             .map_err(|e| e.to_string())?;
 
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-            if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
-                match button {
-                    MouseButton::Left => window::show(hwnd),
-                    MouseButton::Right => match TrayMenu::show(hwnd) {
-                        tray_menu::OPEN => window::show(hwnd),
-                        tray_menu::MUTE => audio.send(Command::ToggleOutputMute),
-                        tray_menu::EXIT => {
-                            let _ = actions.send(TrayAction::Exit);
-                            ctx.request_repaint();
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                window::show(hwnd);
             }
         }));
 
+        {
+            let ctx = ctx.clone();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.0.as_str() {
+                "open" => window::show(hwnd),
+                "mute" => audio.send(Command::ToggleOutputMute),
+                "exit" => {
+                    let _ = actions.send(TrayAction::Exit);
+                    ctx.request_repaint();
+                }
+                _ => {}
+            }));
+        }
+
         Ok(Self {
             icon,
-            menu,
+            mute_item,
             normal,
             muted,
             last_tooltip: String::new(),
-            last_state: None,
+            last_muted: None,
             notices: NoticeGate::default(),
             guid,
         })
-    }
-
-    /// Gives the popup menu the application's palette.
-    pub fn set_palette(&self, palette: crate::ui::theme::Palette) {
-        self.menu.set_palette(palette);
     }
 
     /// Shell-managed notifications honor Windows suppression policy. No AUMID,
@@ -176,14 +176,15 @@ impl Tray {
             self.last_tooltip = tooltip;
         }
         let muted = snapshot.output.as_ref().is_some_and(|o| o.muted);
-        let enabled = snapshot.output.is_some();
-        if self.last_state != Some((muted, enabled)) {
-            self.menu.update(muted, enabled);
-            if self.last_state.is_none_or(|(was_muted, _)| was_muted != muted) {
-                let icon = if muted { self.muted.clone() } else { self.normal.clone() };
-                let _ = self.icon.set_icon(Some(icon));
-            }
-            self.last_state = Some((muted, enabled));
+        // The check item toggles itself when clicked; always re-sync it to Windows' state.
+        if self.mute_item.is_checked() != muted {
+            self.mute_item.set_checked(muted);
+        }
+        self.mute_item.set_enabled(snapshot.output.is_some());
+        if self.last_muted != Some(muted) {
+            let icon = if muted { self.muted.clone() } else { self.normal.clone() };
+            let _ = self.icon.set_icon(Some(icon));
+            self.last_muted = Some(muted);
         }
     }
 }
@@ -208,6 +209,7 @@ fn write_wide<const N: usize>(buf: &mut [u16; N], text: &str) {
 impl Drop for Tray {
     fn drop(&mut self) {
         TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
+        MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
         let _ = self.icon.set_visible(false);
     }
 }

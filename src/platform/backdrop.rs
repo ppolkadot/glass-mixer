@@ -6,11 +6,11 @@
 //! falls back to an opaque surface drawn by egui.
 
 use super::window::Hwnd;
-use crate::settings::{Backdrop, ThemeMode};
+use crate::settings::Backdrop;
 use windows::Win32::Graphics::Dwm::{
-    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR,
-    DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_ROUND, DWMWINDOWATTRIBUTE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows::Win32::UI::Controls::MARGINS;
 
@@ -101,66 +101,6 @@ pub fn apply(hwnd: Hwnd, support: Support, requested: Option<Backdrop>, dark: bo
     }
 }
 
-pub(crate) fn border_colorref(p: &crate::ui::theme::Palette) -> u32 {
-    if !p.glass || p.high_contrast {
-        return DWMWA_COLOR_NONE;
-    }
-    let [fr, fg, fb, fa] = p.border.to_srgba_unmultiplied();
-    let [br, bg, bb, _] = p.base.to_srgba_unmultiplied();
-    let a = u32::from(fa);
-    let inv = 255 - a;
-    let blend = |f: u8, b: u8| (u32::from(f) * a + u32::from(b) * inv + 127) / 255;
-    let r = blend(fr, br);
-    let g = blend(fg, bg);
-    let b = blend(fb, bb);
-    r | (g << 8) | (b << 16)
-}
-
-/// Sets the Windows 11 window border colour to match the current palette.
-pub fn set_border(hwnd: Hwnd, support: Support, p: &crate::ui::theme::Palette) {
-    if support == Support::None {
-        return;
-    }
-    let color = border_colorref(p);
-    if let Err(e) = set_attr(hwnd, DWMWA_BORDER_COLOR, &color) {
-        log::debug!("DWMWA_BORDER_COLOR unavailable: {e}");
-    }
-}
-
-/// Appearance and OS build tuple identifying when a rejected backdrop should be retried.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BackdropRetryKey {
-    pub glass: bool,
-    pub backdrop: Backdrop,
-    pub theme: ThemeMode,
-    pub dark: bool,
-    pub high_contrast: bool,
-    pub build: u32,
-}
-
-#[derive(Default)]
-pub struct BackdropRejection {
-    failed_for: Option<BackdropRetryKey>,
-}
-
-impl BackdropRejection {
-    pub fn reset_for(&mut self, key: BackdropRetryKey) {
-        if self.failed_for.is_some_and(|failed| failed != key) {
-            self.failed_for = None;
-        }
-    }
-
-    pub fn may_try(&self, key: BackdropRetryKey) -> bool {
-        self.failed_for != Some(key)
-    }
-
-    pub fn record(&mut self, key: BackdropRetryKey, applied: Applied) {
-        if !applied.glass {
-            self.failed_for = Some(key);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,44 +111,5 @@ mod tests {
         assert_eq!(Support::for_build(22000), Support::MicaOnly);
         assert_eq!(Support::for_build(22621), Support::Full);
         assert_eq!(Support::for_build(26200), Support::Full);
-    }
-
-    #[test]
-    fn border_colorref_blends_glass_border_and_uses_none_for_solid_or_high_contrast() {
-        use crate::settings::Accent;
-        use crate::ui::theme::palette;
-
-        assert_eq!(border_colorref(&palette(true, false, Accent::Violet, false)), DWMWA_COLOR_NONE);
-        assert_eq!(border_colorref(&palette(false, true, Accent::Violet, true)), DWMWA_COLOR_NONE);
-
-        let dark_glass = palette(true, true, Accent::Violet, false);
-        let dark_color = border_colorref(&dark_glass);
-        assert_ne!(dark_color, DWMWA_COLOR_NONE);
-        let light_glass = palette(false, true, Accent::Violet, false);
-        let light_color = border_colorref(&light_glass);
-        assert_ne!(light_color, DWMWA_COLOR_NONE);
-        assert_ne!(dark_color, light_color);
-        assert_eq!(dark_color & 0xFF00_0000, 0, "COLORREF upper byte must be zero");
-    }
-
-    #[test]
-    fn rejected_backdrop_stays_rejected_until_appearance_or_build_changes() {
-        let key = BackdropRetryKey {
-            glass: true,
-            backdrop: Backdrop::Acrylic,
-            theme: ThemeMode::Dark,
-            dark: true,
-            high_contrast: false,
-            build: 26200,
-        };
-        let mut rejection = BackdropRejection::default();
-        assert!(rejection.may_try(key));
-        rejection.record(key, Applied { glass: false, dark: true, kind: None });
-        assert!(!rejection.may_try(key));
-        assert!(rejection.may_try(BackdropRetryKey { backdrop: Backdrop::Mica, ..key }));
-        assert!(rejection.may_try(BackdropRetryKey { theme: ThemeMode::Light, ..key }));
-        assert!(rejection.may_try(BackdropRetryKey { build: 26201, ..key }));
-        rejection.reset_for(BackdropRetryKey { backdrop: Backdrop::Mica, ..key });
-        assert!(rejection.may_try(key), "returning to the earlier setting should retry");
     }
 }

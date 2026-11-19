@@ -19,12 +19,12 @@ $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
 $trueCondition = [System.Windows.Automation.Condition]::TrueCondition
 $elements = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $trueCondition))
 $names = @($elements | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
-foreach ($tab in @('Mixer', 'Devices', 'Settings', 'Presets')) {
+foreach ($tab in @('Mixer', 'Devices', 'Settings', 'Profiles')) {
     if ($names -notcontains $tab) { throw "UI Automation did not expose the $tab view." }
 }
 Write-Host "UI Automation: four view selectors found in PID $ProcessId."
-$tabNames = @($elements | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and @('Mixer', 'Devices', 'Presets', 'Settings') -contains $_.Current.Name } | ForEach-Object { $_.Current.Name })
-if (($tabNames -join ',') -ne 'Mixer,Devices,Presets,Settings') { throw "Unexpected view selector order: $($tabNames -join ', ')" }
+$tabNames = @($elements | Where-Object { @('ControlType.Button', 'ControlType.RadioButton') -contains $_.Current.ControlType.ProgrammaticName -and @('Mixer', 'Devices', 'Profiles', 'Settings') -contains $_.Current.Name } | ForEach-Object { $_.Current.Name })
+if (($tabNames -join ',') -ne 'Mixer,Devices,Profiles,Settings') { throw "Unexpected view selector order: $($tabNames -join ', ')" }
 $settingsRoutes = @($elements | Where-Object { $_.Current.Name -eq 'Settings' }).Count
 if ($settingsRoutes -ne 1) { throw "Expected one 'Settings' control, found $settingsRoutes (duplicate navigation)." }
 $interactive = 'ControlType.Button', 'ControlType.CheckBox', 'ControlType.RadioButton', 'ControlType.ComboBox', 'ControlType.Edit', 'ControlType.Spinner', 'ControlType.Slider', 'ControlType.Hyperlink'
@@ -42,14 +42,18 @@ function Invoke-UiaButton([System.Windows.Automation.AutomationElement]$button, 
         if ($invoke) { $invoke.Invoke(); return }
     } catch {}
     try {
+        $select = $button.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+        if ($select) { $select.Select(); return }
+    } catch {}
+    try {
         $toggle = $button.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
         if ($toggle) { $toggle.Toggle(); return }
     } catch {}
     $patterns = ($button.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }) -join ', '
-    throw "The '$label' button did not expose InvokePattern or TogglePattern (supported: $patterns)."
+    throw "The '$label' button did not expose InvokePattern, SelectionItemPattern or TogglePattern (supported: $patterns)."
 }
 Assert-NamedInteractiveControls $elements 'Initial view'
-$settingsButton = $elements | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and $_.Current.Name -eq 'Settings' } | Select-Object -First 1
+$settingsButton = $elements | Where-Object { @('ControlType.Button', 'ControlType.RadioButton') -contains $_.Current.ControlType.ProgrammaticName -and $_.Current.Name -eq 'Settings' } | Select-Object -First 1
 if (-not ('GlassUiaKey' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -174,7 +178,7 @@ if ($openFolder.Current.HasKeyboardFocus) {
     throw "Settings 'Open settings folder' already had keyboard focus before Tab traversal."
 }
 $scrolledIntoView = $false
-for ($step = 0; $step -lt 120; $step++) {
+for ($step = 0; $step -lt 45; $step++) {
     if (-not [GlassUiaKey]::SendTab($hwnd)) {
         $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "PostMessageW(VK_TAB) failed at step $step (Win32 error $err)."
@@ -196,7 +200,7 @@ if (-not $scrolledIntoView) {
     $finalFocus = $openFolder.Current.HasKeyboardFocus
     throw "Settings live Tab traversal did not focus and scroll 'Open settings folder' into the client viewport (focused=$finalFocus, initial=$initialRect, final=$finalRect, client=$clientTop..$clientBottom)."
 }
-$mixerButton = $settingsElements | Where-Object { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and $_.Current.Name -eq 'Mixer' } | Select-Object -First 1
+$mixerButton = $settingsElements | Where-Object { @('ControlType.Button', 'ControlType.RadioButton') -contains $_.Current.ControlType.ProgrammaticName -and $_.Current.Name -eq 'Mixer' } | Select-Object -First 1
 Invoke-UiaButton $mixerButton 'Mixer'
 Start-Sleep -Milliseconds 250
 $elements = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $trueCondition))

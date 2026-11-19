@@ -14,16 +14,13 @@ use crate::{
 use serde_json::Value;
 use std::{
     io,
-    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
 /// Version of the export wrapper, separate from the settings' own version.
 pub const EXPORT_FORMAT: u64 = 1;
-/// The most a saved transfer file or an imported file may hold. Export and import
-/// share it, so every export that was saved can be imported again.
-const MAX_IMPORT_BYTES: usize = 32 * 1024 * 1024;
-const TOO_LARGE: &str = "The settings transfer file is too large (over 32 MiB).";
+const MAX_IMPORT_BYTES: usize = 1024 * 1024;
+const TOO_LARGE: &str = "The file is too large to be a Glass Mixer export (over 1 MB).";
 /// Where this window sits belongs to this PC: it is neither exported nor imported.
 const MACHINE_FIELDS: [&str; 2] = ["window", "window_position_physical"];
 /// Automatic copies made before an import replaces the settings; older ones are deleted.
@@ -98,7 +95,16 @@ pub fn import(bytes: &[u8]) -> Result<Import, String> {
             continue;
         }
         let Some(read) = kept.get(field) else { continue }; // not a setting this version knows
-        import_notes(field, wanted, read, &mut notes);
+        match (wanted, read) {
+            (Value::Array(wanted), Value::Array(read)) if wanted.len() != read.len() => {
+                notes.push(format!("{field}: {} of {} entries could be read.", read.len(), wanted.len()));
+            }
+            (Value::Array(_), Value::Array(_)) => {}
+            _ if differs(wanted, read) => {
+                notes.push(format!("{field}: the value isn't valid, so the default is used."));
+            }
+            _ => {}
+        }
     }
     settings.version = SETTINGS_VERSION;
     settings.window = None;
@@ -109,47 +115,26 @@ pub fn import(bytes: &[u8]) -> Result<Import, String> {
 /// Reads and checks the export at `path`. A file that is missing, isn't a file or
 /// is too large is refused without reading it all.
 pub fn read_import_file(path: &Path) -> Result<Import, String> {
-    let before_open = std::fs::metadata(path).map_err(|e| format!("Couldn't open the file: {e}."))?;
-    if !before_open.is_file() {
-        return Err("That path isn't a file.".into());
-    }
-    let file = std::fs::File::open(path).map_err(|e| format!("Couldn't open the file: {e}."))?;
-    let meta = file.metadata().map_err(|e| format!("Couldn't inspect the file: {e}."))?;
+    let meta = std::fs::metadata(path).map_err(|e| format!("Couldn't open the file: {e}."))?;
     if !meta.is_file() {
         return Err("That path isn't a file.".into());
     }
     if meta.len() > MAX_IMPORT_BYTES as u64 {
         return Err(TOO_LARGE.into());
     }
-    // Bounded even if the file grows after the checks above.
-    let mut bytes = Vec::new();
-    file.take(MAX_IMPORT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Couldn't read the file: {e}."))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read the file: {e}."))?;
     import(&bytes)
 }
 
-/// Reports discarded or adjusted values at every nesting level, comparing only
-/// fields the file mentions (an omitted field gets its default).
-fn import_notes(path: &str, wanted: &Value, read: &Value, notes: &mut Vec<String>) {
+/// Whether a value that was read back differs from what the file said, comparing
+/// only what the file mentions (a field it leaves out gets its default, which is fine).
+fn differs(wanted: &Value, read: &Value) -> bool {
     match (wanted, read) {
         (Value::Object(wanted), Value::Object(read)) => {
-            for (key, value) in wanted {
-                import_notes(&format!("{path}.{key}"), value, read.get(key).unwrap_or(&Value::Null), notes);
-            }
+            wanted.iter().any(|(key, value)| read.get(key).is_some_and(|other| differs(value, other)))
         }
-        (Value::Array(wanted), Value::Array(read)) if wanted.len() != read.len() => {
-            notes.push(format!("{path}: {} of {} entries could be read.", read.len(), wanted.len()));
-        }
-        (Value::Array(wanted), Value::Array(read)) => {
-            for (index, (wanted, read)) in wanted.iter().zip(read).enumerate() {
-                import_notes(&format!("{path}[{index}]"), wanted, read, notes);
-            }
-        }
-        (Value::Number(a), Value::Number(b))
-            if a.as_f64().zip(b.as_f64()).is_some_and(|(x, y)| (x - y).abs() <= 1e-6) => {}
-        _ if wanted != read => notes.push(format!("{path}: the value isn't valid, so it was adjusted or omitted.")),
-        _ => {}
+        (Value::Array(wanted), Value::Array(read)) => wanted.len() != read.len(),
+        _ => wanted != read,
     }
 }
 
@@ -161,23 +146,33 @@ pub fn merge_keeping_this_pc(current: &Settings, mut imported: Settings) -> Sett
 }
 
 pub fn summary(s: &Settings) -> Vec<String> {
+    use crate::settings::{ThemeMode, Typeface};
+    use crate::ui::widgets::count_label;
+
+    let theme = match s.theme {
+        ThemeMode::System => "System",
+        ThemeMode::Light => "Light",
+        ThemeMode::Dark => "Dark",
+    };
+    let typeface = match s.typeface {
+        Typeface::Polaris => "Polaris",
+        Typeface::System => "Windows",
+    };
     vec![
         format!(
-            "{} pinned app(s), {} renamed app(s), {} pinned output(s)",
-            s.pinned_apps.len(),
-            s.app_names.len(),
-            s.pinned_devices.len()
+            "{}, {}, {}",
+            count_label(s.pinned_apps.len(), "pinned app", "pinned apps"),
+            count_label(s.app_names.len(), "renamed app", "renamed apps"),
+            count_label(s.pinned_devices.len(), "pinned output", "pinned outputs"),
         ),
         format!(
-            "{} profile(s), {} shortcut(s), {} background-lowering rule(s)",
-            s.presets.len(),
-            s.hotkeys.len(),
-            s.focus_rules.len()
+            "{}, {}, {}",
+            count_label(s.presets.len(), "profile", "profiles"),
+            count_label(s.hotkeys.len(), "shortcut", "shortcuts"),
+            count_label(s.focus_rules.len(), "background-lowering rule", "background-lowering rules"),
         ),
         format!(
-            "Theme {:?}, typeface {:?}, microphone ducking {}",
-            s.theme,
-            s.typeface,
+            "Theme {theme}, typeface {typeface}, microphone ducking {}",
             if s.mic_ducking.enabled { "on" } else { "off" }
         ),
     ]
@@ -196,61 +191,21 @@ fn file_name(prefix: &str, unix_seconds: u64) -> String {
 /// Writes `text` as `<prefix>-<date>.json` in `dir`. Automatic backups keep only
 /// the newest [`KEEP_BACKUPS`]; exports the user asked for are never deleted.
 pub fn save(dir: &Path, prefix: &str, unix_seconds: u64, text: &str) -> io::Result<PathBuf> {
-    // Refuse before touching the disk: a file the importer would reject is no backup.
-    if matches!(prefix, EXPORT_PREFIX | BACKUP_PREFIX) && text.len() > MAX_IMPORT_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, TOO_LARGE));
-    }
     std::fs::create_dir_all(dir)?;
-    let name = file_name(prefix, unix_seconds);
-    let stem = name.trim_end_matches(".json");
-    // Pruning can remove the original unsuffixed name. Continue after the
-    // surviving suffixes so a new backup is never sorted as the oldest one.
-    let mut suffix = 0u64;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let existing = entry.file_name();
-        let Some(tail) = existing.to_str().and_then(|n| n.strip_suffix(".json")).and_then(|n| n.strip_prefix(stem))
-        else {
-            continue;
-        };
-        let index = if tail.is_empty() { Some(0) } else { tail.strip_prefix('-').and_then(|n| n.parse::<u64>().ok()) };
-        if let Some(index) = index {
-            suffix = suffix.max(
-                index
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "No backup filename available"))?,
-            );
-        }
-    }
-    let (path, mut file) = loop {
-        let name = if suffix == 0 { name.clone() } else { format!("{stem}-{suffix:020}.json") };
-        let path = dir.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => break (path, file),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => suffix = suffix.checked_add(1).ok_or(e)?,
-            Err(e) => return Err(e),
-        }
-    };
-    if let Err(e) = file.write_all(text.as_bytes()).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = std::fs::remove_file(&path);
-        return Err(e);
-    }
-    drop(file);
+    let path = dir.join(file_name(prefix, unix_seconds));
+    std::fs::write(&path, text)?;
     if prefix == BACKUP_PREFIX {
         let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p != &path && p.is_file())
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with(BACKUP_PREFIX) && n.ends_with(".json"))
             })
             .collect();
-        backups.sort_by_key(|p| p.file_stem().map(|s| s.to_owned()));
-        // The backup just written always survives; keep the newest older ones beside it.
-        let excess = backups.len().saturating_sub(KEEP_BACKUPS.saturating_sub(1));
+        backups.sort();
+        let excess = backups.len().saturating_sub(KEEP_BACKUPS);
         for old in &backups[..excess] {
             let _ = std::fs::remove_file(old);
         }
@@ -368,7 +323,7 @@ mod tests {
         assert!(notes.contains("wheel_step: the value isn't valid"), "{notes}");
         assert!(notes.contains("typeface: the value isn't valid"), "{notes}");
         assert!(notes.contains("pinned_apps: 2 of 3 entries could be read"), "{notes}");
-        assert!(notes.contains("solo.keep_percent: the value isn't valid"), "{notes}");
+        assert!(notes.contains("solo: the value isn't valid"), "{notes}");
         assert!(
             !notes.contains("theme") && !notes.contains("window"),
             "valid and machine fields aren't flagged: {notes}"
@@ -439,125 +394,7 @@ mod tests {
     fn the_summary_counts_what_an_import_holds() {
         let lines = summary(&sample());
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("1 pinned app(s), 1 renamed app(s), 1 pinned output(s)"), "{lines:?}");
-        assert!(lines[1].starts_with("1 profile(s)"), "{lines:?}");
-    }
-
-    #[test]
-    fn saves_in_the_same_second_preserve_each_backup_and_export() {
-        let dir = temp_dir("collisions");
-        for prefix in [BACKUP_PREFIX, EXPORT_PREFIX] {
-            let a = save(&dir, prefix, 1_700_000_000, "first").unwrap();
-            let b = save(&dir, prefix, 1_700_000_000, "second").unwrap();
-            assert_ne!(a, b);
-            assert_eq!(std::fs::read_to_string(a).unwrap(), "first");
-            assert_eq!(std::fs::read_to_string(b).unwrap(), "second");
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn imports_report_invalid_nested_profile_parts_even_when_the_profile_survives() {
-        let imported = import(
-            br#"{"version":4,"presets":[{"name":"Night","entries":[],"master":{"volume":"loud","muted":false}}]}"#,
-        )
-        .unwrap();
-        assert_eq!(imported.settings.presets.len(), 1);
-        assert!(imported.settings.presets[0].master.is_none());
-        assert!(imported.notes.iter().any(|note| note.contains("presets[0].master")), "{:?}", imported.notes);
-    }
-
-    #[test]
-    fn pruning_same_second_backups_never_removes_the_just_saved_backup() {
-        let dir = temp_dir("collision-retention");
-        let mut saved = Vec::new();
-        for n in 0..KEEP_BACKUPS + 4 {
-            let path = save(&dir, BACKUP_PREFIX, 1_700_000_000, &n.to_string()).unwrap();
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), n.to_string());
-            saved.push(path);
-        }
-        for (n, path) in saved.iter().enumerate() {
-            if n < saved.len() - KEEP_BACKUPS {
-                assert!(!path.exists());
-            } else {
-                assert_eq!(std::fs::read_to_string(path).unwrap(), n.to_string());
-            }
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn a_large_supported_profile_collection_round_trips() {
-        let apps: Vec<_> = (0..64)
-            .map(|n| {
-                PinnedApp {
-                    key: AppKey::Exe(format!(r"c:\program files\application {n}\application-{n}.exe")),
-                    name: format!("Application number {n}"),
-                    exe_path: None,
-                    aumid: None,
-                }
-                .placeholder()
-            })
-            .collect();
-        let settings = Settings {
-            presets: (0..128)
-                .map(|n| VolumePreset::capture(&format!("Profile {n}"), &apps).sanitize().unwrap())
-                .collect(),
-            ..Default::default()
-        };
-        let text = export(&settings, "0.6.0");
-        assert!(text.len() > 1024 * 1024);
-        let imported = import(text.as_bytes()).expect("own supported export");
-        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
-        assert_eq!(imported.settings.presets, settings.presets);
-    }
-
-    #[test]
-    fn oversized_transfer_files_are_refused_before_creating_the_destination() {
-        let base = temp_dir("oversize-save");
-        let text = "x".repeat(MAX_IMPORT_BYTES + 1);
-        for prefix in [EXPORT_PREFIX, BACKUP_PREFIX] {
-            let dir = base.join(prefix);
-            let err = save(&dir, prefix, 1_700_000_000, &text).unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-            assert_eq!(err.to_string(), TOO_LARGE);
-            assert!(!dir.exists(), "the destination directory must not be created");
-        }
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn retention_preserves_the_current_backup_after_a_clock_rollback() {
-        let dir = temp_dir("clock-rollback");
-        for n in 0..KEEP_BACKUPS {
-            save(&dir, BACKUP_PREFIX, 1_700_000_100 + n as u64, "older content").unwrap();
-        }
-        let current = save(&dir, BACKUP_PREFIX, 1_700_000_099, "current content").unwrap();
-        assert_eq!(std::fs::read_to_string(&current).unwrap(), "current content");
-        let files = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(files, KEEP_BACKUPS);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn retention_ignores_directories_that_match_the_backup_pattern() {
-        let dir = temp_dir("backup-directory");
-        let decoy = dir.join("glass-mixer-before-import-19990101-000000.json");
-        std::fs::create_dir_all(&decoy).unwrap();
-        for n in 0..=KEEP_BACKUPS as u64 {
-            save(&dir, BACKUP_PREFIX, 1_700_000_000 + n, "older content").unwrap();
-        }
-        assert!(decoy.is_dir(), "a directory is not a backup file");
-        let files = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.path().is_file()).count();
-        assert_eq!(files, KEEP_BACKUPS, "the directory does not consume a file-retention slot");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn imports_plain_json_floats_without_false_precision_notes() {
-        let imported =
-            import(br#"{"version":4,"presets":[{"name":"Work","entries":[],"master":{"volume":0.4,"muted":false}}]}"#)
-                .unwrap();
-        assert!(imported.notes.is_empty(), "unexpected notes: {:?}", imported.notes);
+        assert!(lines[0].starts_with("1 pinned app, 1 renamed app, 1 pinned output"), "{lines:?}");
+        assert!(lines[1].starts_with("1 profile"), "{lines:?}");
     }
 }

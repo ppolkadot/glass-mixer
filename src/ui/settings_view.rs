@@ -1,18 +1,14 @@
 //! Settings page: appearance, behaviour, audio and about.
 
-use super::widgets::{self, ButtonKind, SegmentKind, card, glyph, icon_button, segmented, toggle_row};
-use super::{
-    GlassStatus, Look, theme,
-    typography::{self, Role},
-};
+use super::widgets::{self, Symbol, card, icon_button, segmented, semibold, toggle_row};
+use super::{GlassStatus, Look, theme};
 use crate::audio::{AudioHandle, Command};
 use crate::platform::backdrop::Support;
-use crate::platform::hotkeys::HotkeyService;
+use crate::platform::hotkeys::{HotkeyEditor, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::settings::{Accent, Backdrop, DEFAULT_HEIGHT, DEFAULT_WIDTH, Density, Settings, ThemeMode, Typeface};
-use crate::ui::hotkey_editor::HotkeyEditor;
-use egui::{Align, Align2, Key, Layout, Sense, Stroke, Ui, Vec2, ViewportCommand};
+use egui::{Align, Key, Layout, RichText, Sense, Stroke, Ui, Vec2, ViewportCommand};
 use std::path::Path;
 
 pub enum Outcome {
@@ -63,10 +59,10 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
     let look = *cx.look;
     let mut outcome = Outcome::None;
     ui.horizontal(|ui| {
-        if icon_button(ui, &look, glyph::BACK, "<", "Back to mixer (Esc)", None).clicked() {
+        if icon_button(ui, &look, Symbol::ChevronLeft, "Back to mixer (Esc)", None).clicked() {
             outcome = Outcome::Back;
         }
-        ui.label(typography::rich("Settings", Role::LargeTitle, &look).color(look.p.text));
+        ui.label(RichText::new("Settings").font(semibold(18.0)));
     });
     if ui.input(|i| i.key_pressed(Key::Escape)) {
         outcome = Outcome::Back;
@@ -85,19 +81,9 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
                     &cx.settings.presets,
                     &cx.settings.hotkeys,
                 );
-                cx.hotkey_editor.show(
-                    ui,
-                    &look,
-                    &mut cx.settings.hotkeys,
-                    &mut cx.settings.hotkey_step,
-                    service,
-                    &slots,
-                );
+                cx.hotkey_editor.show(ui, &mut cx.settings.hotkeys, &mut cx.settings.hotkey_step, service, &slots);
             } else {
-                ui.label(
-                    typography::rich("Global shortcuts are unavailable in this session.", Role::Footnote, &look)
-                        .color(look.p.text_muted),
-                );
+                ui.label("Global shortcuts are unavailable in this session.");
             }
         });
         section(ui, &look, "Backup and restore", |ui| backup(ui, cx, &mut outcome));
@@ -107,23 +93,21 @@ pub fn show(ui: &mut Ui, cx: &mut SettingsCtx) -> Outcome {
 }
 
 fn section(ui: &mut Ui, look: &Look, title: &str, body: impl FnOnce(&mut Ui)) {
-    ui.label(typography::rich(title, Role::CalloutStrong, look).color(look.p.text));
-    ui.add_space(2.0);
-    card(look).show(ui, |ui| {
+    ui.label(RichText::new(title).font(semibold(13.0)).color(look.p.text_muted));
+    ui.add_space(6.0);
+    let inner = card(look).show(ui, |ui| {
         ui.set_width(ui.available_width());
         body(ui);
     });
-    ui.add_space(look.m.gap * 1.4);
+    widgets::card_highlight(ui, look, inner.response.rect);
+    let after = if look.m.row_height > 46.0 { 16.0 } else { 12.0 };
+    ui.add_space(after);
 }
 
 fn labeled(ui: &mut Ui, look: &Look, label: &str, control: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.set_min_height(34.0);
-        ui.label(typography::rich(label, Role::Body, look).color(if ui.is_enabled() {
-            look.p.text
-        } else {
-            look.p.text_muted
-        }));
+        ui.set_min_height(32.0);
+        ui.label(RichText::new(label).color(if ui.is_enabled() { look.p.text } else { look.p.text_muted }));
         ui.with_layout(Layout::right_to_left(Align::Center), control);
     });
 }
@@ -138,20 +122,12 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             &mut s.theme,
             &[(ThemeMode::System, "System"), (ThemeMode::Light, "Light"), (ThemeMode::Dark, "Dark")],
             210.0,
-            SegmentKind::Radio,
         );
     });
     toggle_row(ui, &look, &mut s.glass, "Glass effect", Some(cx.glass.description()));
     ui.add_enabled_ui(s.glass && cx.glass == GlassStatus::Active && cx.support == Support::Full, |ui| {
         labeled(ui, &look, "Backdrop", |ui| {
-            segmented(
-                ui,
-                &look,
-                &mut s.backdrop,
-                &[(Backdrop::Acrylic, "Acrylic"), (Backdrop::Mica, "Mica")],
-                160.0,
-                SegmentKind::Radio,
-            );
+            segmented(ui, &look, &mut s.backdrop, &[(Backdrop::Acrylic, "Acrylic"), (Backdrop::Mica, "Mica")], 160.0);
         });
     });
     labeled(ui, &look, "Accent", |ui| {
@@ -159,24 +135,10 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             swatch(ui, &look, &mut s.accent, *accent);
         }
     });
+    widgets::row_divider(ui, &look);
     labeled(ui, &look, "Typeface", |ui| {
-        segmented(
-            ui,
-            &look,
-            &mut s.typeface,
-            &[(Typeface::Polaris, "Polaris"), (Typeface::System, "Windows")],
-            210.0,
-            SegmentKind::Radio,
-        );
+        segmented(ui, &look, &mut s.typeface, &[(Typeface::Polaris, "Polaris"), (Typeface::System, "Windows")], 210.0);
     });
-    ui.label(
-        typography::rich(
-            "Polaris is the bundled Salted Flutters Polaris. Windows uses Segoe UI.",
-            Role::Footnote,
-            &look,
-        )
-        .color(look.p.text_muted),
-    );
     labeled(ui, &look, "Density", |ui| {
         segmented(
             ui,
@@ -184,16 +146,13 @@ fn appearance(ui: &mut Ui, cx: &mut SettingsCtx) {
             &mut s.density,
             &[(Density::Comfortable, "Comfortable"), (Density::Compact, "Compact")],
             210.0,
-            SegmentKind::Radio,
         );
     });
-    let meters = if cx.software_renderer {
-        "Paused: without graphics acceleration, live levels would use a lot of CPU"
-    } else {
-        "Show live audio levels under the sliders"
-    };
+    let meters =
+        if cx.software_renderer { "Paused while software rendering is active" } else { "Show live audio levels" };
     toggle_row(ui, &look, &mut s.show_meters, "Level meters", Some(meters));
-    if widgets::button(ui, &look, "Use recommended window size (480 × 720)", ButtonKind::Secondary).clicked() {
+    widgets::row_divider(ui, &look);
+    if widgets::scroll_on_focus(ui.button("Use recommended window size (480 × 720)")).clicked() {
         ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT)));
     }
 }
@@ -207,22 +166,17 @@ fn swatch(ui: &mut Ui, look: &Look, current: &mut Accent, accent: Accent) {
     }
     let color = theme::accent_color(accent, look.p.dark);
     let painter = ui.painter();
-    painter.circle_filled(rect.center(), size / 2.0 - 3.0, color);
+    painter.circle_filled(rect.center(), size / 2.0 - 3.5, color);
     if selected {
-        painter.circle_stroke(rect.center(), size / 2.0 - 0.5, Stroke::new(2.0, look.p.text));
-        if look.icons {
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                glyph::CHECK,
-                widgets::icon_font(10.0),
-                look.p.on_accent,
-            );
-        } else {
-            painter.circle_filled(rect.center(), 3.0, look.p.on_accent);
-        }
+        painter.circle_stroke(rect.center(), size / 2.0 - 1.0, Stroke::new(1.75, look.p.text));
+        widgets::paint_symbol(
+            painter,
+            egui::Rect::from_center_size(rect.center(), Vec2::splat(10.0)),
+            Symbol::Checkmark,
+            look.p.on_accent,
+        );
     } else if response.hovered() {
-        painter.circle_stroke(rect.center(), size / 2.0 - 0.5, Stroke::new(1.5, look.p.text_muted));
+        painter.circle_stroke(rect.center(), size / 2.0 - 1.0, Stroke::new(1.5, look.p.text_muted));
     }
     widgets::focus_ring(ui, rect, &response, &look.p, 14);
     let label = accent.label();
@@ -246,35 +200,13 @@ fn behavior(ui: &mut Ui, cx: &mut SettingsCtx) {
         *cx.login = startup::state();
     }
     let s = &mut *cx.settings;
-    toggle_row(
-        ui,
-        &look,
-        &mut s.start_minimized,
-        "Start minimized",
-        Some("Open only the tray icon when Glass Mixer starts"),
-    );
-    toggle_row(
-        ui,
-        &look,
-        &mut s.close_to_tray,
-        "Keep running when closed",
-        Some("The close button hides to the tray; use Exit in the tray menu to quit"),
-    );
+    widgets::row_divider(ui, &look);
+    toggle_row(ui, &look, &mut s.start_minimized, "Start minimized", Some("Open in the tray on startup"));
+    toggle_row(ui, &look, &mut s.close_to_tray, "Keep running when closed", Some("Hide to tray instead of quitting"));
     toggle_row(ui, &look, &mut s.minimize_to_tray, "Minimize to tray", Some("Hide from the taskbar when minimized"));
-    toggle_row(
-        ui,
-        &look,
-        &mut s.hidden_notifications,
-        "Tray notifications",
-        Some("Warnings and errors while hidden; Windows notification settings apply"),
-    );
-    toggle_row(
-        ui,
-        &look,
-        &mut s.show_inactive_apps,
-        "Show idle apps",
-        Some("List apps that have an audio session but aren't playing"),
-    );
+    toggle_row(ui, &look, &mut s.hidden_notifications, "Tray notifications", Some("Alerts while hidden in the tray"));
+    widgets::row_divider(ui, &look);
+    toggle_row(ui, &look, &mut s.show_inactive_apps, "Show idle apps", Some("Include apps that aren't playing audio"));
 }
 
 fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
@@ -282,25 +214,23 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
     let s = &mut *cx.settings;
     // Preset steps, or "Custom" for any other value the field below sets.
     let mut preset = if [1, 2, 5].contains(&s.wheel_step) { s.wheel_step } else { 0 };
+    let wheel_avail = ui.available_width();
     labeled(ui, &look, "Mouse wheel step", |ui| {
-        let custom = ui.add_enabled(preset == 0, egui::DragValue::new(&mut s.wheel_step).range(1..=20).suffix("%"));
-        widgets::set_name(ui, &custom, "Custom mouse wheel step");
-        widgets::scroll_on_focus(custom).on_hover_text("Any step from 1 to 20 percent");
-        if segmented(
-            ui,
-            &look,
-            &mut preset,
-            &[(1, "1%"), (2, "2%"), (5, "5%"), (0, "Custom")],
-            200.0,
-            SegmentKind::Radio,
-        ) {
+        if preset == 0 {
+            let custom = ui.add(egui::DragValue::new(&mut s.wheel_step).range(1..=20).suffix("%"));
+            widgets::set_name(ui, &custom, "Custom mouse wheel step");
+            widgets::scroll_on_focus(custom).on_hover_text("Any step from 1 to 20 percent");
+        }
+        let seg_width = if preset == 0 {
+            (wheel_avail - 165.0).clamp(160.0, 184.0)
+        } else {
+            (wheel_avail - 120.0).clamp(176.0, 216.0)
+        };
+        if segmented(ui, &look, &mut preset, &[(1, "1%"), (2, "2%"), (5, "5%"), (0, "Custom")], seg_width) {
             s.wheel_step = if preset == 0 { 3 } else { preset };
         }
     });
-    ui.label(
-        typography::rich("Volume change per wheel notch over a volume slider.", Role::Footnote, &look)
-            .color(look.p.text_muted),
-    );
+    widgets::row_divider(ui, &look);
     let mut keep = s.solo.keep_percent.min(90);
     labeled(ui, &look, "Solo keeps other apps at", |ui| {
         let field = ui.add_enabled(!s.solo.mute, egui::DragValue::new(&mut keep).range(0..=90).suffix("%"));
@@ -308,17 +238,12 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
         widgets::scroll_on_focus(field);
     });
     s.solo.keep_percent = keep;
-    toggle_row(
-        ui,
-        &look,
-        &mut s.solo.mute,
-        "Solo mutes other apps",
-        Some(
-            "Mute other apps instead of lowering them. Their own levels come back when Solo ends, unless you changed them meanwhile.",
-        ),
-    );
-    ui.horizontal(|ui| {
-        if widgets::button(ui, &look, "Refresh audio devices", ButtonKind::Secondary)
+    toggle_row(ui, &look, &mut s.solo.mute, "Solo mutes other apps", Some("Restores unchanged levels when Solo ends."));
+    widgets::row_divider(ui, &look);
+    mic_ducking(ui, cx);
+    widgets::row_divider(ui, &look);
+    ui.horizontal_wrapped(|ui| {
+        if widgets::scroll_on_focus(ui.button("Refresh audio devices"))
             .on_hover_text("Reconnect to all devices and audio sessions")
             .clicked()
         {
@@ -326,25 +251,15 @@ fn audio(ui: &mut Ui, cx: &mut SettingsCtx) {
             cx.audio.send(Command::Refresh);
         }
     });
-    ui.label(
-        typography::rich(
-            "Live volumes come from Windows. Presets store app levels only when you save one.",
-            Role::Footnote,
-            &look,
-        )
-        .color(look.p.text_muted),
-    );
-    mic_ducking(ui, cx);
     if cx.can_route_apps {
         app_device_reset(ui, cx);
     }
     if !cx.can_switch_default {
         ui.label(
-            typography::rich(
+            RichText::new(
                 "Default device switching isn't available on this system. Use Windows Settings > System > Sound.",
-                Role::Footnote,
-                &look,
             )
+            .small()
             .color(look.p.text_muted),
         );
     }
@@ -360,9 +275,7 @@ fn mic_ducking(ui: &mut Ui, cx: &mut SettingsCtx) {
         &look,
         &mut mic.enabled,
         "Microphone ducking",
-        Some(
-            "Lower the apps chosen below while you talk. Only the microphone level is read; nothing is recorded. It works while an app is using the microphone.",
-        ),
+        Some("Lower chosen apps while your microphone is active; nothing is recorded."),
     );
     if !mic.enabled {
         return;
@@ -383,24 +296,20 @@ fn mic_ducking(ui: &mut Ui, cx: &mut SettingsCtx) {
     field(ui, "Lowered apps keep", &mut keep, 0..=90, "%");
     mic.keep_percent = keep as u8;
     if s.pinned_apps.is_empty() {
-        ui.label(
-            typography::rich("Pin apps in the Mixer to choose which ones are lowered.", Role::Footnote, &look)
-                .color(look.p.text_muted),
-        );
-    }
-    for pin in &s.pinned_apps {
-        let mut chosen = mic.targets.contains(&pin.key);
-        let check = widgets::scroll_on_focus(widgets::check_row(
-            ui,
-            &look,
-            &mut chosen,
-            &format!("Lower {} while you talk", pin.name),
-        ));
-        if check.changed() {
-            if chosen {
-                mic.targets.push(pin.key.clone());
-            } else {
-                mic.targets.retain(|k| *k != pin.key);
+        ui.label(RichText::new("Pin an app in Mixer to choose it here.").small().color(look.p.text_muted));
+    } else {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Apps to lower").small().color(look.p.text_muted));
+        for pin in &s.pinned_apps {
+            let mut chosen = mic.targets.contains(&pin.key);
+            let check = widgets::scroll_on_focus(ui.checkbox(&mut chosen, &pin.name));
+            widgets::set_name(ui, &check, &format!("Lower {} while you talk", pin.name));
+            if check.changed() {
+                if chosen {
+                    mic.targets.push(pin.key.clone());
+                } else {
+                    mic.targets.retain(|k| *k != pin.key);
+                }
             }
         }
     }
@@ -412,51 +321,47 @@ fn backup(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
     let look = *cx.look;
     ui.add(
         egui::Label::new(
-            typography::rich(
-                "Export your preferences (not the window position) to a file, and import them on this or another PC. An import is checked first and shows what it contains, and your current settings are saved to a backup file before they are replaced.",
-                Role::Footnote,
-                &look,
+            RichText::new(
+                "Export preferences to JSON, or check a file before importing. Current settings are backed up first.",
             )
+            .small()
             .color(look.p.text_muted),
         )
         .wrap(),
     );
-    if widgets::button(ui, &look, "Export settings", ButtonKind::Secondary).clicked() {
+    if widgets::scroll_on_focus(ui.button("Export settings")).clicked() {
         *outcome = Outcome::ExportSettings;
     }
+    widgets::row_divider(ui, &look);
     ui.horizontal(|ui| {
-        let label = ui.label(typography::rich("Import from", Role::Body, &look).color(look.p.text));
+        let label = ui.label("Import from");
         let width = (ui.available_width() - 90.0).clamp(80.0, 260.0);
         let field = ui.add(
             egui::TextEdit::singleline(&mut cx.transfer.path)
-                .hint_text("Path of an exported .json file")
+                .hint_text(r"C:\path\to\settings.json")
                 .desired_width(width),
         );
         widgets::set_name(ui, &field, "Path of the settings file to import");
         widgets::scroll_on_focus(field).labelled_by(label.id);
         let ready = !cx.transfer.path.trim().is_empty();
-        if ui
-            .add_enabled_ui(ready, |ui| widgets::button(ui, &look, "Check file", ButtonKind::Secondary))
-            .inner
-            .clicked()
-        {
+        if widgets::scroll_on_focus(ui.add_enabled(ready, egui::Button::new("Check file"))).clicked() {
             *outcome = Outcome::CheckImport;
         }
     });
     if let Some(error) = &cx.transfer.error {
-        ui.add(egui::Label::new(typography::rich(error, Role::Callout, &look).color(look.p.danger)).wrap());
+        ui.add(egui::Label::new(RichText::new(error).color(look.p.danger)).wrap());
     }
     let mut cancel = false;
     if let Some((_, lines)) = &cx.transfer.candidate {
-        ui.label(typography::rich("This file contains", Role::CalloutStrong, &look).color(look.p.text));
+        ui.label(RichText::new("This file contains").font(semibold(13.0)));
         for line in lines {
-            ui.add(egui::Label::new(typography::rich(line, Role::Footnote, &look).color(look.p.text_muted)).wrap());
+            ui.add(egui::Label::new(RichText::new(line).small()).wrap());
         }
         ui.horizontal_wrapped(|ui| {
-            if widgets::button(ui, &look, "Import and replace my settings", ButtonKind::Primary).clicked() {
+            if widgets::scroll_on_focus(ui.button("Import and replace my settings")).clicked() {
                 *outcome = Outcome::ApplyImport;
             }
-            cancel = widgets::button(ui, &look, "Cancel", ButtonKind::Secondary).clicked();
+            cancel = widgets::scroll_on_focus(ui.button("Cancel")).clicked();
         });
     }
     if cancel {
@@ -469,7 +374,7 @@ fn backup(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
 fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
     let look = *cx.look;
     if !*cx.confirm_route_reset {
-        if widgets::button(ui, &look, "Reset all app devices…", ButtonKind::Destructive)
+        if widgets::scroll_on_focus(ui.button("Reset all app devices…"))
             .on_hover_text("Make every app follow the system default output and input again")
             .clicked()
         {
@@ -479,23 +384,21 @@ fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
     }
     ui.add(
         egui::Label::new(
-            typography::rich(
-                "This resets the device choice of every app on this PC, including choices made in Windows Settings. To reset one app, choose System default in its row instead.",
-                Role::Callout,
-                &look,
+            RichText::new(
+                "Resets every app's Windows device choice. To reset one app, choose System default in its row.",
             )
             .color(look.p.text),
         )
         .wrap(),
     );
     ui.horizontal_wrapped(|ui| {
-        let confirm = widgets::button(ui, &look, "Reset all apps", ButtonKind::Destructive);
+        let confirm = widgets::scroll_on_focus(ui.button("Reset all apps"));
         widgets::set_name(ui, &confirm, "Confirm: reset the device choice of all apps");
         if confirm.clicked() {
             cx.audio.send(Command::ResetAllAppDevices);
             *cx.confirm_route_reset = false;
         }
-        if widgets::button(ui, &look, "Cancel", ButtonKind::Secondary).clicked() {
+        if widgets::scroll_on_focus(ui.button("Cancel")).clicked() {
             *cx.confirm_route_reset = false;
         }
     });
@@ -503,43 +406,34 @@ fn app_device_reset(ui: &mut Ui, cx: &mut SettingsCtx) {
 
 fn about(ui: &mut Ui, cx: &mut SettingsCtx, outcome: &mut Outcome) {
     let look = *cx.look;
+    ui.label(RichText::new(format!("Glass Mixer {}", env!("CARGO_PKG_VERSION"))).font(semibold(14.0)));
     ui.label(
-        typography::rich(format!("Glass Mixer {}", env!("CARGO_PKG_VERSION")), Role::Headline, &look)
-            .color(look.p.text),
-    );
-    ui.label(
-        typography::rich("Works offline. No telemetry, analytics or network access.", Role::Footnote, &look)
-            .color(look.p.text_muted),
+        RichText::new("Works offline. No telemetry, analytics or network access.").small().color(look.p.text_muted),
     );
     ui.add(
         egui::Label::new(
-            typography::rich(
-                "For a bug report: a diagnostic report lists versions, states, counts and recent warnings. App, device and profile names and your user folder are hidden, and nothing is sent anywhere.",
-                Role::Footnote,
-                &look,
-            )
-            .color(look.p.text_muted),
+            RichText::new("Diagnostic reports omit app, device, and profile names and your user folder.")
+                .small()
+                .color(look.p.text_muted),
         )
         .wrap(),
     );
     ui.horizontal_wrapped(|ui| {
-        if widgets::button(ui, &look, "Save diagnostic report", ButtonKind::Secondary).clicked() {
+        if widgets::scroll_on_focus(ui.button("Save diagnostic report")).clicked() {
             *outcome = Outcome::SaveDiagnostics;
         }
-        if widgets::button(ui, &look, "Copy report", ButtonKind::Secondary).clicked() {
+        if widgets::scroll_on_focus(ui.button("Copy report")).clicked() {
             *outcome = Outcome::CopyDiagnostics;
         }
     });
+    widgets::row_divider(ui, &look);
     let dir = cx.settings_path.parent().map(Path::to_path_buf);
     // A long profile path must wrap inside the card, not run past the window edge.
     ui.add(
-        egui::Label::new(
-            typography::rich(cx.settings_path.display().to_string(), Role::Footnote, &look).color(look.p.text_muted),
-        )
-        .wrap(),
+        egui::Label::new(RichText::new(cx.settings_path.display().to_string()).small().color(look.p.text_muted)).wrap(),
     );
     if let Some(dir) = dir
-        && widgets::button(ui, &look, "Open settings folder", ButtonKind::Secondary).clicked()
+        && widgets::scroll_on_focus(ui.button("Open settings folder")).clicked()
     {
         let _ = std::fs::create_dir_all(&dir);
         if let Err(e) = crate::platform::window::open_folder(&dir) {

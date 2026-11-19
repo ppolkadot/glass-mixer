@@ -60,6 +60,7 @@ $notices = Join-Path $root 'target\release\THIRD-PARTY-NOTICES.txt'
 # The build script writes the generated icon to OUT_DIR; copy it where the installer expects it.
 $ico = Get-ChildItem target\release\build -Recurse -Filter app.ico | Sort-Object LastWriteTime | Select-Object -Last 1
 Copy-Item $ico.FullName target\release\app.ico -Force
+Copy-Item $ico.FullName assets\app.ico -Force
 
 New-Item -ItemType Directory -Force dist | Out-Null
 $distRoot = [IO.Path]::GetFullPath((Join-Path $root 'dist')).TrimEnd('\') + '\'

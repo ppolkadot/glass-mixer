@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 (2026-11-19)
+
+Package details and checksums are in [the release record](docs/releases/0.7.0.md).
+
+### Changed
+
+- **Hover-only top dock navigation bar.** The view switcher rests as a compact glass capsule and expands on hover or keyboard focus with macOS Dock cursor-proximity icon magnification and `Salted Flutters Polaris Semibold` labels.
+- **Apple Liquid Glass toggle switches.** Settings switches now use translucent glass tracks with refractive rims, top specular highlights, and elastic capsule thumbs.
+- **Procedural SF-Symbol-proportioned vector icons and refined app/tray icon.** Replaced Segoe font glyphs with crisp procedural vector symbols (`Painter` geometry), rebuilt the squircle tray/app icon with single-hue tonal depth and three vertical faders, updated `assets/app.ico`, and preserved the previous logo as `assets/old-app.ico`.
+- **Google Sans fallback and `"Windows"` typeface option.** Replaced Segoe UI with embedded Google Sans (`Regular` and `SemiBold`) behind Polaris and as the `"Windows"` typeface choice.
+- **Pixel-aligned segmented controls and Settings cleanup.** Fixed shared animation-ID collisions between segmented pills, hid the custom wheel-step input unless `Custom` is selected, and grouped Settings cards cleanly on a 4-point layout grid with `/unslop-ui` copy tightening.
+- **Control Center-style sliders.** Updated volume and balance sliders to 6 px tracks with in-track level meters, a magnetic center detent for stereo balance, and double-click-to-100% reset on volume faders.
+
 ## 0.6.0 (2026-11-13)
 
 Package details and checksums are in [the release record](docs/releases/0.6.0.md).

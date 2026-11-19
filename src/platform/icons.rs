@@ -32,7 +32,7 @@ use std::{
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SelectObject,
+    DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ, ReleaseDC, SelectObject,
 };
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::UI::Shell::{
@@ -206,7 +206,7 @@ impl IconService {
     /// queue is full, the request is forgotten and the next call makes it again.
     pub fn request(&mut self, app: &AppEntry, px: u32) {
         let key = (app.key.clone(), px);
-        if app.key == AppKey::System && app.icon_resource.is_none() {
+        if app.key == AppKey::System {
             return;
         }
         if self.requested.contains(&key) {
@@ -433,21 +433,8 @@ fn hbitmap_to_image(hbmp: HBITMAP) -> Option<ColorImage> {
 }
 
 fn hicon_to_image(hicon: HICON, px: i32) -> Option<ColorImage> {
-    struct Dc(HDC);
-    impl Drop for Dc {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = DeleteDC(self.0);
-            }
-        }
-    }
-
     unsafe {
         let hdc = CreateCompatibleDC(None);
-        if hdc.is_invalid() {
-            return None;
-        }
-        let _dc = Dc(hdc);
         let info = top_down_info(px, px);
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         let dib = CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
@@ -460,6 +447,7 @@ fn hicon_to_image(hicon: HICON, px: i32) -> Option<ColorImage> {
         };
         SelectObject(hdc, old);
         let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteDC(hdc);
         buf.map(|b| bgra_to_image(b, px as usize, px as usize))
     }
 }

@@ -7,8 +7,7 @@
 //! the display returns to whatever Windows reports.
 
 use super::Look;
-use super::typography::{self, Role};
-use super::widgets::{self, Slider, card, fallback_tile, glyph, icon_button, percent_label};
+use super::widgets::{self, Slider, Symbol, card, fallback_tile, icon_button, percent_label, semibold};
 use crate::audio::{
     Activity, AppEntry, AppKey, AudioHandle, AudioSnapshot, BalanceState, Command, EndpointState, Flow, Meters, Route,
     ServiceStatus, matches_filter, show_with_idle_filter, to_percent,
@@ -16,7 +15,7 @@ use crate::audio::{
 use crate::platform::icons::{IconKey, IconResult, IconService};
 use crate::settings::Settings;
 use egui::{
-    Align, Align2, Color32, CornerRadius, Key, Layout, Margin, Rect, RichText, Sense, Shape, TextureHandle,
+    Align, Color32, CornerRadius, FontId, Key, Layout, Margin, Rect, RichText, Sense, Shape, TextureHandle,
     TextureOptions, Ui, Vec2, pos2, text::LayoutJob, vec2,
 };
 use std::{
@@ -223,124 +222,110 @@ pub fn show(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> Outcome {
 fn header(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) -> bool {
     let look = cx.look;
     let mut open_devices = false;
-    card(look).show(ui, |ui| {
+    let card_resp = card(look).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if let ServiceStatus::Unavailable(message) = &cx.snap.status {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(glyph::WARNING).font(widgets::icon_font(16.0)).color(look.p.danger));
-                ui.label(typography::rich(message, Role::Callout, look).color(look.p.text));
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                widgets::paint_symbol(ui.painter(), icon_rect, Symbol::ExclamationTriangleFill, look.p.danger);
+                ui.label(RichText::new(message).color(look.p.text));
             });
             ui.horizontal(|ui| {
-                ui.label(
-                    typography::rich("Glass Mixer keeps retrying automatically.", Role::Footnote, look)
-                        .color(look.p.text_muted),
-                );
-                if widgets::button(ui, look, "Retry now", widgets::ButtonKind::Secondary).clicked() {
+                ui.label(RichText::new("Glass Mixer keeps retrying.").small().color(look.p.text_muted));
+                if ui.button("Retry now").clicked() {
                     cx.audio.send(Command::Refresh);
                 }
             });
-            ui.add_space(look.m.gap * 0.5);
+            ui.add_space(4.0);
         }
 
         if let Some(solo) = &cx.snap.solo {
             let name = cx.snap.apps.iter().find(|a| &a.key == solo).map_or("an app", |a| st.display_name(a));
             ui.horizontal(|ui| {
-                ui.label(RichText::new(glyph::SOLO).font(widgets::icon_font(14.0)).color(look.p.accent));
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                widgets::paint_symbol(ui.painter(), icon_rect, Symbol::Headphones { filled: true }, look.p.accent);
                 // The button is placed first, so a long name truncates instead of pushing it out.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::scroll_on_focus(widgets::button(ui, look, "End solo", widgets::ButtonKind::Secondary))
-                        .clicked()
-                    {
+                    if widgets::scroll_on_focus(ui.small_button("End solo")).clicked() {
                         cx.audio.send(Command::EndSolo);
                     }
-                    let text = format!("Solo: {name}. Other apps are lowered.");
-                    ui.add(
-                        egui::Label::new(typography::rich(&text, Role::Callout, look).color(look.p.text)).truncate(),
-                    )
-                    .on_hover_text(text);
+                    let text = if cx.settings.solo.mute {
+                        format!("Solo: {name} · others muted")
+                    } else {
+                        format!("Solo: {name} · others at {}%", cx.settings.solo.keep_percent)
+                    };
+                    ui.add(egui::Label::new(RichText::new(&text).color(look.p.text)).truncate()).on_hover_text(text);
                 });
             });
         }
         if cx.snap.mic_ducking {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(glyph::MIC).font(widgets::icon_font(14.0)).color(look.p.accent));
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                widgets::paint_symbol(ui.painter(), icon_rect, Symbol::Mic, look.p.accent);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let off =
-                        widgets::scroll_on_focus(widgets::button(ui, look, "Turn off", widgets::ButtonKind::Secondary));
+                    let off = widgets::scroll_on_focus(ui.small_button("Turn off"));
                     widgets::set_name(ui, &off, "Turn off microphone ducking");
                     if off.clicked() {
                         cx.settings.mic_ducking.enabled = false;
                     }
-                    let text = "Microphone ducking: apps are lowered while you talk.";
-                    ui.add(egui::Label::new(typography::rich(text, Role::Callout, look).color(look.p.text)).truncate())
-                        .on_hover_text(text);
+                    let text = "Mic ducking active";
+                    ui.add(egui::Label::new(RichText::new(text).color(look.p.text)).truncate());
                 });
             });
         }
         ui.horizontal(|ui| {
-            device_label(ui, look, glyph::SPEAKER, "Output");
+            let out_sym = cx
+                .snap
+                .output
+                .as_ref()
+                .map_or(Symbol::HifiSpeaker, |ep| widgets::device_symbol(Flow::Output, &ep.name));
+            device_label(ui, look, out_sym);
             let width = ui.available_width();
             device_combo(ui, cx, Flow::Output, width);
         });
         match &cx.snap.output {
             Some(ep) => {
-                endpoint_row(ui, st, cx, Flow::Output, ep, false);
-                // Balance and sound properties need room; they live in the Devices view.
-                if widgets::button(ui, look, "Balance and sound properties", widgets::ButtonKind::Plain).clicked() {
-                    open_devices = true;
-                }
+                endpoint_row(ui, st, cx, Flow::Output, ep, false, Some(&mut open_devices));
             }
             None if cx.snap.status == ServiceStatus::Starting => {
-                ui.label(
-                    typography::rich("Connecting to Windows audio…", Role::Callout, look).color(look.p.text_muted),
-                );
+                ui.label(RichText::new("Connecting to Windows audio…").color(look.p.text_muted));
             }
             None => {
-                ui.label(
-                    typography::rich(
-                        "No output device is available. Connect speakers or headphones.",
-                        Role::Callout,
-                        look,
-                    )
-                    .color(look.p.text_muted),
-                );
+                ui.label(RichText::new("Connect speakers or headphones.").small().color(look.p.text_muted));
             }
         }
     });
+    widgets::card_highlight(ui, look, card_resp.response.rect);
     open_devices
 }
 
 fn input_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
     let look = cx.look;
-    card(look).show(ui, |ui| {
+    let card_resp = card(look).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        if cx.snap.input.is_none() && cx.snap.inputs.is_empty() {
+            ui.horizontal(|ui| {
+                device_label(ui, look, Symbol::MicSlash);
+                ui.label(RichText::new("No input device").color(look.p.text_muted));
+            });
+            return;
+        }
         ui.horizontal(|ui| {
-            device_label(ui, look, glyph::MIC, "Input");
+            device_label(ui, look, Symbol::Mic);
             let width = ui.available_width();
             device_combo(ui, cx, Flow::Input, width);
         });
-        match &cx.snap.input {
-            Some(ep) => endpoint_row(ui, st, cx, Flow::Input, ep, false),
-            None => {
-                ui.label(RichText::new("No microphone or other input device was found.").color(look.p.text_muted));
-            }
+        if let Some(ep) = &cx.snap.input {
+            endpoint_row(ui, st, cx, Flow::Input, ep, false, None);
         }
     });
+    widgets::card_highlight(ui, look, card_resp.response.rect);
 }
 
-fn device_label(ui: &mut Ui, look: &Look, g: char, fallback: &str) {
+fn device_label(ui: &mut Ui, look: &Look, sym: Symbol) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(look.m.button), Sense::hover());
-    if look.icons {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, g, widgets::icon_font(16.0), look.p.text_muted);
-    } else {
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            &fallback[..1],
-            typography::font(Role::Footnote),
-            look.p.text_muted,
-        );
-    }
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(16.0));
+    widgets::paint_symbol(ui.painter(), icon_rect, sym, look.p.text_muted);
 }
 
 fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
@@ -359,22 +344,17 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
         Flow::Output => "output",
         Flow::Input => "input",
     };
-    let look = cx.look;
     ui.add_enabled_ui(can_switch, |ui| {
-        let mut combo = egui::ComboBox::from_id_salt(("device", kind))
+        let response = egui::ComboBox::from_id_salt(("device", kind))
             .width(width.max(80.0))
             .truncate()
-            .selected_text(typography::rich(&selected, Role::CalloutStrong, look));
-        if look.icons {
-            combo = combo.icon(widgets::combo_icon(look));
-        }
-        let response = combo
+            .icon(|ui, rect, visuals, _open| {
+                widgets::paint_symbol(ui.painter(), rect, Symbol::ChevronDown, visuals.fg_stroke.color);
+            })
+            .selected_text(RichText::new(&selected).font(semibold(14.0)))
             .show_ui(ui, |ui| {
                 for d in devices {
-                    if ui
-                        .selectable_label(d.is_default, crate::audio::device_label(d, devices))
-                        .on_hover_text(&d.id)
-                        .clicked()
+                    if ui.selectable_label(d.is_default, crate::audio::device_label(d, devices)).clicked()
                         && !d.is_default
                     {
                         cx.audio.send(Command::SetDefaultDevice { flow, id: d.id.clone() });
@@ -383,7 +363,7 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
             })
             .response;
         let hint = if can_switch {
-            format!("Default {kind} device: {selected}. Choose another to switch.")
+            selected.clone()
         } else if devices.is_empty() {
             format!("No {kind} devices are available")
         } else {
@@ -396,21 +376,30 @@ fn device_combo(ui: &mut Ui, cx: &mut MixerCtx, flow: Flow, width: f32) {
 
 /// Volume row for an endpoint. `details` adds the balance and sound-property section,
 /// which only the Devices view (a full-height scroll area) has room for.
-fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow, ep: &EndpointState, details: bool) {
+fn endpoint_row(
+    ui: &mut Ui,
+    st: &mut MixerState,
+    cx: &mut MixerCtx,
+    flow: Flow,
+    ep: &EndpointState,
+    details: bool,
+    open_devices: Option<&mut bool>,
+) {
     let look = cx.look;
     ui.horizontal(|ui| {
         let target = Target::Volume(Ctl::Device(ep.id.clone()));
         let mut v = st.value(&target, ep.volume);
-        let (g, what) = match flow {
-            Flow::Output => (glyph::volume(v, ep.muted), "output"),
-            Flow::Input => (if ep.muted { glyph::MIC_OFF } else { glyph::MIC }, "microphone"),
+        let (sym, what) = match flow {
+            Flow::Output => (Symbol::volume(v, ep.muted), "output"),
+            Flow::Input => (if ep.muted { Symbol::MicSlash } else { Symbol::Mic }, "microphone"),
         };
         let label = format!("{} {what}: {}", if ep.muted { "Unmute" } else { "Mute" }, ep.name);
         let emphasis = ep.muted.then_some(look.p.danger);
-        if icon_button(ui, look, g, if ep.muted { "M" } else { "On" }, &label, emphasis).clicked() {
+        if icon_button(ui, look, sym, &label, emphasis).clicked() {
             cx.audio.send(Command::SetDeviceMute { id: ep.id.clone(), muted: !ep.muted });
         }
-        let width = ui.available_width() - widgets::percent_width(ui, look) - ui.spacing().item_spacing.x;
+        let extra = if open_devices.is_some() { look.m.button + ui.spacing().item_spacing.x } else { 0.0 };
+        let width = ui.available_width() - 42.0 - ui.spacing().item_spacing.x - extra;
         let meter =
             (cx.settings.show_meters && cx.snap.endpoint(flow).is_some_and(|d| d.id == ep.id)).then_some(match flow {
                 Flow::Output => cx.meters.output,
@@ -428,113 +417,95 @@ fn endpoint_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, flow: Flow,
         }
         let pct = if ep.muted { "Muted".to_string() } else { format!("{}%", to_percent(v)) };
         percent_label(ui, look, &pct, ep.muted);
+        if let Some(open) = open_devices
+            && icon_button(ui, look, Symbol::SlidersHorizontal, "Balance and sound properties", None).clicked()
+        {
+            *open = true;
+        }
     });
     if details {
         ui.push_id((&ep.id, "properties"), |ui| {
-            let resp = widgets::disclosure(ui, look, "Balance and sound properties", |ui| {
+            let resp = egui::CollapsingHeader::new("Balance and sound properties").show(ui, |ui| {
                 endpoint_balance(ui, st, cx, ep);
-                sound_properties(ui, cx, ep);
+                sound_properties(ui, cx, flow, ep);
             });
             widgets::scroll_on_focus(resp.header_response);
         });
     }
 }
 
-fn sound_properties(ui: &mut Ui, cx: &MixerCtx, ep: &EndpointState) {
-    let look = cx.look;
-    let p = &look.p;
+fn sound_properties(ui: &mut Ui, cx: &MixerCtx, flow: Flow, ep: &EndpointState) {
+    let muted = cx.look.p.text_muted;
     if let Some(props) = cx.snap.properties.get(&ep.id) {
         match &props.default_format {
             Ok(format) => {
-                ui.label(
-                    typography::rich(format!("Default format: {format}"), Role::Footnote, look).color(p.text_muted),
+                ui.add(
+                    egui::Label::new(RichText::new(format!("Default format: {format}")).small().color(muted)).wrap(),
                 );
             }
             Err(reason) => {
-                ui.label(
-                    typography::rich(format!("Default format unavailable: {reason}"), Role::Footnote, look)
-                        .color(p.text_muted),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Default format unavailable: {reason}")).small().color(muted),
+                    )
+                    .wrap(),
                 );
             }
         }
         if let Ok(format) = &props.mix_format {
-            ui.label(
-                typography::rich(format!("Internal mix format: {format}"), Role::Footnote, look).color(p.text_muted),
-            );
+            ui.add(egui::Label::new(RichText::new(format!("Mix format: {format}")).small().color(muted)).wrap());
         }
         match &props.enhancements {
             Ok(enabled) => {
-                ui.label(
-                    typography::rich(
-                        format!("Legacy system effects: {}", if *enabled { "Enabled" } else { "Disabled" }),
-                        Role::Footnote,
-                        look,
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("System effects: {}", if *enabled { "On" } else { "Off" }))
+                            .small()
+                            .color(muted),
                     )
-                    .color(p.text_muted),
+                    .wrap(),
                 );
             }
             Err(_) => {
-                ui.label(
-                    typography::rich("Audio enhancements: state unavailable from this device", Role::Footnote, look)
-                        .color(p.text_muted),
+                ui.add(
+                    egui::Label::new(RichText::new("System effects: not reported by this device").small().color(muted))
+                        .wrap(),
                 );
             }
         }
-        ui.label(
-            typography::rich(
-                "Vendor enhancements and the selected spatial provider are managed in Windows Settings.",
-                Role::Footnote,
-                look,
-            )
-            .color(p.text_muted),
-        );
-        match &props.spatial {
-            Ok(support) => {
-                ui.label(typography::rich(support.to_string(), Role::Footnote, look).color(p.text_muted));
-            }
-            Err(reason) => {
-                ui.label(typography::rich(reason, Role::Footnote, look).color(p.text_muted));
+        if flow == Flow::Output {
+            match &props.spatial {
+                Ok(support) => {
+                    ui.add(egui::Label::new(RichText::new(support.to_string()).small().color(muted)).wrap());
+                }
+                Err(reason) => {
+                    ui.add(egui::Label::new(RichText::new(reason).small().color(muted)).wrap());
+                }
             }
         }
     } else {
-        ui.label(typography::rich("Sound properties are not available yet.", Role::Footnote, look).color(p.text_muted));
+        ui.label(RichText::new("Loading sound properties…").small().color(muted));
     }
-    ui.label(
-        typography::rich(
-            "Changing formats may briefly interrupt playing audio. Supported choices and reliable controls are available in Windows.",
-            Role::Footnote,
-            look,
-        )
-        .color(p.text_muted),
-    );
-    if widgets::button(ui, look, "Open Windows sound settings", widgets::ButtonKind::Secondary).clicked() {
-        cx.audio.send(Command::OpenSoundSettings);
-    }
-    ui.label(
-        typography::rich(
-            "Mono audio: live state/control unavailable. Use Windows Accessibility audio settings.",
-            Role::Footnote,
-            look,
-        )
-        .color(p.text_muted),
-    );
-    if widgets::button(ui, look, "Open mono audio settings", widgets::ButtonKind::Secondary).clicked() {
-        cx.audio.send(Command::OpenMonoSettings);
-    }
+    ui.horizontal_wrapped(|ui| {
+        if widgets::scroll_on_focus(ui.button("Open Windows sound settings")).clicked() {
+            cx.audio.send(Command::OpenSoundSettings);
+        }
+        if widgets::scroll_on_focus(ui.button("Open mono audio settings")).clicked() {
+            cx.audio.send(Command::OpenMonoSettings);
+        }
+    });
 }
 
 fn endpoint_balance(ui: &mut Ui, st: &mut MixerState, cx: &MixerCtx, ep: &EndpointState) {
-    let look = cx.look;
-    let p = &look.p;
     if let Some(balance) = ep.balance {
         ui.horizontal(|ui| {
-            ui.label(typography::rich("Balance", Role::Footnote, look).color(p.text_muted));
-            ui.label(typography::rich("L", Role::Footnote, look).color(p.text_muted));
+            ui.label("Balance");
+            ui.label("L");
             let target = Target::Balance(Ctl::Device(ep.id.clone()));
             let mut b = st.value(&target, balance);
             let response =
                 Slider::balance(&mut b, &format!("{} balance", ep.name), (ui.available_width() - 60.0).min(220.0))
-                    .show(ui, p);
+                    .show(ui, &cx.look.p);
             if response.double_clicked() {
                 b = 0.0;
             }
@@ -544,62 +515,88 @@ fn endpoint_balance(ui: &mut Ui, st: &mut MixerState, cx: &MixerCtx, ep: &Endpoi
             } else if response.dragged() {
                 st.hold(target, b);
             }
-            ui.label(typography::rich("R", Role::Footnote, look).color(p.text_muted));
-            response.on_hover_text(
-                "Left/right balance. Double-click to center. Arrow keys adjust; Home/End choose a side.",
-            );
+            ui.label("R");
+            response.on_hover_text("Double-click to center");
         });
     } else {
         ui.add(
-            egui::Label::new(
-                typography::rich("Balance: Not available — this device is not stereo", Role::Footnote, look)
-                    .color(p.text_muted),
-            )
-            .wrap(),
+            egui::Label::new(RichText::new("Balance: unavailable (not stereo)").small().color(cx.look.p.text_muted))
+                .wrap(),
         );
     }
 }
 
 pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
     st.expire(ui.ctx());
-    let look = cx.look;
-    let p = &look.p;
     ui.horizontal(|ui| {
-        ui.label(typography::rich("Devices", Role::LargeTitle, look).color(p.text));
-        if widgets::button(ui, look, "Refresh", widgets::ButtonKind::Secondary).clicked() {
-            cx.audio.send(Command::LoadDevices);
-        }
+        ui.label(RichText::new("Devices").font(semibold(18.0)));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_button(ui, cx.look, Symbol::ArrowClockwise, "Refresh", None).clicked() {
+                cx.audio.send(Command::LoadDevices);
+            }
+        });
     });
-    ui.label(
-        typography::rich(
-            "Apps in the Mixer use the default output. Device controls below are independent.",
-            Role::Footnote,
-            look,
-        )
-        .color(p.text_muted),
-    );
+    ui.add_space(4.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for flow in [Flow::Output, Flow::Input] {
-            ui.label(typography::rich(if flow == Flow::Output { "Outputs" } else { "Inputs" }, Role::Title, look).color(p.text));
+            if flow == Flow::Input {
+                ui.add_space(cx.look.m.gap * 0.5);
+            }
+            ui.label(
+                RichText::new(if flow == Flow::Output { "Outputs" } else { "Inputs" })
+                    .font(semibold(13.0))
+                    .color(cx.look.p.text_muted),
+            );
+            ui.add_space(4.0);
             let devices = cx.snap.devices(flow);
             if devices.is_empty() {
-                ui.label(typography::rich("No active devices", Role::Body, look).color(p.text_muted));
+                ui.label(RichText::new("No active devices").small().color(cx.look.p.text_muted));
             }
             for d in devices {
                 ui.push_id(&d.id, |ui| {
-                    card(look).show(ui, |ui| {
-                        ui.label(typography::rich(crate::audio::device_label(d, devices), Role::Headline, look).color(p.text))
-                            .on_hover_text(&d.id);
+                    let card_resp = card(cx.look).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                            widgets::paint_symbol(
+                                ui.painter(),
+                                icon_rect,
+                                widgets::device_symbol(flow, &d.name),
+                                cx.look.p.text_muted,
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(crate::audio::device_label(d, devices)).font(semibold(14.0)),
+                                )
+                                .truncate(),
+                            );
+                        });
+                        if d.is_default {
+                            ui.label(RichText::new("Default device").small().color(cx.look.p.accent));
+                        } else if widgets::scroll_on_focus(
+                            ui.add_enabled(cx.snap.can_switch_default, egui::Button::new("Make default")),
+                        )
+                        .clicked()
+                        {
+                            cx.audio.send(Command::SetDefaultDevice { flow, id: d.id.clone() });
+                        }
+                        match cx.snap.device_states.iter().find(|s| s.info.id == d.id) {
+                            Some(s) => match &s.state {
+                                Ok(ep) => endpoint_row(ui, st, cx, flow, ep, true, None),
+                                Err(e) => {
+                                    ui.label(RichText::new(e).small().color(cx.look.p.danger));
+                                }
+                            },
+                            None => {
+                                ui.label(RichText::new("Opening device…").small().color(cx.look.p.text_muted));
+                            }
+                        }
                         if flow == Flow::Output {
+                            widgets::row_divider(ui, cx.look);
                             let mut pinned = cx.settings.pinned_devices.iter().any(|p| p.id == d.id);
-                            let pin = widgets::scroll_on_focus(widgets::check_row(
-                                ui,
-                                look,
-                                &mut pinned,
-                                "Pin for output cycling",
-                            ));
+                            let pin = widgets::scroll_on_focus(ui.checkbox(&mut pinned, "Pin for output cycling"));
                             widgets::set_name(ui, &pin, &format!("Pin {} for output cycling", d.name));
-                            if pin.on_hover_text("The \"Next pinned output device\" shortcut switches between pinned outputs, in the order they were pinned").changed() {
+                            if pin.on_hover_text("Included in the Next pinned output shortcut.").changed() {
                                 if pinned {
                                     cx.settings.pinned_devices.push(crate::audio::preferences::PinnedDevice {
                                         id: d.id.clone(),
@@ -611,51 +608,33 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
                             }
                             if let Some(index) = cx.settings.pinned_devices.iter().position(|p| p.id == d.id) {
                                 let len = cx.settings.pinned_devices.len();
-                                let mut delta = 0;
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        typography::rich(format!("Cycle position {}", index + 1), Role::Footnote, look)
-                                            .color(p.text_muted),
-                                    );
-                                    let names = (format!("Cycle {} earlier", d.name), format!("Cycle {} later", d.name));
-                                    delta = order_buttons(
-                                        ui,
-                                        look,
-                                        index,
-                                        len,
-                                        ("Earlier", "Later"),
-                                        (&names.0, &names.1),
-                                        false,
-                                    );
-                                });
-                                crate::audio::preferences::move_item(&mut cx.settings.pinned_devices, index, delta);
-                            }
-                        }
-                        if d.is_default {
-                            ui.label(typography::rich("Default device", Role::Footnote, look).color(p.text_muted));
-                        } else if ui
-                            .add_enabled_ui(cx.snap.can_switch_default, |ui| {
-                                widgets::button(ui, look, "Make default", widgets::ButtonKind::Secondary)
-                            })
-                            .inner
-                            .clicked()
-                        {
-                            cx.audio.send(Command::SetDefaultDevice { flow, id: d.id.clone() });
-                        }
-                        match cx.snap.device_states.iter().find(|s| s.info.id == d.id) {
-                            Some(s) => match &s.state {
-                                Ok(ep) => endpoint_row(ui, st, cx, flow, ep, true),
-                                Err(e) => {
-                                    ui.label(typography::rich(e, Role::Footnote, look).color(p.danger));
+                                if len > 1 {
+                                    let mut delta = 0;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("Cycle position {}", index + 1))
+                                                .small()
+                                                .color(cx.look.p.text_muted),
+                                        );
+                                        let names =
+                                            (format!("Cycle {} earlier", d.name), format!("Cycle {} later", d.name));
+                                        delta = order_buttons(
+                                            ui,
+                                            index,
+                                            len,
+                                            ("Earlier", "Later"),
+                                            (&names.0, &names.1),
+                                            false,
+                                        );
+                                    });
+                                    crate::audio::preferences::move_item(&mut cx.settings.pinned_devices, index, delta);
                                 }
-                            },
-                            None => {
-                                ui.label(typography::rich("Opening device…", Role::Footnote, look).color(p.text_muted));
                             }
                         }
-                    })
+                    });
+                    widgets::card_highlight(ui, cx.look, card_resp.response.rect);
                 });
-                ui.add_space(look.m.gap);
+                ui.add_space(cx.look.m.gap);
             }
             if flow == Flow::Output {
                 disconnected_pins(ui, cx, devices);
@@ -666,7 +645,6 @@ pub fn show_devices(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
 
 /// Pinned outputs that aren't connected stay in the cycle order; they can be unpinned here.
 fn disconnected_pins(ui: &mut Ui, cx: &mut MixerCtx, connected: &[crate::audio::DeviceInfo]) {
-    let look = cx.look;
     let missing: Vec<_> = cx
         .settings
         .pinned_devices
@@ -677,7 +655,7 @@ fn disconnected_pins(ui: &mut Ui, cx: &mut MixerCtx, connected: &[crate::audio::
     for pin in missing {
         ui.push_id(("pinned-offline", &pin.id), |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let unpin = widgets::button(ui, look, "Unpin", widgets::ButtonKind::Secondary);
+                let unpin = widgets::scroll_on_focus(ui.small_button("Unpin"));
                 widgets::set_name(ui, &unpin, &format!("Unpin {}", pin.name));
                 if unpin.clicked() {
                     cx.settings.pinned_devices.retain(|p| p.id != pin.id);
@@ -685,14 +663,12 @@ fn disconnected_pins(ui: &mut Ui, cx: &mut MixerCtx, connected: &[crate::audio::
                 if let Some(index) = cx.settings.pinned_devices.iter().position(|p| p.id == pin.id) {
                     let len = cx.settings.pinned_devices.len();
                     let names = (format!("Cycle {} earlier", pin.name), format!("Cycle {} later", pin.name));
-                    let delta = order_buttons(ui, look, index, len, ("Earlier", "Later"), (&names.0, &names.1), true);
+                    let delta = order_buttons(ui, index, len, ("Earlier", "Later"), (&names.0, &names.1), true);
                     crate::audio::preferences::move_item(&mut cx.settings.pinned_devices, index, delta);
                 }
                 let text = format!("{} · pinned, not connected", pin.name);
-                ui.add(
-                    egui::Label::new(typography::rich(&text, Role::Footnote, look).color(look.p.text_muted)).truncate(),
-                )
-                .on_hover_text(text);
+                ui.add(egui::Label::new(RichText::new(&text).color(cx.look.p.text_muted)).truncate())
+                    .on_hover_text(text);
             });
         });
     }
@@ -711,15 +687,21 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
 
     ui.horizontal(|ui| {
         ui.add_space(2.0);
-        ui.label(typography::rich("Apps", Role::Title, look).color(look.p.text));
-        ui.label(typography::rich(format!("{}", visible.len()), Role::Footnote, look).color(look.p.text_muted));
+        ui.label(RichText::new("Apps").font(semibold(15.0)));
+        ui.label(RichText::new(format!("{}", visible.len())).small().color(look.p.text_muted));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, look, glyph::REFRESH, "R", "Refresh audio devices and apps", None).clicked() {
+            if icon_button(ui, look, Symbol::ArrowClockwise, "Refresh audio devices and apps", None).clicked() {
                 cx.icons.retry_failed();
                 cx.audio.send(Command::Refresh);
             }
-            let search =
-                widgets::search_field(ui, look, &mut st.filter, "Filter apps", ui.available_width().min(170.0));
+            if !st.filter.is_empty() && icon_button(ui, look, Symbol::XMark, "Clear app filter", None).clicked() {
+                st.filter.clear();
+            }
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut st.filter)
+                    .hint_text("Filter apps")
+                    .desired_width(ui.available_width().min(152.0)),
+            );
             if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
                 search.request_focus();
             }
@@ -727,7 +709,9 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
                 st.filter.clear();
             }
             widgets::set_name(ui, &search, "Filter apps");
-            search.on_hover_text("Filter apps by name (Ctrl+F)");
+            search.on_hover_text("Ctrl+F");
+            let (mag_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            widgets::paint_symbol(ui.painter(), mag_rect, Symbol::MagnifyingGlass, look.p.text_muted);
         });
     });
     ui.add_space(4.0);
@@ -735,48 +719,22 @@ fn apps_section(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx) {
     if visible.is_empty() {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
-            if look.icons {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::empty());
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    glyph::SPEAKER,
-                    widgets::icon_font(28.0),
-                    look.p.text_muted,
-                );
-                ui.add_space(4.0);
-            }
             let text = if !st.filter.trim().is_empty() {
                 format!("No apps match “{}”.", st.filter.trim())
             } else if cx.snap.status == ServiceStatus::Ok {
-                "No apps have audio sessions right now.\nApps appear here when they start playing sound.".to_string()
+                "No active apps.\nApps appear here when they play sound.".to_string()
             } else {
                 String::new()
             };
-            ui.label(typography::rich(text, Role::Body, look).color(look.p.text_muted));
+            ui.label(RichText::new(text).color(look.p.text_muted));
         });
         return;
     }
 
-    card(look).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (i, app) in visible.iter().enumerate() {
-                if i > 0 {
-                    let (sep_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(ui.available_width().max(1.0), 1.0), Sense::empty());
-                    let left = sep_rect.left() + look.m.icon + 12.0;
-                    let right = sep_rect.right() - 6.0;
-                    if right > left {
-                        ui.painter().line_segment(
-                            [pos2(left, sep_rect.center().y), pos2(right, sep_rect.center().y)],
-                            egui::Stroke::new(1.0, look.p.separator),
-                        );
-                    }
-                }
-                app_row(ui, st, cx, app);
-            }
-        });
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for app in &visible {
+            app_row(ui, st, cx, app);
+        }
     });
 }
 
@@ -784,7 +742,7 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
     let look = cx.look;
     let name = st.display_name(app).to_owned();
     ui.push_id((&app.key, "offline"), |ui| {
-        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+        let card_resp = card(look).show(ui, |ui| {
             // Fill the row, so long names truncate instead of widening the card.
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -801,44 +759,37 @@ fn placeholder_row(ui: &mut Ui, st: &MixerState, cx: &mut MixerCtx, app: &AppEnt
                             Color32::from_gray(128),
                         );
                     } else {
-                        fallback_tile(ui, rect, &name, look, None);
+                        let sym = (app.key == AppKey::System).then_some(Symbol::SystemSounds);
+                        fallback_tile(ui, rect, &name, look, sym);
                     }
                 });
                 ui.vertical(|ui| {
                     ui.add(
-                        egui::Label::new(typography::rich(&name, Role::Headline, look).color(look.p.text_muted))
-                            .truncate(),
+                        egui::Label::new(RichText::new(&name).font(semibold(14.0)).color(look.p.text_muted)).truncate(),
                     );
-                    ui.label(typography::rich("Not running", Role::Footnote, look).color(look.p.text_muted));
+                    ui.label(RichText::new("Not running").small().color(look.p.text_muted));
                 });
             });
             ui.add_enabled_ui(false, |ui| {
                 ui.horizontal(|ui| {
-                    icon_button(ui, look, glyph::MUTE, "M", &format!("{} mute unavailable", name), None);
-                    widgets::unavailable_slider(ui, look, &format!("{} volume unavailable — not running", name));
+                    icon_button(ui, look, Symbol::SpeakerSlash, &format!("{name} mute unavailable"), None);
+                    widgets::unavailable_slider(ui, look, &format!("{name} volume unavailable, not running"));
                 });
             });
             ui.horizontal_wrapped(|ui| {
-                let unpin = widgets::button(ui, look, "Unpin", widgets::ButtonKind::Secondary);
+                let unpin = widgets::scroll_on_focus(ui.button("Unpin"));
                 // The visible text is short so the row fits; the accessible name says which app.
-                widgets::set_name(ui, &unpin, &format!("Unpin {}", name));
-                if unpin.on_hover_text(format!("Unpin {}", name)).clicked() {
+                widgets::set_name(ui, &unpin, &format!("Unpin {name}"));
+                if unpin
+                    .on_hover_text("Moved or uninstalled? Unpin this row, then pin the app again when it plays.")
+                    .clicked()
+                {
                     cx.settings.pinned_apps.retain(|p| p.key != app.key);
                 }
-                ui.label(typography::rich("No active audio session", Role::Footnote, look).color(look.p.text_muted));
             });
-            ui.add(
-                egui::Label::new(
-                    typography::rich(
-                        "Moved or uninstalled? Unpin this row, then pin the app again when it plays.",
-                        Role::Footnote,
-                        look,
-                    )
-                    .color(look.p.text_muted),
-                )
-                .wrap(),
-            );
         });
+        widgets::card_highlight(ui, look, card_resp.response.rect);
+        ui.add_space(4.0);
     });
 }
 
@@ -855,9 +806,9 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
     let bg = ui.painter().add(Shape::Noop);
 
     let block = ui.vertical(|ui| {
-        ui.add_space(3.0);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.set_min_height(m.row_height - 6.0);
+            ui.set_min_height(m.row_height - 8.0);
             ui.add_space(4.0);
             let px = (m.icon * ui.ctx().pixels_per_point()).ceil() as u32;
             cx.icons.request(app, px);
@@ -865,12 +816,18 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             match st.texture(&(app.key.clone(), px)) {
                 Some(tex) => {
                     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                    let tint = if app.muted { Color32::from_white_alpha(150) } else { Color32::WHITE };
+                    let tint = if app.muted {
+                        Color32::from_white_alpha(150)
+                    } else if app.activity == Activity::Playing {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_white_alpha(185)
+                    };
                     ui.painter().image(tex.id(), icon_rect, uv, tint);
                 }
                 _ => {
-                    let g = (app.key == AppKey::System).then_some(glyph::SPEAKER);
-                    fallback_tile(ui, icon_rect, &name, look, g);
+                    let sym = (app.key == AppKey::System).then_some(Symbol::SystemSounds);
+                    fallback_tile(ui, icon_rect, &name, look, sym);
                 }
             }
 
@@ -881,70 +838,67 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
                 if pinned || soloed { (52.0, m.button + ui.spacing().item_spacing.x) } else { (84.0, 0.0) };
             let name_w = (ui.available_width() * 0.34 - solo_room).clamp(name_min, 210.0);
             let (nrect, nresp) = ui.allocate_exact_size(vec2(name_w, m.row_height - 10.0), Sense::click());
-            let mut job = LayoutJob::single_section(name.clone(), typography::format(Role::Headline, p.text, look));
-            let chevron_w = if look.icons { 14.0 } else { 4.0 };
-            job.wrap = egui::text::TextWrapping::truncate_at_width((name_w - chevron_w).max(20.0));
+            let show_chev = nresp.hovered() || nresp.has_focus() || expanded;
+            let chev_room = if show_chev { 14.0 } else { 4.0 };
+            let mut job = LayoutJob::simple_singleline(name.clone(), semibold(14.0), p.text);
+            job.wrap = egui::text::TextWrapping::truncate_at_width((name_w - chev_room).max(20.0));
             let galley = ui.painter().layout_job(job);
-            let (status, status_color) = if app.muted {
+
+            let (a11y_status, status_color) = if app.muted {
                 ("Muted", p.danger)
             } else if app.activity == Activity::Playing {
                 ("Playing", p.playing)
             } else {
                 ("Idle", p.text_muted)
             };
-            let mut extras = Vec::new();
-            if app.session_count > 1 {
-                extras.push(format!("{} streams", app.session_count));
+            let mut parts: Vec<String> = Vec::new();
+            if app.muted {
+                parts.push("Muted".into());
+            } else if app.activity == Activity::Playing {
+                parts.push("Playing".into());
             }
-            match &cx.snap.solo {
-                Some(solo) if *solo == app.key => extras.push("Solo".to_owned()),
-                Some(_) if app.key != AppKey::System => extras.push("lowered by Solo".to_owned()),
-                _ => {}
+            let reduction = match &cx.snap.solo {
+                Some(solo) if *solo == app.key => Some("Solo"),
+                Some(_) if app.key != AppKey::System => Some("Lowered by Solo"),
+                _ if cx.snap.background_lowered.contains(&app.key) => Some("Lowered"),
+                _ if cx.snap.mic_ducking && cx.settings.mic_ducking.targets.contains(&app.key) => Some("Lowered"),
+                _ => None,
+            };
+            if let Some(r) = reduction {
+                parts.push(r.into());
+            } else if app.session_count > 1 && parts.len() < 2 {
+                parts.push(format!("{} streams", app.session_count));
             }
-            if cx.snap.background_lowered.contains(&app.key) {
-                extras.push("lowered in background".to_owned());
-            }
-            if cx.snap.mic_ducking && cx.settings.mic_ducking.targets.contains(&app.key) {
-                extras.push("lowered while you talk".to_owned());
-            }
-            let show_status = status != "Idle" || !extras.is_empty();
-            let compact = m.row_height < 46.0 || !show_status;
-            let name_y = if compact { nrect.center().y - galley.size().y / 2.0 } else { nrect.top() + 3.0 };
+
+            let compact = m.row_height < 46.0;
+            let name_y =
+                if compact || parts.is_empty() { nrect.center().y - galley.size().y / 2.0 } else { nrect.top() + 3.0 };
+            let title_width = galley.size().x;
             ui.painter().galley(pos2(nrect.left() + 2.0, name_y), galley, p.text);
-            if !compact {
-                let sy = nrect.top() + 24.0;
+            if show_chev {
+                let chev_x = (nrect.left() + 4.0 + title_width + 5.0).min(nrect.right() - 6.0);
+                let chev_rect = Rect::from_center_size(pos2(chev_x, name_y + 8.5), Vec2::splat(9.0));
+                let sym = if expanded { Symbol::ChevronDown } else { Symbol::ChevronRight };
+                widgets::paint_symbol(ui.painter(), chev_rect, sym, p.text_muted);
+            }
+            if !compact && !parts.is_empty() {
+                let sy = nrect.top() + 23.0;
                 let mut x = nrect.left() + 2.0;
                 if app.activity == Activity::Playing && !app.muted {
                     ui.painter().circle_filled(pos2(x + 3.0, sy + 7.5), 3.0, p.playing);
                     x += 10.0;
                 }
-                let text = if status == "Idle" {
-                    extras.join(" · ")
-                } else if extras.is_empty() {
-                    status.to_owned()
-                } else {
-                    format!("{status} · {}", extras.join(" · "))
-                };
-                let mut sjob = LayoutJob::single_section(text, typography::format(Role::Footnote, status_color, look));
-                sjob.wrap = egui::text::TextWrapping::truncate_at_width((nrect.right() - chevron_w - x).max(20.0));
+                let text = parts.join(" · ");
+                let mut sjob = LayoutJob::simple_singleline(text, FontId::proportional(12.0), status_color);
+                sjob.wrap = egui::text::TextWrapping::truncate_at_width((nrect.right() - x - 2.0).max(16.0));
                 let sgalley = ui.painter().layout_job(sjob);
                 ui.painter().galley(pos2(x, sy), sgalley, status_color);
             }
-            if look.icons {
-                let g = if expanded { glyph::CHEVRON_DOWN } else { glyph::CHEVRON_RIGHT };
-                ui.painter().text(
-                    pos2(nrect.right() - 6.0, nrect.center().y),
-                    Align2::CENTER_CENTER,
-                    g,
-                    widgets::icon_font(10.0),
-                    p.text_muted,
-                );
-            }
-            let details = if expanded { "Hide details" } else { "Show details" };
-            widgets::focus_ring(ui, nrect, &nresp, p, 6);
-            let a11y = format!("{name}, {status}. {details}");
+            let details_word = if expanded { "Hide details" } else { "Show details" };
+            widgets::focus_ring(ui, nrect, &nresp, p, look.m.radius_inner);
+            let a11y = format!("{name}, {a11y_status}. {details_word}");
             nresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &a11y));
-            let nresp = nresp.on_hover_text(format!("{name} — {status}. Click for details."));
+            let nresp = nresp.on_hover_text(format!("{name}: {a11y_status}"));
             if nresp.clicked() {
                 if expanded {
                     st.expanded.remove(&app.key);
@@ -957,25 +911,18 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             let mut v = st.value(&target, app.volume);
             if pinned || soloed {
                 let label = if soloed { format!("End solo for {name}") } else { format!("Solo {name}") };
-                if icon_button(ui, look, glyph::SOLO, "S", &label, soloed.then_some(p.accent)).clicked() {
+                if icon_button(ui, look, Symbol::Headphones { filled: soloed }, &label, soloed.then_some(p.accent))
+                    .clicked()
+                {
                     cx.audio.send(Command::ToggleSolo { key: app.key.clone() });
                 }
             }
             let mute_label = format!("{} {name}", if app.muted { "Unmute" } else { "Mute" });
             let emphasis = app.muted.then_some(p.danger);
-            if icon_button(
-                ui,
-                look,
-                glyph::volume(v, app.muted),
-                if app.muted { "M" } else { "On" },
-                &mute_label,
-                emphasis,
-            )
-            .clicked()
-            {
+            if icon_button(ui, look, Symbol::volume(v, app.muted), &mute_label, emphasis).clicked() {
                 cx.audio.send(Command::SetAppMute { key: app.key.clone(), muted: !app.muted });
             }
-            let width = ui.available_width() - widgets::percent_width(ui, look) - ui.spacing().item_spacing.x - 4.0;
+            let width = ui.available_width() - 42.0 - ui.spacing().item_spacing.x - 4.0;
             let meter = cx.settings.show_meters.then(|| cx.meters.apps.get(&app.key).copied().unwrap_or(0.0));
             let a11y = format!("{name} volume");
             let response = Slider { muted: app.muted, meter, ..Slider::volume(&mut v, &a11y, width) }
@@ -990,20 +937,37 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
             percent_label(ui, look, &format!("{}%", to_percent(v)), app.muted);
         });
 
-        if expanded {
-            details(ui, st, cx, app, &name);
-        }
-        ui.add_space(3.0);
+        let mut coll = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            ui.make_persistent_id(("app-details", &app.key)),
+            expanded,
+        );
+        coll.set_open(expanded);
+        coll.show_body_unindented(ui, |ui| {
+            let sub = egui::Frame::NONE
+                .fill(p.surface)
+                .stroke(egui::Stroke::new(1.0, p.border))
+                .corner_radius(CornerRadius::same(look.m.radius_inner))
+                .inner_margin(Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    details(ui, st, cx, app, &name);
+                });
+            widgets::card_highlight(ui, look, sub.response.rect);
+        });
+        ui.add_space(4.0);
     });
 
     let rect = block.response.rect;
-    if ui.rect_contains_pointer(rect) || expanded {
+    let hovered = ui.rect_contains_pointer(rect);
+    let hover_t = ui.ctx().animate_bool(ui.make_persistent_id(("row-hover", &app.key)), hovered || expanded);
+    if hover_t > 0.005 {
         ui.painter().set(
             bg,
             Shape::rect_filled(
-                rect.shrink(2.0),
-                CornerRadius::same(m.control_radius),
-                p.surface_hover.gamma_multiply(if expanded { 0.8 } else { 1.0 }),
+                rect,
+                CornerRadius::same(look.m.radius_inner),
+                p.surface_hover.gamma_multiply(hover_t * if expanded { 0.75 } else { 1.0 }),
             ),
         );
     }
@@ -1012,10 +976,10 @@ fn app_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry) 
 fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, name: &str) {
     let look = cx.look;
     let p = &look.p;
-    let indent = look.m.icon + 12.0;
+    let indent = 0.0;
     if let Some(pin) = crate::audio::preferences::PinnedApp::from_app(app) {
         let mut pinned = cx.settings.pinned_apps.iter().any(|p| p.key == pin.key);
-        if widgets::scroll_on_focus(widgets::check_row(ui, look, &mut pinned, &format!("Pin {name}"))).changed() {
+        if widgets::scroll_on_focus(ui.checkbox(&mut pinned, format!("Pin {name}"))).changed() {
             if pinned {
                 cx.settings.pinned_apps.push(pin);
             } else {
@@ -1030,19 +994,19 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
             let mut delta = 0;
             ui.horizontal(|ui| {
                 ui.add_space(indent);
-                ui.label(typography::rich("Order", Role::Footnote, look).color(p.text_muted));
+                ui.label(RichText::new("Order").color(p.text_muted));
                 let names = (format!("Move {name} up"), format!("Move {name} down"));
-                delta = order_buttons(ui, look, index, len, ("Move up", "Move down"), (&names.0, &names.1), false);
+                delta = order_buttons(ui, index, len, ("Move up", "Move down"), (&names.0, &names.1), false);
             });
             crate::audio::preferences::move_item(&mut cx.settings.pinned_apps, index, delta);
         }
     }
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.add_space(indent);
-        ui.label(typography::rich("Balance", Role::Footnote, look).color(p.text_muted));
+        ui.label(RichText::new("Balance").color(p.text_muted));
         match app.balance {
             BalanceState::Uniform(balance) => {
-                ui.label(typography::rich("L", Role::Footnote, look).color(p.text_muted));
+                ui.label(RichText::new("L").small().color(p.text_muted));
                 let target = Target::Balance(Ctl::App(app.key.clone()));
                 let mut b = st.value(&target, balance);
                 let width = (ui.available_width() - 70.0).min(220.0);
@@ -1054,22 +1018,20 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
                 } else if response.dragged() {
                     st.hold(target, b);
                 }
-                ui.label(typography::rich("R", Role::Footnote, look).color(p.text_muted));
+                ui.label(RichText::new("R").small().color(p.text_muted));
                 if response.double_clicked() {
                     cx.audio.send(Command::SetAppBalance { key: app.key.clone(), balance: 0.0 });
                 }
             }
             BalanceState::Mixed => {
-                ui.label(typography::rich("Differs between streams", Role::Footnote, look).color(p.text_muted))
-                    .on_hover_text(
-                        "This app's audio streams use different balances. Centering sets every stream to the same balance.",
-                    );
-                if widgets::button(ui, look, "Center all", widgets::ButtonKind::Secondary).clicked() {
+                ui.label(RichText::new("Differs between streams").small().color(p.text_muted))
+                    .on_hover_text("Resets all streams to center.");
+                if widgets::scroll_on_focus(ui.small_button("Center all")).clicked() {
                     cx.audio.send(Command::SetAppBalance { key: app.key.clone(), balance: 0.0 });
                 }
             }
             BalanceState::Unavailable => {
-                ui.label(typography::rich("Not available for this app", Role::Footnote, look).color(p.text_muted));
+                ui.label(RichText::new("Not available for this app").small().color(p.text_muted));
             }
         }
     });
@@ -1091,7 +1053,7 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
     };
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        let mut job = LayoutJob::single_section(source.clone(), typography::format(Role::Footnote, p.text_muted, look));
+        let mut job = LayoutJob::simple_singleline(source.clone(), FontId::proportional(11.5), p.text_muted);
         job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width() - 8.0);
         ui.label(job).on_hover_text(source);
     });
@@ -1099,19 +1061,14 @@ fn details(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
 
 /// "Lower while in the background" for a pinned app (opt-in).
 fn focus_rule(ui: &mut Ui, cx: &mut MixerCtx, app: &AppEntry, name: &str, indent: f32) {
-    let look = cx.look;
     let rules = &mut cx.settings.focus_rules;
     let index = rules.iter().position(|r| r.key == app.key);
     let mut on = index.is_some();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_space(indent);
-        let toggle = widgets::scroll_on_focus(widgets::check_row(ui, look, &mut on, "Lower in background"));
+        let toggle = widgets::scroll_on_focus(ui.checkbox(&mut on, "Lower in background"));
         widgets::set_name(ui, &toggle, &format!("Lower {name} while another app is in front"));
-        let toggled = toggle
-            .on_hover_text(
-                "Lower this app while another app's window is in front; its level comes back when you return to it",
-            )
-            .changed();
+        let toggled = toggle.on_hover_text("Restores volume when this app returns to the front.").changed();
         if toggled && on {
             rules.push(crate::settings::FocusRule {
                 key: app.key.clone(),
@@ -1122,18 +1079,15 @@ fn focus_rule(ui: &mut Ui, cx: &mut MixerCtx, app: &AppEntry, name: &str, indent
         } else if toggled {
             rules.retain(|r| r.key != app.key);
         }
-    });
-    if let Some(rule) = cx.settings.focus_rules.iter_mut().find(|r| r.key == app.key) {
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
+        if let Some(rule) = rules.iter_mut().find(|r| r.key == app.key) {
             let keep =
                 ui.add_enabled(!rule.mute, egui::DragValue::new(&mut rule.keep_percent).range(0..=90).suffix("%"));
             widgets::set_name(ui, &keep, &format!("{name} keeps this percent of its volume in the background"));
             widgets::scroll_on_focus(keep);
-            let mute = widgets::scroll_on_focus(widgets::check_row(ui, look, &mut rule.mute, "Mute"));
+            let mute = widgets::scroll_on_focus(ui.checkbox(&mut rule.mute, "Mute"));
             widgets::set_name(ui, &mute, &format!("Mute {name} in the background"));
-        });
-    }
+        }
+    });
 }
 
 /// How long a device choice shows as "Applying…" before the snapshot is trusted again.
@@ -1145,14 +1099,14 @@ fn route_status(app: &AppEntry, snap: &AudioSnapshot, name: &str) -> String {
     match &app.route {
         _ if !snap.can_route_apps => "Choosing a device per app isn't supported on this version of Windows.".into(),
         Route::SystemDefault => "Follows the system default output.".into(),
-        Route::Unknown => format!("Windows didn't report {name}'s device (it may run as administrator)."),
+        Route::Unknown => format!("Unavailable. {name} may be running as administrator."),
         Route::Device(id) => match device_name(id) {
             None => "Set to a device that isn't connected; Windows uses the default until it returns.".into(),
             Some(device) if app.streams.iter().any(|s| s.device_id.eq_ignore_ascii_case(id)) => {
                 format!("Plays on {device}.")
             }
             Some(device) => {
-                format!("Set to {device}. Some apps switch only when they restart playback or are reopened.")
+                format!("Set to {device}. Some apps switch only when they restart playback.")
             }
         },
     }
@@ -1187,16 +1141,15 @@ fn output_choice(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppE
     let mut choice = None;
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        ui.label(typography::rich("Output", Role::Footnote, look).color(p.text_muted));
+        ui.label(RichText::new("Output").color(p.text_muted));
         ui.add_enabled_ui(cx.snap.can_route_apps && app.route != Route::Unknown, |ui| {
-            let mut combo = egui::ComboBox::from_id_salt(("app-output", &app.key))
+            let response = egui::ComboBox::from_id_salt(("app-output", &app.key))
                 .width((ui.available_width() - 8.0).clamp(80.0, 240.0))
                 .truncate()
-                .selected_text(typography::rich(label(&shown), Role::CalloutStrong, look));
-            if look.icons {
-                combo = combo.icon(widgets::combo_icon(look));
-            }
-            let response = combo
+                .icon(|ui, rect, visuals, _open| {
+                    widgets::paint_symbol(ui.painter(), rect, Symbol::ChevronDown, visuals.fg_stroke.color);
+                })
+                .selected_text(label(&shown))
                 .show_ui(ui, |ui| {
                     let options = std::iter::once(None).chain(cx.snap.outputs.iter().map(|d| Some(d.id.clone())));
                     for option in options {
@@ -1207,18 +1160,20 @@ fn output_choice(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppE
                 })
                 .response;
             widgets::set_name(ui, &response, &format!("{name} output device"));
-            response.on_hover_text("Windows remembers this for the app, also after it restarts");
+            response.on_hover_text("Saved per app across restarts.");
         });
     });
     if let Some(device) = choice {
         st.routing.insert(app.key.clone(), (device.clone(), now));
         cx.audio.send(Command::SetAppOutput { key: app.key.clone(), device });
     }
-    let status = if pending.is_some() { "Applying…".to_owned() } else { route_status(app, cx.snap, name) };
-    ui.horizontal(|ui| {
-        ui.add_space(indent);
-        ui.add(egui::Label::new(typography::rich(status, Role::Footnote, look).color(p.text_muted)).wrap());
-    });
+    if pending.is_some() || !cx.snap.can_route_apps || !matches!(app.route, Route::SystemDefault) {
+        let status = if pending.is_some() { "Applying…".to_owned() } else { route_status(app, cx.snap, name) };
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.add(egui::Label::new(RichText::new(status).small().color(p.text_muted)).wrap());
+        });
+    }
 }
 
 /// Two small buttons that move a list item; returns -1 (earlier), 1 (later) or 0.
@@ -1227,7 +1182,6 @@ fn output_choice(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppE
 /// read Earlier, Later.
 fn order_buttons(
     ui: &mut Ui,
-    look: &Look,
     index: usize,
     len: usize,
     texts: (&str, &str),
@@ -1236,10 +1190,9 @@ fn order_buttons(
 ) -> isize {
     let mut delta = 0;
     let mut add = |ui: &mut Ui, enabled: bool, text: &str, name: &str, step: isize| {
-        let button =
-            ui.add_enabled_ui(enabled, |ui| widgets::button(ui, look, text, widgets::ButtonKind::Secondary)).inner;
+        let button = ui.add_enabled(enabled, egui::Button::new(text).small());
         widgets::set_name(ui, &button, name);
-        if button.clicked() {
+        if widgets::scroll_on_focus(button).clicked() {
             delta = step;
         }
     };
@@ -1254,14 +1207,13 @@ fn order_buttons(
 /// (Enter, or clicking elsewhere); an empty field, or Reset, goes back to the
 /// name Windows reports.
 fn rename_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, key: &AppKey, indent: f32) {
-    let look = cx.look;
-    let p = &look.p;
+    let p = &cx.look.p;
     let original = st.default_name(app).to_owned();
     let current = crate::audio::preferences::custom_name(&cx.settings.app_names, key).map(str::to_owned);
     let draft = st.rename.entry(key.clone()).or_insert_with(|| current.clone().unwrap_or_default());
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        ui.label(typography::rich("Name", Role::Footnote, look).color(p.text_muted));
+        ui.label(RichText::new("Name").color(p.text_muted));
         let width = (ui.available_width() - 90.0).clamp(80.0, 200.0);
         let field = ui.add(egui::TextEdit::singleline(draft).hint_text(&original).desired_width(width).char_limit(60));
         widgets::set_name(ui, &field, &format!("Display name for {original}"));
@@ -1269,11 +1221,9 @@ fn rename_row(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntr
         if field.lost_focus() && crate::audio::preferences::set_custom_name(&mut cx.settings.app_names, key, draft) {
             *draft = crate::audio::preferences::custom_name(&cx.settings.app_names, key).unwrap_or_default().to_owned();
         }
-        let reset = ui
-            .add_enabled_ui(current.is_some(), |ui| widgets::button(ui, look, "Reset", widgets::ButtonKind::Secondary))
-            .inner;
+        let reset = ui.add_enabled(current.is_some(), egui::Button::new("Reset").small());
         widgets::set_name(ui, &reset, &format!("Reset the name of {original}"));
-        if reset.clicked() {
+        if widgets::scroll_on_focus(reset).clicked() {
             crate::audio::preferences::set_custom_name(&mut cx.settings.app_names, key, "");
             draft.clear();
         }
@@ -1286,7 +1236,7 @@ fn streams(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
     let p = &look.p;
     ui.horizontal(|ui| {
         ui.add_space(indent);
-        ui.label(typography::rich("Streams", Role::Footnote, look).color(p.text_muted));
+        ui.label(RichText::new("Streams").color(p.text_muted));
     });
     for (i, stream) in app.streams.iter().enumerate() {
         let n = i + 1;
@@ -1294,25 +1244,17 @@ fn streams(ui: &mut Ui, st: &mut MixerState, cx: &mut MixerCtx, app: &AppEntry, 
         ui.push_id(("stream", &stream.id), |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(indent);
-                ui.label(typography::rich(format!("{n}"), Role::Callout, look).color(p.text_muted))
-                    .on_hover_text(format!("Stream {n} · process {} · {activity}", stream.pid));
+                ui.label(RichText::new(format!("{n}")).small().color(p.text_muted))
+                    .on_hover_text(format!("Stream {n} (PID {}), {activity}", stream.pid));
                 let mute = format!("{} {name} stream {n}", if stream.muted { "Unmute" } else { "Mute" });
                 let target = Target::Volume(Ctl::Stream(stream.id.clone()));
                 let mut v = st.value(&target, stream.volume);
-                let g = glyph::volume(v, stream.muted);
-                if icon_button(
-                    ui,
-                    look,
-                    g,
-                    if stream.muted { "M" } else { "On" },
-                    &mute,
-                    stream.muted.then_some(p.danger),
-                )
-                .clicked()
+                if icon_button(ui, look, Symbol::volume(v, stream.muted), &mute, stream.muted.then_some(p.danger))
+                    .clicked()
                 {
                     cx.audio.send(Command::SetStreamMute { id: stream.id.clone(), muted: !stream.muted });
                 }
-                let width = ui.available_width() - widgets::percent_width(ui, look) - ui.spacing().item_spacing.x - 4.0;
+                let width = ui.available_width() - 42.0 - ui.spacing().item_spacing.x - 4.0;
                 let a11y = format!("{name} stream {n} volume");
                 let response = Slider { muted: stream.muted, ..Slider::volume(&mut v, &a11y, width) }
                     .wheel_percent(cx.settings.wheel_step)
@@ -1877,7 +1819,7 @@ mod layout_tests {
                 icons: &mut icons,
             };
             endpoint_balance(ui, &mut state, &cx, &ep);
-            sound_properties(ui, &cx, &ep);
+            sound_properties(ui, &cx, Flow::Output, &ep);
         });
         let names: Vec<_> = frame.widgets.iter().map(|w| w.name.as_str()).collect();
         for expected in
@@ -2031,7 +1973,7 @@ mod layout_tests {
             assert_fits(&format!("expanded devices view ({density:?})"), width, &frame);
             assert!(unnamed(&frame.widgets).is_empty(), "unnamed controls: {:?}", unnamed(&frame.widgets));
             let unavailable_count =
-                frame.widgets.iter().filter(|w| w.name == "Balance: Not available — this device is not stereo").count();
+                frame.widgets.iter().filter(|w| w.name == "Balance: unavailable (not stereo)").count();
             assert_eq!(unavailable_count, 2, "both mono output and mono input must expose unavailable balance text");
             assert!(
                 frame.widgets.iter().any(|w| w.name.contains("Default format unavailable: Exclusive mode active")),

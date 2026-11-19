@@ -2,27 +2,25 @@
 //! views together, and owns the single shutdown path.
 
 use crate::audio::{AudioHandle, NoticeLevel};
-use crate::platform::backdrop::{self, Applied, BackdropRejection, BackdropRetryKey, Support};
+use crate::platform::backdrop::{self, Applied, Support};
 use crate::platform::exit_request::ExitListener;
 use crate::platform::fonts;
 use crate::platform::foreground::ForegroundWatch;
-use crate::platform::hotkeys::{HotkeyEvent, HotkeyService};
+use crate::platform::hotkeys::{HotkeyEditor, HotkeyEvent, HotkeyService};
 use crate::platform::icons::IconService;
 use crate::platform::startup::{self, LoginState};
 use crate::platform::sysprefs::SystemPrefs;
 use crate::platform::tray::{Tray, TrayAction};
 use crate::platform::window::{self, Hwnd};
 use crate::settings::{Backdrop, Settings, SettingsStore, ThemeMode, WindowGeometry};
-use crate::ui::hotkey_editor::HotkeyEditor;
-use crate::ui::toasts::{Toast, ToastExpiry, draw_toasts, push_toast};
 use crate::ui::{GlassStatus, Look, mixer, settings_view, theme};
 use crossbeam_channel::Receiver;
-use egui::{CornerRadius, Margin, ViewportCommand};
+use egui::{Align2, Color32, CornerRadius, Margin, RichText, ViewportCommand};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
-const PREFS_INTERVAL: Duration = Duration::from_secs(30);
+const PREFS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Meters repaint the window on every change. A software renderer rasterizes
 /// each frame on the CPU, so at meter rates the controls themselves would lag.
@@ -48,6 +46,45 @@ enum View {
     Devices,
     Presets,
     Settings,
+}
+
+struct Toast {
+    level: NoticeLevel,
+    text: String,
+    expiry: ToastExpiry,
+}
+
+/// Visible display time for a toast. The countdown runs only while the window
+/// is shown, so a toast queued while hidden is displayed in full later.
+struct ToastExpiry {
+    remaining: Duration,
+    /// When the toast should disappear; `None` while the countdown is paused.
+    due: Option<Instant>,
+}
+
+impl ToastExpiry {
+    fn new(visible_for: Duration) -> Self {
+        Self { remaining: visible_for, due: None }
+    }
+
+    /// Tracks a visibility change; repeated calls with the same state have no effect.
+    fn tick(&mut self, shown: bool, now: Instant) {
+        if shown {
+            if self.due.is_none() {
+                self.due = Some(now + self.remaining);
+            }
+        } else if let Some(due) = self.due.take() {
+            self.remaining = due.saturating_duration_since(now);
+        }
+    }
+
+    fn due(&self) -> Option<Instant> {
+        self.due
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        self.due.is_some_and(|due| due <= now)
+    }
 }
 
 /// Logs the renderer and graphics adapter in use. Returns whether frames are
@@ -81,6 +118,39 @@ fn log_renderer(cc: &eframe::CreationContext<'_>) -> (bool, String) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BackdropRetryKey {
+    glass: bool,
+    backdrop: Backdrop,
+    theme: ThemeMode,
+    dark: bool,
+    high_contrast: bool,
+    build: u32,
+}
+
+#[derive(Default)]
+struct BackdropRejection {
+    failed_for: Option<BackdropRetryKey>,
+}
+
+impl BackdropRejection {
+    fn reset_for(&mut self, key: BackdropRetryKey) {
+        if self.failed_for.is_some_and(|failed| failed != key) {
+            self.failed_for = None;
+        }
+    }
+
+    fn may_try(&self, key: BackdropRetryKey) -> bool {
+        self.failed_for != Some(key)
+    }
+
+    fn record(&mut self, key: BackdropRetryKey, applied: Applied) {
+        if !applied.glass {
+            self.failed_for = Some(key);
+        }
+    }
+}
+
 pub struct MixerApp {
     audio: AudioHandle,
     icons: IconService,
@@ -90,9 +160,7 @@ pub struct MixerApp {
     last_hotkey_errors: Vec<String>,
     store: SettingsStore,
     settings: Settings,
-    settings_seen: Settings,
     dirty_since: Option<Instant>,
-    save_error_shown: bool,
     prefs: SystemPrefs,
     prefs_checked: Instant,
     support: Support,
@@ -100,12 +168,11 @@ pub struct MixerApp {
     applied: Option<Applied>,
     backdrop_rejection: BackdropRejection,
     hwnd: Option<Hwnd>,
-    appearance_watch: Option<window::AppearanceWatch>,
     tray: Option<Tray>,
     tray_rx: Receiver<TrayAction>,
     exit_listener: Option<ExitListener>,
     view: View,
-    view_shown: View,
+    view_changed_at: Option<Instant>,
     mixer: mixer::MixerState,
     login: LoginState,
     toasts: Vec<Toast>,
@@ -118,7 +185,7 @@ pub struct MixerApp {
     exiting: bool,
     has_icon_font: bool,
     look: Look,
-    style_key: Option<(Look, bool)>,
+    style_key: Option<Look>,
     shut_down: bool,
     /// Started with `--minimized`: hide once eframe has shown the (cloaked) window.
     pending_start_hide: bool,
@@ -230,7 +297,6 @@ impl MixerApp {
             p: theme::palette(true, false, opts.settings.accent, false),
             m: theme::metrics(opts.settings.density),
             icons: has_icon_font,
-            tracking: opts.settings.typeface == crate::settings::Typeface::Polaris,
         };
         let mut app = Self {
             audio,
@@ -240,10 +306,8 @@ impl MixerApp {
             preset_editor: crate::ui::presets::PresetEditor::default(),
             last_hotkey_errors: Vec::new(),
             store: opts.store,
-            settings: opts.settings.clone(),
-            settings_seen: opts.settings,
+            settings: opts.settings,
             dirty_since: None,
-            save_error_shown: false,
             prefs,
             prefs_checked: Instant::now(),
             support,
@@ -251,12 +315,11 @@ impl MixerApp {
             applied: None,
             backdrop_rejection: BackdropRejection::default(),
             hwnd,
-            appearance_watch: hwnd.and_then(|h| window::AppearanceWatch::attach(h, ctx.clone())),
             tray,
             tray_rx,
             exit_listener,
             view: View::Mixer,
-            view_shown: View::Mixer,
+            view_changed_at: None,
             mixer: mixer::MixerState::default(),
             login: startup::state(),
             toasts,
@@ -345,15 +408,10 @@ impl MixerApp {
             p: theme::palette(dark, glass, self.settings.accent, self.prefs.high_contrast),
             m: theme::metrics(self.settings.density),
             icons: self.has_icon_font,
-            tracking: self.settings.typeface == crate::settings::Typeface::Polaris,
         };
-        if apply_style_if_changed(ctx, &mut self.style_key, look, self.prefs.animations) {
-            if let Some(h) = self.hwnd {
-                backdrop::set_border(h, self.support, &look.p);
-            }
-            if let Some(tray) = self.tray.as_ref() {
-                tray.set_palette(look.p);
-            }
+        if self.style_key != Some(look) {
+            theme::apply(ctx, &look.p, &look.m, self.prefs.animations);
+            self.style_key = Some(look);
         }
         self.look = look;
     }
@@ -365,54 +423,19 @@ impl MixerApp {
     }
 
     fn save_if_due(&mut self, ctx: &egui::Context, force: bool) {
-        let (wait, error) = flush_save_if_due(
-            &self.store,
-            &self.settings,
-            &mut self.dirty_since,
-            &mut self.save_error_shown,
-            Instant::now(),
-            force,
-        );
-        if let Some(delay) = wait
-            && !force
-        {
-            ctx.request_repaint_after(delay);
+        let Some(since) = self.dirty_since else { return };
+        let due = since + SAVE_DEBOUNCE;
+        if !force && Instant::now() < due {
+            ctx.request_repaint_after(due - Instant::now());
+            return;
         }
-        if let Some(msg) = error {
-            self.toast(NoticeLevel::Error, msg);
-        }
-    }
-}
-
-fn flush_save_if_due(
-    store: &SettingsStore,
-    settings: &Settings,
-    dirty_since: &mut Option<Instant>,
-    save_error_shown: &mut bool,
-    now: Instant,
-    force: bool,
-) -> (Option<Duration>, Option<String>) {
-    let Some(since) = *dirty_since else { return (None, None) };
-    let due = since + SAVE_DEBOUNCE;
-    if !force && now < due {
-        return (Some(due - now), None);
-    }
-    *dirty_since = None;
-    match store.save(settings) {
-        Ok(()) => {
-            *save_error_shown = false;
-            (None, None)
-        }
-        Err(e) => {
+        self.dirty_since = None;
+        if let Err(e) = self.store.save(&self.settings) {
             log::error!("saving settings failed: {e}");
-            *dirty_since = Some(now);
-            let msg = (!std::mem::replace(save_error_shown, true)).then(|| format!("Couldn't save settings: {e}"));
-            (Some(SAVE_DEBOUNCE), msg)
+            self.toast(NoticeLevel::Error, format!("Couldn't save settings: {e}"));
         }
     }
-}
 
-impl MixerApp {
     fn toast(&mut self, level: NoticeLevel, text: String) {
         self.notify(crate::audio::Notice { level, text, announce: false });
     }
@@ -436,7 +459,16 @@ impl MixerApp {
                 tray.notify(level, &text);
             }
         }
-        push_toast(&mut self.toasts, level, text);
+        let secs = match level {
+            NoticeLevel::Info => 4,
+            NoticeLevel::Warning => 7,
+            NoticeLevel::Error => 9,
+        };
+        self.toasts.retain(|t| t.text != text);
+        self.toasts.push(Toast { level, text, expiry: ToastExpiry::new(Duration::from_secs(secs)) });
+        while self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
     }
 
     fn hide_to_tray(&mut self) {
@@ -454,7 +486,7 @@ impl MixerApp {
         let Some(h) = self.hwnd else {
             return;
         };
-        if window::is_shown(h) && window::is_foreground(h) {
+        if window::is_shown(h) {
             self.hide_to_tray();
         } else {
             window::show(h);
@@ -525,7 +557,8 @@ impl MixerApp {
         let hotkeys = self.hotkeys.as_ref().map(HotkeyService::status);
         let notices: Vec<_> = self.recent_notices.iter().cloned().collect();
         let log_tail = crate::diagnostics::read_log_tail(crate::diagnostics::log_lines());
-        let unix_seconds = Self::unix_now();
+        let unix_seconds =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
         crate::diagnostics::build(&crate::diagnostics::Inputs {
             settings: &self.settings,
             snapshot: &snapshot,
@@ -545,7 +578,8 @@ impl MixerApp {
             return self.toast(NoticeLevel::Error, "Couldn't find a folder for the diagnostic report.".into());
         };
         let report = self.diagnostic_report();
-        let unix_seconds = Self::unix_now();
+        let unix_seconds =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
         match crate::diagnostics::save(&report, &dir, unix_seconds) {
             Ok(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -607,7 +641,6 @@ impl MixerApp {
         {
             log::error!("saving settings on exit failed: {e}");
         }
-        self.appearance_watch = None;
         self.tray = None;
         self.hotkeys = None;
         self.foreground = None;
@@ -620,15 +653,66 @@ impl MixerApp {
         if !shown {
             return;
         }
-        let (outer, inner, maximized) = ctx.input(|i| {
-            let v = i.viewport();
-            (v.outer_rect, v.inner_rect, v.maximized.unwrap_or(false))
-        });
-        let outer_pos = outer.zip(self.hwnd).and_then(|(_, h)| window::outer_position(h));
-        let inner_size = inner.map(|inner| (inner.width(), inner.height()));
-        if record_window_geometry(&mut self.settings, shown, maximized, outer_pos, inner_size) {
-            self.settings_seen.window = self.settings.window;
+        let rects = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+        let outer_pos = rects.0.zip(self.hwnd).and_then(|(_, h)| window::outer_position(h));
+        let inner_size = rects.1.map(|inner| (inner.width(), inner.height()));
+        if record_window_geometry(&mut self.settings, shown, outer_pos, inner_size) {
             self.mark_dirty();
+        }
+    }
+
+    fn draw_toasts(&mut self, ui: &mut egui::Ui) {
+        let now = Instant::now();
+        // Toasts queued during `ui` start counting down here.
+        for toast in &mut self.toasts {
+            toast.expiry.tick(true, now);
+        }
+        self.toasts.retain(|t| !t.expiry.expired(now));
+        if let Some(next) = self.toasts.iter().filter_map(|t| t.expiry.due()).min() {
+            ui.ctx().request_repaint_after(next - now);
+        }
+        if self.toasts.is_empty() {
+            return;
+        }
+        let p = self.look.p;
+        let mut dismiss = None;
+        egui::Area::new(egui::Id::new("toasts"))
+            .anchor(Align2::CENTER_BOTTOM, [0.0, -12.0])
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                ui.set_max_width(360.0);
+                for (i, t) in self.toasts.iter().enumerate() {
+                    let accent = match t.level {
+                        NoticeLevel::Info => p.accent,
+                        NoticeLevel::Warning => Color32::from_rgb(0xf5, 0x9e, 0x0b),
+                        NoticeLevel::Error => p.danger,
+                    };
+                    let prefix = match t.level {
+                        NoticeLevel::Info => "",
+                        NoticeLevel::Warning => "Warning: ",
+                        NoticeLevel::Error => "Error: ",
+                    };
+                    let resp = egui::Frame::NONE
+                        .fill(p.surface_strong)
+                        .stroke(egui::Stroke::new(1.0, accent))
+                        .corner_radius(CornerRadius::same(self.look.m.radius_inner))
+                        .inner_margin(Margin::symmetric(12, 8))
+                        .shadow(egui::Shadow { offset: [0, 4], blur: 12, spread: 0, color: p.shadow })
+                        .show(ui, |ui| {
+                            ui.set_width(336.0);
+                            ui.label(RichText::new(format!("{prefix}{}", t.text)).color(p.text));
+                        })
+                        .response
+                        .interact(egui::Sense::click())
+                        .on_hover_text("Dismiss");
+                    if resp.clicked() {
+                        dismiss = Some(i);
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        if let Some(i) = dismiss {
+            self.toasts.remove(i);
         }
     }
 }
@@ -661,11 +745,10 @@ fn send_audio_preferences(audio: &AudioHandle, settings: &Settings) {
 fn record_window_geometry(
     settings: &mut Settings,
     shown: bool,
-    maximized: bool,
     outer_pos: Option<(f32, f32)>,
     inner_size: Option<(f32, f32)>,
 ) -> bool {
-    if !shown || maximized {
+    if !shown {
         return false;
     }
     let (Some((x, y)), Some((width, height))) = (outer_pos, inner_size) else {
@@ -731,7 +814,8 @@ impl eframe::App for MixerApp {
         if minimized
             && self.settings.minimize_to_tray
             && self.tray.is_some()
-            && self.hwnd.is_some_and(window::is_visible)
+            && let Some(h) = self.hwnd
+            && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(h.get()) }.as_bool()
         {
             self.hide_to_tray();
         }
@@ -778,19 +862,17 @@ impl eframe::App for MixerApp {
             toast.expiry.tick(shown, toast_now);
         }
 
-        // A notification is consumed even while the window is hidden, so a System
-        // theme change reaches the tray without an idle polling loop.
-        let notified = self.appearance_watch.as_ref().is_some_and(window::AppearanceWatch::take_changed);
-        if notified || (shown && self.prefs_checked.elapsed() >= PREFS_INTERVAL) {
-            self.prefs_checked = Instant::now();
-            let prefs = SystemPrefs::read();
-            if prefs != self.prefs {
-                log::info!("system preferences changed: {prefs:?}");
-                self.prefs = prefs;
-            }
-        }
         if shown {
-            // Win32 appearance/DPI messages trigger an immediate repaint; keep a slow fallback timer.
+            if self.prefs_checked.elapsed() >= PREFS_INTERVAL {
+                self.prefs_checked = Instant::now();
+                let prefs = SystemPrefs::read();
+                if prefs != self.prefs {
+                    log::info!("system preferences changed: {prefs:?}");
+                    self.prefs = prefs;
+                }
+            }
+            // Windows doesn't notify eframe of theme or transparency changes, so
+            // re-read them while visible.
             ctx.request_repaint_after(PREFS_INTERVAL);
         }
         self.track_window(ctx, shown);
@@ -808,9 +890,11 @@ impl eframe::App for MixerApp {
         ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, look.p.base);
         let snapshot = self.audio.snapshot();
         let meters = self.audio.meters();
+        let before = self.settings.clone();
         if let Some(imported) = self.import_to_apply.take() {
             self.settings = imported;
-            forget_import_drafts(&mut self.mixer, &mut self.hotkey_editor, &mut self.preset_editor);
+            self.mixer.forget_drafts();
+            self.hotkey_editor = HotkeyEditor::default();
             ui.ctx().request_repaint();
         }
         let mut errors = Vec::new();
@@ -819,49 +903,53 @@ impl eframe::App for MixerApp {
 
         egui::Frame::NONE.inner_margin(Margin::same(look.m.pad as i8)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            let look = self.look;
-            if crate::ui::widgets::segmented(
-                ui,
-                &look,
-                &mut self.view,
-                &[
-                    (View::Mixer, "Mixer"),
-                    (View::Devices, "Devices"),
-                    (View::Presets, "Presets"),
-                    (View::Settings, "Settings"),
-                ],
-                ui.available_width(),
-                crate::ui::widgets::SegmentKind::Tab,
-            ) {
+            let prev_view = self.view;
+            ui.vertical_centered(|ui| {
+                let w = ui.available_width().min(348.0);
+                crate::ui::widgets::top_dock_menu(
+                    ui,
+                    &look,
+                    &mut self.view,
+                    &[
+                        (View::Mixer, crate::ui::widgets::Symbol::SlidersHorizontal, "Mixer"),
+                        (View::Devices, crate::ui::widgets::Symbol::HifiSpeaker, "Devices"),
+                        (View::Presets, crate::ui::widgets::Symbol::SliderVertical3, "Profiles"),
+                        (View::Settings, crate::ui::widgets::Symbol::Gear, "Settings"),
+                    ],
+                    w,
+                );
+            });
+            if self.view != prev_view {
+                self.view_changed_at = Some(Instant::now());
                 match self.view {
                     View::Devices => self.audio.send(crate::audio::Command::LoadDevices),
-                    // Task Manager can change the launch-at-login state behind our back.
                     View::Settings => self.login = startup::state(),
                     View::Mixer | View::Presets => {}
                 }
             }
             ui.add_space(look.m.gap);
-            if self.view != self.view_shown {
-                let ease = theme::motion::ease;
-                ui.ctx().animate_bool_with_time_and_easing(
-                    egui::Id::new(("view", self.view_shown as u8)),
-                    false,
-                    0.0,
-                    ease,
-                );
-                ui.ctx().animate_bool_with_time_and_easing(egui::Id::new(("view", self.view as u8)), false, 0.0, ease);
-                self.view_shown = self.view;
-            }
-            let view_t = ui.ctx().animate_bool_with_time_and_easing(
-                egui::Id::new(("view", self.view as u8)),
-                true,
-                theme::duration(ui, theme::motion::VIEW),
-                theme::motion::ease,
-            );
+            let anim_secs = ui.style().animation_time;
+            let view_opacity = if anim_secs > 0.0
+                && let Some(at) = self.view_changed_at
+            {
+                let elapsed = at.elapsed().as_secs_f32();
+                if elapsed < anim_secs {
+                    ui.ctx().request_repaint();
+                    theme::ease((elapsed / anim_secs).clamp(0.0, 1.0))
+                } else {
+                    self.view_changed_at = None;
+                    1.0
+                }
+            } else {
+                self.view_changed_at = None;
+                1.0
+            };
             ui.scope(|ui| {
-                ui.multiply_opacity(view_t);
+                if view_opacity < 1.0 {
+                    ui.multiply_opacity(view_opacity);
+                }
                 match self.view {
-                    View::Devices | View::Mixer => {
+                    View::Devices => {
                         let mut cx = mixer::MixerCtx {
                             audio: &self.audio,
                             snap: &snapshot,
@@ -870,9 +958,19 @@ impl eframe::App for MixerApp {
                             settings: &mut self.settings,
                             icons: &mut self.icons,
                         };
-                        if self.view == View::Devices {
-                            mixer::show_devices(ui, &mut self.mixer, &mut cx);
-                        } else if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
+                        mixer::show_devices(ui, &mut self.mixer, &mut cx);
+                    }
+                    View::Mixer => {
+                        let mut cx = mixer::MixerCtx {
+                            audio: &self.audio,
+                            snap: &snapshot,
+                            meters: &meters,
+                            look: &look,
+                            settings: &mut self.settings,
+                            icons: &mut self.icons,
+                        };
+                        if let mixer::Outcome::OpenDevices = mixer::show(ui, &mut self.mixer, &mut cx) {
+                            self.view_changed_at = Some(Instant::now());
                             self.audio.send(crate::audio::Command::LoadDevices);
                             self.view = View::Devices;
                         }
@@ -898,7 +996,10 @@ impl eframe::App for MixerApp {
                             errors: &mut errors,
                         };
                         match settings_view::show(ui, &mut cx) {
-                            settings_view::Outcome::Back => self.view = View::Mixer,
+                            settings_view::Outcome::Back => {
+                                self.view_changed_at = Some(Instant::now());
+                                self.view = View::Mixer;
+                            }
                             settings_view::Outcome::SaveDiagnostics => save_report = true,
                             settings_view::Outcome::CopyDiagnostics => copy_report = true,
                             settings_view::Outcome::ExportSettings => export_now = true,
@@ -920,29 +1021,27 @@ impl eframe::App for MixerApp {
             });
         });
 
-        if self.settings != self.settings_seen {
-            if self.settings.presets != self.settings_seen.presets {
+        if self.settings != before {
+            if self.settings.presets != before.presets {
                 self.audio.send(crate::audio::Command::SetPresetRules(self.settings.presets.clone()));
             }
-            if self.settings.typeface != self.settings_seen.typeface {
+            if self.settings.typeface != before.typeface {
                 fonts::install(ui.ctx(), self.settings.typeface);
             }
-            if self.settings.pinned_devices != self.settings_seen.pinned_devices
-                || self.settings.solo != self.settings_seen.solo
-                || self.settings.focus_rules != self.settings_seen.focus_rules
-                || self.settings.mic_ducking != self.settings_seen.mic_ducking
+            if self.settings.pinned_devices != before.pinned_devices
+                || self.settings.solo != before.solo
+                || self.settings.focus_rules != before.focus_rules
+                || self.settings.mic_ducking != before.mic_ducking
             {
                 send_audio_preferences(&self.audio, &self.settings);
                 self.update_foreground_watch();
             }
-            if (self.settings.hotkeys != self.settings_seen.hotkeys
-                || self.settings.hotkey_step != self.settings_seen.hotkey_step)
+            if (self.settings.hotkeys != before.hotkeys || self.settings.hotkey_step != before.hotkey_step)
                 && let Some(service) = &self.hotkeys
                 && let Err(e) = service.configure(&self.settings.hotkeys, self.settings.hotkey_step)
             {
                 errors.push(e);
             }
-            self.settings_seen = self.settings.clone();
             self.mark_dirty();
             let ctx = ui.ctx().clone();
             self.refresh_look(&ctx);
@@ -967,7 +1066,7 @@ impl eframe::App for MixerApp {
         if import_now {
             self.confirm_import();
         }
-        draw_toasts(ui, &mut self.toasts, &look);
+        self.draw_toasts(ui);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -985,74 +1084,30 @@ impl Drop for MixerApp {
     }
 }
 
-/// Drops every unsaved edit that refers to the settings an import just replaced.
-/// An imported profile may share a name with the one being renamed, so its draft
-/// can't be told apart from the old one and must not carry over.
-fn forget_import_drafts(
-    mixer: &mut mixer::MixerState,
-    hotkeys: &mut HotkeyEditor,
-    presets: &mut crate::ui::presets::PresetEditor,
-) {
-    mixer.forget_drafts();
-    *hotkeys = HotkeyEditor::default();
-    *presets = crate::ui::presets::PresetEditor::default();
-}
-
-/// Applies the egui style unless this exact look and animation preference is
-/// already applied. Returns whether it was applied.
-fn apply_style_if_changed(ctx: &egui::Context, seen: &mut Option<(Look, bool)>, look: Look, animations: bool) -> bool {
-    let key = (look, animations);
-    if *seen == Some(key) {
-        return false;
-    }
-    theme::apply(ctx, &look.p, &look.m, animations);
-    *seen = Some(key);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Density;
 
     #[test]
-    fn an_import_discards_a_rename_draft_even_for_a_profile_of_the_same_name() {
-        use crate::audio::{AudioHandle, AudioSnapshot, preferences::VolumePreset};
-        use crate::ui::presets::{self, PresetEditor};
-        let harness = crate::ui::test_support::Harness::new(Density::Comfortable);
-        let (audio, snapshot) = (AudioHandle::detached(), AudioSnapshot::default());
-        // The imported settings hold a different profile that is also named "Work".
-        let mut imported = Settings {
-            presets: vec![VolumePreset { name: "Work".into(), ..Default::default() }],
-            ..Default::default()
-        };
-        let mut rename_fields = |editor: &mut PresetEditor| {
-            let mut errors = Vec::new();
-            let frame = harness.run(500.0, 900.0, |ui| {
-                presets::show(ui, &harness.look, editor, &mut imported, &snapshot, &audio, &mut errors)
-            });
-            frame.widgets.iter().filter(|w| w.name.starts_with("New name for ")).count()
-        };
-        let mut editor = PresetEditor::default();
-        editor.start_rename_for_test("Work");
-        assert_eq!(rename_fields(&mut editor), 1, "without the reset the draft attaches to the imported profile");
+    fn hidden_toast_time_is_frozen_and_restarts_when_first_shown() {
+        let created = Instant::now();
 
-        let (mut mixer, mut hotkeys) = (mixer::MixerState::default(), HotkeyEditor::default());
-        forget_import_drafts(&mut mixer, &mut hotkeys, &mut editor);
-        assert_eq!(rename_fields(&mut editor), 0, "an import must not keep an old rename draft");
-    }
+        // Queued while hidden: the full duration starts at the reveal.
+        let mut queued_while_hidden = ToastExpiry::new(Duration::from_secs(7));
+        queued_while_hidden.tick(true, created + Duration::from_secs(3600));
+        assert!(
+            !queued_while_hidden.expired(created + Duration::from_secs(3600 + 6)),
+            "a warning queued while hidden must survive a long idle and be displayable on reveal"
+        );
+        assert!(queued_while_hidden.expired(created + Duration::from_secs(3600 + 8)));
 
-    #[test]
-    fn animation_preference_invalidates_the_style_without_a_palette_change() {
-        let h = crate::ui::test_support::Harness::new(Density::Comfortable);
-        let mut seen = None;
-        assert!(apply_style_if_changed(&h.ctx, &mut seen, h.look, true));
-        assert!(h.ctx.global_style().animation_time > 0.0);
-        assert!(apply_style_if_changed(&h.ctx, &mut seen, h.look, false));
-        assert_eq!(h.ctx.global_style().animation_time, 0.0);
-        assert!(!apply_style_if_changed(&h.ctx, &mut seen, h.look, false));
-        assert!(apply_style_if_changed(&h.ctx, &mut seen, h.look, true));
-        assert!(h.ctx.global_style().animation_time > 0.0);
+        // Hidden mid-countdown: the remaining time resumes on reveal.
+        let mut frozen = ToastExpiry::new(Duration::from_secs(7));
+        frozen.tick(true, created);
+        frozen.tick(false, created + Duration::from_secs(3));
+        frozen.tick(true, created + Duration::from_secs(3600));
+        assert!(!frozen.expired(created + Duration::from_secs(3600 + 3)), "7s minus 3s shown = 4s left");
+        assert!(frozen.expired(created + Duration::from_secs(3600 + 5)));
     }
 
     #[test]
@@ -1064,6 +1119,48 @@ mod tests {
     }
 
     #[test]
+    fn repeated_visible_passes_do_not_extend_a_toast() {
+        let created = Instant::now();
+        let mut expiry = ToastExpiry::new(Duration::from_secs(4));
+        expiry.tick(true, created);
+        expiry.tick(true, created + Duration::from_secs(2));
+        assert!(!expiry.expired(created + Duration::from_millis(3900)));
+        assert!(expiry.expired(created + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn a_toast_expired_while_visible_stays_gone_across_hide_and_reveal() {
+        let created = Instant::now();
+        let mut expiry = ToastExpiry::new(Duration::from_secs(4));
+        expiry.tick(true, created);
+        assert!(expiry.expired(created + Duration::from_secs(4)));
+        expiry.tick(false, created + Duration::from_secs(5));
+        expiry.tick(true, created + Duration::from_secs(100));
+        assert!(expiry.expired(created + Duration::from_secs(100)));
+    }
+
+    #[test]
+    fn rejected_backdrop_stays_rejected_until_appearance_or_build_changes() {
+        let key = BackdropRetryKey {
+            glass: true,
+            backdrop: Backdrop::Acrylic,
+            theme: ThemeMode::Dark,
+            dark: true,
+            high_contrast: false,
+            build: 26200,
+        };
+        let mut rejection = BackdropRejection::default();
+        assert!(rejection.may_try(key));
+        rejection.record(key, Applied { glass: false, dark: true, kind: None });
+        assert!(!rejection.may_try(key));
+        assert!(rejection.may_try(BackdropRetryKey { backdrop: Backdrop::Mica, ..key }));
+        assert!(rejection.may_try(BackdropRetryKey { theme: ThemeMode::Light, ..key }));
+        assert!(rejection.may_try(BackdropRetryKey { build: 26201, ..key }));
+        rejection.reset_for(BackdropRetryKey { backdrop: Backdrop::Mica, ..key });
+        assert!(rejection.may_try(key), "returning to the earlier setting should retry");
+    }
+
+    #[test]
     fn window_tracking_ignores_hidden_or_empty_frames_and_marks_real_changes() {
         let mut settings = Settings {
             window: Some(WindowGeometry { x: 100.0, y: 120.0, width: 480.0, height: 720.0 }),
@@ -1071,66 +1168,26 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !record_window_geometry(&mut settings, false, false, Some((200.0, 220.0)), Some((480.0, 720.0))),
+            !record_window_geometry(&mut settings, false, Some((200.0, 220.0)), Some((480.0, 720.0))),
             "hidden windows must not overwrite saved geometry"
         );
         assert!(
-            !record_window_geometry(&mut settings, true, true, Some((0.0, 0.0)), Some((1920.0, 1080.0))),
-            "maximized frames must not overwrite saved normal geometry"
-        );
-        assert!(
-            !record_window_geometry(&mut settings, true, false, Some((200.0, 220.0)), Some((0.0, 720.0))),
+            !record_window_geometry(&mut settings, true, Some((200.0, 220.0)), Some((0.0, 720.0))),
             "minimized/zero-width inner rect must be ignored"
         );
         assert!(
-            record_window_geometry(&mut settings, true, false, Some((100.0, 120.0)), Some((480.0, 720.0))),
+            record_window_geometry(&mut settings, true, Some((100.0, 120.0)), Some((480.0, 720.0))),
             "legacy logical coordinates upgrade to physical once"
         );
         assert!(settings.window_position_physical);
         assert!(
-            !record_window_geometry(&mut settings, true, false, Some((100.2, 120.1)), Some((480.0, 720.0))),
+            !record_window_geometry(&mut settings, true, Some((100.2, 120.1)), Some((480.0, 720.0))),
             "sub-pixel jitter does not dirty settings"
         );
         assert!(
-            record_window_geometry(&mut settings, true, false, Some((140.0, 160.0)), Some((500.0, 740.0))),
+            record_window_geometry(&mut settings, true, Some((140.0, 160.0)), Some((500.0, 740.0))),
             "real move/resize updates geometry"
         );
         assert_eq!(settings.window, Some(WindowGeometry { x: 140.0, y: 160.0, width: 500.0, height: 740.0 }));
-    }
-
-    #[test]
-    fn failed_save_keeps_dirty_state_for_retry_and_toasts_once_per_streak() {
-        let root = std::env::temp_dir().join(format!("glass-mixer-save-retry-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_file(&root);
-        // A regular file where a directory is expected makes SettingsStore::save fail.
-        std::fs::write(&root, b"not a directory").unwrap();
-        let store = SettingsStore::new(&root);
-        let settings = Settings::default();
-        let t0 = Instant::now();
-        let mut dirty_since = Some(t0);
-        let mut error_shown = false;
-
-        let (wait, err) =
-            flush_save_if_due(&store, &settings, &mut dirty_since, &mut error_shown, t0 + SAVE_DEBOUNCE, false);
-        assert!(wait.is_some());
-        assert!(err.is_some(), "first failure surfaces an error toast");
-        assert_eq!(dirty_since, Some(t0 + SAVE_DEBOUNCE), "dirty_since is restored for debounce retry and shutdown");
-        assert!(error_shown);
-
-        // Second consecutive failure retries after debounce but does not re-toast.
-        let t1 = t0 + SAVE_DEBOUNCE * 2;
-        let (_wait, err2) = flush_save_if_due(&store, &settings, &mut dirty_since, &mut error_shown, t1, false);
-        assert!(err2.is_none(), "repeated failure suppresses duplicate toast");
-        assert_eq!(dirty_since, Some(t1));
-
-        // Removing the obstacle lets the next retry succeed and clears both flags.
-        std::fs::remove_file(&root).unwrap();
-        let (wait, err3) = flush_save_if_due(&store, &settings, &mut dirty_since, &mut error_shown, t1, true);
-        assert!(wait.is_none());
-        assert!(err3.is_none());
-        assert!(dirty_since.is_none());
-        assert!(!error_shown);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

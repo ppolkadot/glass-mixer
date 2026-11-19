@@ -106,7 +106,6 @@ pub struct MicDuckingSettings {
     pub release_ms: u16,
     /// Percent of their own volume the targets keep, 0 to 90.
     pub keep_percent: u8,
-    #[serde(deserialize_with = "read_mic_targets")]
     pub targets: Vec<crate::audio::AppKey>,
 }
 
@@ -146,7 +145,7 @@ impl SoloSettings {
     }
 }
 
-/// The interface typeface: the bundled Salted Flutters Polaris, or Windows' Segoe UI.
+/// The interface typeface: the bundled Salted Flutters Polaris, or Google Sans for the "Windows" option.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Typeface {
@@ -342,18 +341,6 @@ fn read_focus_rules<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<FocusRule>, D
 
 fn read_app_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::audio::preferences::AppName>, D::Error> {
     Ok(crate::audio::preferences::normalize_app_names(list_items(d)?))
-}
-
-fn read_mic_targets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<crate::audio::AppKey>, D::Error> {
-    let mut seen = std::collections::HashSet::new();
-    Ok(list_items::<_, crate::audio::AppKey>(d)?
-        .into_iter()
-        .filter_map(|key| {
-            let key = crate::audio::preferences::normalized_key(&key)?;
-            (key != crate::audio::AppKey::System && seen.insert(key.clone())).then_some(key)
-        })
-        .take(64)
-        .collect())
 }
 
 fn lenient_wheel_step<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
@@ -1139,26 +1126,5 @@ mod tests {
         assert_eq!(g.width, MIN_WIDTH);
         assert_eq!(g.height, 4000.0);
         assert!(WindowGeometry { x: f32::NAN, y: 0.0, width: 400.0, height: 400.0 }.sanitized().is_none());
-    }
-
-    #[test]
-    fn mic_ducking_targets_are_normalized_deduplicated_and_capped() {
-        use crate::audio::AppKey;
-        let mut raw = vec![
-            AppKey::System,
-            AppKey::Pid(123),
-            AppKey::Exe(r"C:\Games\GAME.EXE".into()),
-            AppKey::Exe(r"c:\games\game.exe".into()),
-        ];
-        for i in 0..80 {
-            raw.push(AppKey::Exe(format!(r"C:\Apps\app{i}.exe")));
-        }
-        let targets_json = serde_json::to_string(&raw).unwrap();
-        let json = format!(r#"{{"version":4,"mic_ducking":{{"targets":{targets_json}}}}}"#);
-        let parsed: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.mic_ducking.targets.len(), 64);
-        assert_eq!(parsed.mic_ducking.targets[0], AppKey::Exe(r"c:\games\game.exe".into()));
-        assert!(!parsed.mic_ducking.targets.contains(&AppKey::System));
-        assert!(!parsed.mic_ducking.targets.contains(&AppKey::Pid(123)));
     }
 }
